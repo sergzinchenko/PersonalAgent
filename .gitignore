@@ -1,0 +1,6 @@
+/.apt_generated/
+/build/
+.project
+.tssapinfo 
+.classpath 
+/.settings/

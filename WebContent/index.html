@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent — Personal Assistant</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<div id="app">
+  <!-- HEADER -->
+  <header id="header">
+    <div class="logo">⚡ AI Agent</div>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="chat">💬 Чаты</button>
+      <button class="tab-btn" data-tab="tools">🔧 Tools</button>
+      <button class="tab-btn" data-tab="skills">🧩 Skills</button>
+      <button class="tab-btn" data-tab="prompts">📋 Промпты</button>
+    </div>
+    <span id="connection-status"><span class="status-dot offline"></span></span>
+    <button id="settings-btn" title="Настройки">⚙</button>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <input type="text" id="sidebar-search" placeholder="Поиск...">
+    </div>
+    <div class="sidebar-list" id="sidebar-list"></div>
+    <div class="sidebar-footer">
+      <button class="btn btn-primary btn-block" id="sidebar-new-btn">+ Создать</button>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main id="main">
+    <!-- CHAT PANEL -->
+    <div class="panel active" id="panel-chat">
+      <div id="chat-messages">
+        <div class="empty-state">
+          <div class="icon">💬</div>
+          <div class="text">Начните новый чат или выберите существующий</div>
+        </div>
+      </div>
+      <div id="chat-input-area">
+        <div class="chat-toolbar" id="chat-toolbar"></div>
+        <div id="chat-input-row">
+          <textarea id="chat-input" placeholder="Введите сообщение... (Shift+Enter — новая строка)" rows="1"></textarea>
+          <button id="send-btn" title="Отправить">▶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TOOLS PANEL -->
+    <div class="panel" id="panel-tools">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">MCP Tools</h3>
+        <button class="btn btn-primary btn-sm" id="add-tool-btn">+ Добавить Tool</button>
+        <button class="btn btn-secondary btn-sm" id="add-mcp-server-btn">+ MCP Server</button>
+      </div>
+      <div class="tools-grid" id="tools-grid"></div>
+    </div>
+
+    <!-- SKILLS PANEL -->
+    <div class="panel" id="panel-skills">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">Skills</h3>
+        <button class="btn btn-primary btn-sm" id="add-skill-btn">+ Новый Skill</button>
+      </div>
+      <div class="skills-container" id="skills-container"></div>
+    </div>
+
+    <!-- PROMPTS PANEL -->
+    <div class="panel" id="panel-prompts">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">Библиотека промптов</h3>
+        <button class="btn btn-primary btn-sm" id="add-prompt-btn">+ Новый промпт</button>
+      </div>
+      <div class="prompts-container" id="prompts-container"></div>
+    </div>
+  </main>
+</div>
+
+<!-- MODALS CONTAINER -->
+<div id="modals"></div>
+
+<script src="js/db.js"></script>
+<script src="js/llm-gateway.js"></script>
+<script src="js/tools-engine.js"></script>
+<script src="js/skills-engine.js"></script>
+<script src="js/prompts-library.js"></script>
+<script src="js/markdown.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/agent.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
