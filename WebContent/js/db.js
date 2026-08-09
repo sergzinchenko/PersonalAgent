@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 4) {
+  constructor(name = 'ai_agent_db', version = 6) {   
     this.name = name;
     this.version = version;
     this.db = null;
@@ -34,6 +34,11 @@ class AgentDB {
         }
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings', { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains('folders')) {
+          const s = db.createObjectStore('folders', { keyPath: 'id' });
+          s.createIndex('type', 'type');
+          s.createIndex('parentId', 'parentId');
         }
       };
       req.onsuccess = (e) => { this.db = e.target.result; resolve(this.db); };

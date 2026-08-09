@@ -8,6 +8,7 @@ class AIAgent {
     this.tools = null;
     this.skills = null;
     this.prompts = null;
+    this.folders = null; 
     this.ui = null;
   }
 
@@ -19,6 +20,7 @@ class AIAgent {
     this.tools = new ToolsEngine(this.db);
     this.skills = new SkillsEngine(this.db);
     this.prompts = new PromptsLibrary(this.db);
+    this.folders = new FoldersEngine(this.db);
 
     // 3. Load settings
     const settings = await this.db.get('settings', 'llm');

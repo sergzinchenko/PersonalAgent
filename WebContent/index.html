@@ -56,28 +56,31 @@
     <div class="panel" id="panel-tools">
       <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
         <h3 style="flex:1;">MCP Tools</h3>
+        <button class="btn btn-secondary btn-sm" id="add-tool-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-tool-btn">+ Добавить Tool</button>
         <button class="btn btn-secondary btn-sm" id="add-mcp-server-btn">+ MCP Server</button>
       </div>
-      <div class="tools-grid" id="tools-grid"></div>
+      <div class="tools-grid" id="tools-grid"></div>   
     </div>
 
     <!-- SKILLS PANEL -->
     <div class="panel" id="panel-skills">
       <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
         <h3 style="flex:1;">Skills</h3>
+        <button class="btn btn-secondary btn-sm" id="add-skill-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-skill-btn">+ Новый Skill</button>
       </div>
-      <div class="skills-container" id="skills-container"></div>
+      <div class="skills-container" id="skills-container"></div>  
     </div>
 
     <!-- PROMPTS PANEL -->
     <div class="panel" id="panel-prompts">
       <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
         <h3 style="flex:1;">Библиотека промптов</h3>
+        <button class="btn btn-secondary btn-sm" id="add-prompt-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-prompt-btn">+ Новый промпт</button>
       </div>
-      <div class="prompts-container" id="prompts-container"></div>
+      <div class="prompts-container" id="prompts-container"></div>   
     </div>
   </main>
 </div>
@@ -94,5 +97,6 @@
 <script src="js/ui.js"></script>
 <script src="js/agent.js"></script>
 <script src="js/app.js"></script>
+<script src="js/folders-engine.js"></script>
 </body>
 </html>

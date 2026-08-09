@@ -7,6 +7,7 @@ class UI {
     this.currentTab = 'chat';
     this.currentChatId = null;
     this.isStreaming = false;
+    this.folderSelection = { tools: null, skills: null, prompts: null }; 
     this._bindGlobalEvents();
   }
 
@@ -37,6 +38,10 @@ class UI {
     document.getElementById('add-mcp-server-btn').addEventListener('click', () => this.showAddMCPServerModal());
     document.getElementById('add-skill-btn').addEventListener('click', () => this.showAddSkillModal());
     document.getElementById('add-prompt-btn').addEventListener('click', () => this.showAddPromptModal());
+        // Кнопки создания папок
+    document.getElementById('add-tool-folder-btn').addEventListener('click', () => this._createFolder('tools'));
+    document.getElementById('add-skill-folder-btn').addEventListener('click', () => this._createFolder('skills'));
+    document.getElementById('add-prompt-folder-btn').addEventListener('click', () => this._createFolder('prompts'));
   }
 
   // === Tab switching ===
@@ -74,29 +79,211 @@ class UI {
           this.loadChat(item.dataset.id);
         });
       });
-
       list.querySelectorAll('.delete-btn').forEach(btn => {
         btn.addEventListener('click', async (e) => {
           e.stopPropagation();
           await this.deleteChat(btn.dataset.delete);
         });
       });
-    } else if (this.currentTab === 'prompts') {
-      const prompts = await this.agent.prompts.loadPrompts();
-      const filtered = prompts.filter(p => !search || p.title.toLowerCase().includes(search));
-      list.innerHTML = filtered.map(p => `
-        <div class="sidebar-item" data-id="${p.id}">
-          <span class="title">${this._escHtml(p.title)}</span>
-          <span class="meta">${p.category}</span>
-        </div>
-      `).join('');
-
-      list.querySelectorAll('.sidebar-item').forEach(item => {
-        item.addEventListener('click', () => this.usePrompt(item.dataset.id));
-      });
+    } else if (['tools', 'skills', 'prompts'].includes(this.currentTab)) {
+      await this._renderSidebarTree(this.currentTab);
     } else {
       list.innerHTML = '';
     }
+  }
+
+  // === Дерево папок в сайдбаре ===
+  async _renderSidebarTree(type) {
+    const list = document.getElementById('sidebar-list');
+    const search = document.getElementById('sidebar-search').value.toLowerCase();
+    const folders = await this.agent.folders.all(type);
+
+    const byParent = {};
+    folders.forEach(f => { const k = f.parentId || 'root'; (byParent[k] = byParent[k] || []).push(f); });
+
+    const selected = this.folderSelection[type];
+
+    const build = (parentId) => {
+      const key = parentId || 'root';
+      const children = (byParent[key] || []).slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .filter(f => !search || f.name.toLowerCase().includes(search));
+      if (!children.length) return '';
+      let html = '<div class="tree-node-children">';
+      for (const f of children) {
+        const sel = f.id === selected ? 'selected' : '';
+        const hasKids = (byParent[f.id] || []).length > 0;
+        html += `
+          <div class="tree-node">
+            <div class="tree-node-row ${sel}" data-folder-id="${f.id}">
+              <span class="tw-toggle">${hasKids ? '▾' : '•'}</span>
+              <span class="tw-name">📁 ${this._escHtml(f.name)}</span>
+              <span class="tw-actions">
+                <button data-add-sub="${f.id}" title="Подпапка">＋</button>
+                <button data-ren="${f.id}" title="Переименовать">✏</button>
+                <button data-del="${f.id}" title="Удалить">✕</button>
+              </span>
+            </div>
+            ${build(f.id)}
+          </div>`;
+      }
+      html += '</div>';
+      return html;
+    };
+
+    const rootSel = selected === null ? 'selected' : '';
+    list.innerHTML = `
+      <div class="tree-nav">
+        <div class="tree-node">
+          <div class="tree-node-row ${rootSel}" data-folder-id="">
+            <span class="tw-toggle">▾</span>
+            <span class="tw-name">🏠 Корень</span>
+            <span class="tw-actions"><button data-add-sub="" title="Новая папка">＋</button></span>
+          </div>
+          ${build(null)}
+        </div>
+      </div>`;
+
+    this._bindSidebarTree(type);
+  }
+
+  _bindSidebarTree(type) {
+    const list = document.getElementById('sidebar-list');
+
+    // Выбор папки / сворачивание
+    list.querySelectorAll('.tree-node-row').forEach(row => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.tw-actions')) return;
+
+        if (e.target.classList.contains('tw-toggle')) {
+          const kids = row.nextElementSibling;
+          if (kids && kids.classList.contains('tree-node-children')) {
+            const collapsed = kids.classList.toggle('collapsed');
+            e.target.textContent = collapsed ? '▸' : (kids.children.length ? '▾' : '•');
+          }
+          return;
+        }
+
+        this.folderSelection[type] = row.dataset.folderId || null;
+        this.refreshSidebar();
+        this._refreshPanel(type);
+      });
+    });
+
+    // Действия с папками
+    list.querySelectorAll('[data-add-sub]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const name = prompt('Название папки:');
+      if (!name) return;
+      const f = await this.agent.folders.create(type, name, b.dataset.addSub || null);
+      this.folderSelection[type] = f.id;
+      await this.refreshSidebar();
+      this._refreshPanel(type);
+    }));
+
+    list.querySelectorAll('[data-ren]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const f = await this.agent.db.get('folders', b.dataset.ren);
+      const name = prompt('Новое название папки:', f ? f.name : '');
+      if (!name) return;
+      await this.agent.folders.rename(b.dataset.ren, name);
+      await this.refreshSidebar();
+    }));
+
+    list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Удалить папку? Вложенные элементы и подпапки переместятся на уровень выше.')) return;
+      const fid = b.dataset.del;
+      const folder = await this.agent.db.get('folders', fid);
+      await this.agent.folders.remove(fid, type);
+      if (this.folderSelection[type] === fid) this.folderSelection[type] = folder?.parentId || null;
+      await this.refreshSidebar();
+      this._refreshPanel(type);
+    }));
+
+    // Drag & Drop
+    list.querySelectorAll('.tree-node-row').forEach(row => {
+      const fid = row.dataset.folderId; // '' для корня
+
+      if (fid) {
+        row.setAttribute('draggable', 'true');
+        row.addEventListener('dragstart', (e) => {
+          e.stopPropagation();
+          e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'folder', id: fid }));
+          e.dataTransfer.effectAllowed = 'move';
+        });
+      }
+
+      row.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); row.classList.add('drop-hover'); });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-hover'));
+      row.addEventListener('drop', async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        row.classList.remove('drop-hover');
+
+        let data;
+        try { data = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
+        const target = fid || null;
+
+        if (data.kind === 'item') {
+          const rec = await this.agent.db.get(type, data.id);
+          if (rec) { rec.parentId = target; await this.agent.db.put(type, rec); }
+        } else if (data.kind === 'folder') {
+          await this.agent.folders.move(data.id, target);
+        }
+        await this.refreshSidebar();
+        this._refreshPanel(type);
+      });
+    });
+  }
+
+  async _createFolder(type) {
+    const name = prompt('Название новой папки:');
+    if (!name) return;
+    const f = await this.agent.folders.create(type, name, this.folderSelection[type] || null);
+    this.folderSelection[type] = f.id;
+    await this.refreshSidebar();
+    this._refreshPanel(type);
+  }
+
+  _refreshPanel(type) {
+    if (type === 'tools') return this.renderTools();
+    if (type === 'skills') return this.renderSkills();
+    if (type === 'prompts') return this.renderPrompts();
+  }
+
+  async _folderPath(type, id) {
+    if (!id) return '🏠 Корень';
+    const folders = await this.agent.folders.all(type);
+    const map = {}; folders.forEach(f => map[f.id] = f);
+    const parts = [];
+    let cur = map[id];
+    while (cur) { parts.unshift('📁 ' + this._escHtml(cur.name)); cur = cur.parentId ? map[cur.parentId] : null; }
+    return '🏠 Корень / ' + parts.join(' / ');
+  }
+
+  // Плоский рендер карточек выбранной папки + DnD-источник
+  async _renderPanelItems(type, mount, allItems, renderItemCard, bindItemEvents) {
+    if (!mount) return;
+    const sel = this.folderSelection[type];
+    const items = allItems.filter(it => (it.parentId || null) === sel);
+    const crumb = `<div class="folder-breadcrumb">${await this._folderPath(type, sel)}</div>`;
+
+    const grid = items.length
+      ? `<div class="tree-items">${items.map(it =>
+          `<div class="tree-item-wrap" draggable="true" data-item-id="${it.id}">${renderItemCard(it)}</div>`
+        ).join('')}</div>`
+      : `<div class="tree-empty">В этой папке пусто. Нажмите «+ Создать» — элемент добавится сюда.</div>`;
+
+    mount.innerHTML = crumb + grid;
+
+    bindItemEvents(mount);
+    mount.querySelectorAll('[data-item-id]').forEach(el => {
+      el.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'item', id: el.dataset.itemId }));
+        e.dataTransfer.effectAllowed = 'move';
+      });
+    });
   }
 
   _handleNewItem() {
@@ -343,7 +530,7 @@ class UI {
   }
 
   // === Tools ===
-  // === Tools ===
+  /*
   async renderTools() {
     const tools = await this.agent.tools.loadTools();
     const grid = document.getElementById('tools-grid');
@@ -385,8 +572,9 @@ class UI {
       });
     });
   }
-
+*/
   // === Skills ===
+  /*
   async renderSkills() {
     const skills = await this.agent.skills.loadSkills();
     const container = document.getElementById('skills-container');
@@ -428,8 +616,10 @@ class UI {
       });
     });
   }
-
+*/
   // === Prompts ===
+
+  /*
   async renderPrompts() {
     const prompts = await this.agent.prompts.loadPrompts();
     const categories = await this.agent.prompts.getCategories();
@@ -474,7 +664,7 @@ class UI {
       });
     });
   }
-
+*/
   async usePrompt(promptId) {
     const prompt = await this.agent.db.get('prompts', promptId);
     if (!prompt) return;
@@ -823,6 +1013,7 @@ class UI {
           handlerCode: document.getElementById('t_handler').value,
           enabled: tool?.enabled ?? true,
           builtin: false,
+          parentId: isEdit ? (tool?.parentId ?? null) : (this.folderSelection.tools || null),
         };
         await this.agent.db.put('tools', toolObj);
         this.agent.tools.unregisterHandler(id);   // ← сбрасываем stale-handler из registry       
@@ -943,6 +1134,7 @@ class UI {
           category: document.getElementById('sk_cat').value,
           systemPrompt: document.getElementById('sk_prompt').value.trim(),
           enabled: skill?.enabled ?? false,
+          parentId: editId ? (skill?.parentId ?? null) : (this.folderSelection.skills || null),
         };
         await this.agent.db.put('skills', obj);
         this.renderSkills();
@@ -991,6 +1183,7 @@ class UI {
           content,
           variables,
           createdAt: prompt?.createdAt || Date.now(),
+          parentId: editId ? (prompt?.parentId ?? null) : (this.folderSelection.prompts || null),
         };
         await this.agent.db.put('prompts', obj);
         this.renderPrompts();
@@ -1006,5 +1199,252 @@ class UI {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+  }
+
+    // === Универсальный рендер иерархии (папки + элементы + DnD) ===
+  async _renderHierarchy(type, mount, items, renderItemCard, bindItemEvents, refresh) {
+    if (!mount) {
+      console.warn('[hierarchy] контейнер для "' + type + '" не найден в DOM');
+      return;
+    }
+    const folders = await this.agent.folders.all(type);  
+
+    const byParent = {};
+    folders.forEach(f => { const k = f.parentId || 'root'; (byParent[k] = byParent[k] || []).push(f); });
+
+    const itemsByParent = {};
+    items.forEach(it => { const k = it.parentId || 'root'; (itemsByParent[k] = itemsByParent[k] || []).push(it); });
+
+    const esc = (s) => this._escHtml(s);
+
+    const buildChildren = (parentId) => {
+      const key = parentId || 'root';
+      const childFolders = (byParent[key] || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+      const childItems = itemsByParent[key] || [];
+      let html = '';
+
+      for (const f of childFolders) {
+        html += `
+          <div class="tree-folder" data-folder-id="${f.id}" data-drop-folder="${f.id}" draggable="true">
+            <div class="tree-folder-header">
+              <span class="tree-toggle">▾</span>
+              <span class="tree-folder-name">📁 ${esc(f.name)}</span>
+              <span class="tree-folder-actions">
+                <button data-add-subfolder="${f.id}" title="Подпапка">＋</button>
+                <button data-rename-folder="${f.id}" title="Переименовать">✏</button>
+                <button data-del-folder="${f.id}" title="Удалить">✕</button>
+              </span>
+            </div>
+            <div class="tree-folder-body">${buildChildren(f.id)}</div>
+          </div>`;
+      }
+
+      if (childItems.length) {
+        html += `<div class="tree-items">` +
+          childItems.map(it => `<div class="tree-item-wrap" draggable="true" data-item-id="${it.id}">${renderItemCard(it)}</div>`).join('') +
+          `</div>`;
+      }
+
+      return html;
+    };
+
+    const rootHtml = buildChildren(null);
+    mount.innerHTML = `<div class="tree-root" data-drop-folder="root">${rootHtml || '<div class="tree-empty">Пусто. Создайте папку или перетащите сюда элементы.</div>'}</div>`;
+
+    bindItemEvents(mount);
+    this._bindTree(type, mount, refresh);
+  }
+
+  // === Привязка событий дерева: DnD + действия с папками ===
+  _bindTree(type, mount, refresh) {
+    const store = type; // 'tools' | 'skills' | 'prompts'
+
+    // --- drag start: элементы ---
+    mount.querySelectorAll('[data-item-id]').forEach(el => {
+      el.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'item', id: el.dataset.itemId }));
+        e.dataTransfer.effectAllowed = 'move';
+      });
+    });
+
+    // --- drag start: папки ---
+    mount.querySelectorAll('.tree-folder').forEach(el => {
+      el.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'folder', id: el.dataset.folderId }));
+        e.dataTransfer.effectAllowed = 'move';
+      });
+    });
+
+    // --- зоны сброса (папки + корень) ---
+    mount.querySelectorAll('[data-drop-folder]').forEach(zone => {
+      zone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.add('drop-hover');
+      });
+      zone.addEventListener('dragleave', (e) => {
+        e.stopPropagation();
+        zone.classList.remove('drop-hover');
+      });
+      zone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.remove('drop-hover');
+
+        let data;
+        try { data = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
+
+        const targetFolder = zone.dataset.dropFolder === 'root' ? null : zone.dataset.dropFolder;
+
+        if (data.kind === 'item') {
+          const rec = await this.agent.db.get(store, data.id);
+          if (rec) { rec.parentId = targetFolder; await this.agent.db.put(store, rec); }
+        } else if (data.kind === 'folder') {
+          await this.agent.folders.move(data.id, targetFolder);
+        }
+        await refresh();
+      });
+    });
+
+    // --- сворачивание/разворачивание ---
+    mount.querySelectorAll('.tree-folder-header .tree-toggle').forEach(t => {
+      t.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const body = t.closest('.tree-folder').querySelector('.tree-folder-body');
+        const collapsed = body.classList.toggle('collapsed');
+        t.textContent = collapsed ? '▸' : '▾';
+      });
+    });
+
+    // --- действия с папками ---
+    mount.querySelectorAll('[data-add-subfolder]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const name = prompt('Название подпапки:');
+      if (!name) return;
+      await this.agent.folders.create(type, name, b.dataset.addSubfolder);
+      await refresh();
+    }));
+
+    mount.querySelectorAll('[data-rename-folder]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const f = await this.agent.db.get('folders', b.dataset.renameFolder);
+      const name = prompt('Новое название папки:', f ? f.name : '');
+      if (!name) return;
+      await this.agent.folders.rename(b.dataset.renameFolder, name);
+      await refresh();
+    }));
+
+    mount.querySelectorAll('[data-del-folder]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Удалить папку? Вложенные элементы переместятся на уровень выше.')) return;
+      await this.agent.folders.remove(b.dataset.delFolder, store);
+      await refresh();
+    }));
+  }
+
+  async _createRootFolder(type, refresh) {
+    const name = prompt('Название новой папки:');
+    if (!name) return;
+    await this.agent.folders.create(type, name, null);
+    await refresh();
+  }
+
+   async renderTools() {
+    const tools = await this.agent.tools.loadTools();
+    const mount = document.getElementById('tools-grid');
+
+    const renderCard = (t) => `
+      <div class="tool-card" data-id="${t.id}">
+        <div class="tool-header">
+          <span class="tool-name">${this._escHtml(t.name)}</span>
+          <label class="toggle-switch">
+            <input type="checkbox" ${t.enabled ? 'checked' : ''} data-toggle="${t.id}">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="tool-desc">${this._escHtml(t.description)}</div>
+        <div class="tool-params">${this._escHtml(JSON.stringify(t.parameters, null, 2))}</div>
+        ${!t.builtin ? `<div style="margin-top:12px; display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" data-edit-tool="${t.id}">✏ Редактировать</button>
+          <button class="btn btn-danger btn-sm" data-del-tool="${t.id}">Удалить</button>
+        </div>` : ''}
+      </div>`;
+
+    const bind = (scope) => {
+      scope.querySelectorAll('[data-toggle]').forEach(el => el.addEventListener('change', async () => {
+        const tool = await this.agent.db.get('tools', el.dataset.toggle);
+        tool.enabled = el.checked; await this.agent.db.put('tools', tool);
+      }));
+      scope.querySelectorAll('[data-edit-tool]').forEach(el => el.addEventListener('click', () => this.showAddToolModal(el.dataset.editTool)));
+      scope.querySelectorAll('[data-del-tool]').forEach(el => el.addEventListener('click', async () => {
+        await this.agent.db.delete('tools', el.dataset.delTool); this.renderTools();
+      }));
+    };
+
+    await this._renderPanelItems('tools', mount, tools, renderCard, bind);
+  }
+
+  async renderSkills() {
+    const skills = await this.agent.skills.loadSkills();
+    const mount = document.getElementById('skills-container');
+
+    const renderCard = (s) => `
+      <div class="tool-card" data-id="${s.id}">
+        <div class="tool-header">
+          <span class="tool-name">${s.icon} ${this._escHtml(s.name)}</span>
+          <label class="toggle-switch">
+            <input type="checkbox" ${s.enabled ? 'checked' : ''} data-skill-toggle="${s.id}">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="tool-desc">${this._escHtml(s.description)}</div>
+        <div class="tool-params" style="white-space:pre-wrap">${this._escHtml(s.systemPrompt)}</div>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+          <button class="btn btn-secondary btn-sm" data-edit-skill="${s.id}">✏ Редактировать</button>
+          <button class="btn btn-danger btn-sm" data-del-skill="${s.id}">Удалить</button>
+        </div>
+      </div>`;
+
+    const bind = (scope) => {
+      scope.querySelectorAll('[data-skill-toggle]').forEach(el => el.addEventListener('change', async () => {
+        const skill = await this.agent.db.get('skills', el.dataset.skillToggle);
+        skill.enabled = el.checked; await this.agent.db.put('skills', skill);
+      }));
+      scope.querySelectorAll('[data-edit-skill]').forEach(el => el.addEventListener('click', () => this.showAddSkillModal(el.dataset.editSkill)));
+      scope.querySelectorAll('[data-del-skill]').forEach(el => el.addEventListener('click', async () => {
+        await this.agent.db.delete('skills', el.dataset.delSkill); this.renderSkills();
+      }));
+    };
+
+    await this._renderPanelItems('skills', mount, skills, renderCard, bind);
+  }
+
+  async renderPrompts() {
+    const prompts = await this.agent.prompts.loadPrompts();
+    const mount = document.getElementById('prompts-container');
+
+    const renderCard = (p) => `
+      <div class="prompt-card" data-prompt-id="${p.id}">
+        <div class="prompt-title">${this._escHtml(p.title)}</div>
+        <div class="prompt-preview">${this._escHtml(p.content)}</div>
+        <div class="prompt-tags">${(p.tags || []).map(t => `<span class="tag">${this._escHtml(t)}</span>`).join('')}</div>
+        <div style="margin-top:8px; display:flex; gap:4px;">
+          <button class="btn btn-primary btn-sm" data-use-prompt="${p.id}">Использовать</button>
+          <button class="btn btn-secondary btn-sm" data-edit-prompt="${p.id}">✏</button>
+          <button class="btn btn-danger btn-sm" data-del-prompt="${p.id}">✕</button>
+        </div>
+      </div>`;
+
+    const bind = (scope) => {
+      scope.querySelectorAll('[data-use-prompt]').forEach(el => el.addEventListener('click', () => this.usePrompt(el.dataset.usePrompt)));
+      scope.querySelectorAll('[data-edit-prompt]').forEach(el => el.addEventListener('click', () => this.showAddPromptModal(el.dataset.editPrompt)));
+      scope.querySelectorAll('[data-del-prompt]').forEach(el => el.addEventListener('click', async () => {
+        await this.agent.db.delete('prompts', el.dataset.delPrompt); this.renderPrompts();
+      }));
+    };
+
+    await this._renderPanelItems('prompts', mount, prompts, renderCard, bind);
   }
 }
