@@ -7,7 +7,10 @@ class UI {
     this.currentTab = 'chat';
     this.currentChatId = null;
     this.isStreaming = false;
-    this.folderSelection = { tools: null, skills: null, prompts: null }; 
+    this.folderSelection = { tools: null, skills: null, prompts: null };
+    // Защита от бесконечной рекурсии: сколько раз подряд _generateResponse()
+    // может сам себя вызвать из-за цепочки tool_calls в одном ответе пользователя.
+    this.maxToolSteps = 25;
     this._bindGlobalEvents();
   }
 
@@ -409,10 +412,23 @@ class UI {
     await this._generateResponse();
   }
 
-  async _generateResponse() {
+  async _generateResponse(depth = 0) {
+    const container = document.getElementById('chat-messages');
+
+    // Защита от бесконечного цикла tool-calling: модель может зациклиться
+    // на вызовах инструментов (особенно локальные/слабые модели). Без этой
+    // проверки рекурсия по result.tool_calls ниже была бы неограниченной.
+    if (depth >= this.maxToolSteps) {
+      container.insertAdjacentHTML('beforeend',
+        `<div class="message system">⚠️ Достигнут лимит автоматических шагов с вызовом инструментов (${this.maxToolSteps} подряд в рамках одного ответа). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.</div>`);
+      container.scrollTop = container.scrollHeight;
+      this.isStreaming = false;
+      document.getElementById('send-btn').disabled = false;
+      return;
+    }
+
     this.isStreaming = true;
     document.getElementById('send-btn').disabled = true;
-    const container = document.getElementById('chat-messages');
 
     container.insertAdjacentHTML('beforeend', '<div class="typing-indicator" id="typing"><span></span><span></span><span></span></div>');
     container.scrollTop = container.scrollHeight;
@@ -494,7 +510,7 @@ class UI {
 
         this.isStreaming = false;
         document.getElementById('send-btn').disabled = false;
-        await this._generateResponse();
+        await this._generateResponse(depth + 1);
         return;
       }
 
@@ -529,142 +545,6 @@ class UI {
     this.refreshSidebar();
   }
 
-  // === Tools ===
-  /*
-  async renderTools() {
-    const tools = await this.agent.tools.loadTools();
-    const grid = document.getElementById('tools-grid');
-
-    grid.innerHTML = tools.map(t => `
-      <div class="tool-card" data-id="${t.id}">
-        <div class="tool-header">
-          <span class="tool-name">${this._escHtml(t.name)}</span>
-          <label class="toggle-switch">
-            <input type="checkbox" ${t.enabled ? 'checked' : ''} data-toggle="${t.id}">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="tool-desc">${this._escHtml(t.description)}</div>
-        <div class="tool-params">${this._escHtml(JSON.stringify(t.parameters, null, 2))}</div>
-        ${!t.builtin ? `<div style="margin-top:12px; display:flex; gap:8px;">
-          <button class="btn btn-secondary btn-sm" data-edit-tool="${t.id}">✏ Редактировать</button>
-          <button class="btn btn-danger btn-sm" data-del-tool="${t.id}">Удалить</button>
-        </div>` : ''}
-      </div>
-    `).join('');
-
-    grid.querySelectorAll('[data-toggle]').forEach(el => {
-      el.addEventListener('change', async () => {
-        const tool = await this.agent.db.get('tools', el.dataset.toggle);
-        tool.enabled = el.checked;
-        await this.agent.db.put('tools', tool);
-      });
-    });
-
-    grid.querySelectorAll('[data-edit-tool]').forEach(el => {
-      el.addEventListener('click', () => this.showAddToolModal(el.dataset.editTool));
-    });
-
-    grid.querySelectorAll('[data-del-tool]').forEach(el => {
-      el.addEventListener('click', async () => {
-        await this.agent.db.delete('tools', el.dataset.delTool);
-        this.renderTools();
-      });
-    });
-  }
-*/
-  // === Skills ===
-  /*
-  async renderSkills() {
-    const skills = await this.agent.skills.loadSkills();
-    const container = document.getElementById('skills-container');
-
-    container.innerHTML = `<div class="tools-grid">${skills.map(s => `
-      <div class="tool-card" data-id="${s.id}">
-        <div class="tool-header">
-          <span class="tool-name">${s.icon} ${this._escHtml(s.name)}</span>
-          <label class="toggle-switch">
-            <input type="checkbox" ${s.enabled ? 'checked' : ''} data-skill-toggle="${s.id}">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="tool-desc">${this._escHtml(s.description)}</div>
-        <div class="tool-params" style="white-space:pre-wrap">${this._escHtml(s.systemPrompt)}</div>
-        <div style="margin-top:12px; display:flex; gap:8px;">
-          <button class="btn btn-secondary btn-sm" data-edit-skill="${s.id}">✏ Редактировать</button>
-          <button class="btn btn-danger btn-sm" data-del-skill="${s.id}">Удалить</button>
-        </div>
-      </div>
-    `).join('')}</div>`;
-
-    container.querySelectorAll('[data-skill-toggle]').forEach(el => {
-      el.addEventListener('change', async () => {
-        const skill = await this.agent.db.get('skills', el.dataset.skillToggle);
-        skill.enabled = el.checked;
-        await this.agent.db.put('skills', skill);
-      });
-    });
-
-    container.querySelectorAll('[data-edit-skill]').forEach(el => {
-      el.addEventListener('click', () => this.showAddSkillModal(el.dataset.editSkill));
-    });
-
-    container.querySelectorAll('[data-del-skill]').forEach(el => {
-      el.addEventListener('click', async () => {
-        await this.agent.db.delete('skills', el.dataset.delSkill);
-        this.renderSkills();
-      });
-    });
-  }
-*/
-  // === Prompts ===
-
-  /*
-  async renderPrompts() {
-    const prompts = await this.agent.prompts.loadPrompts();
-    const categories = await this.agent.prompts.getCategories();
-    const container = document.getElementById('prompts-container');
-
-    const catLabels = { all: '📁 Все', development: '💻 Разработка', content: '✍️ Контент', analysis: '📊 Анализ', learning: '📚 Обучение' };
-
-    container.innerHTML = `
-      <div class="prompt-categories">
-        ${categories.map(c => `<span class="chip active" data-cat="${c}">${catLabels[c] || c}</span>`).join('')}
-      </div>
-      <div class="prompt-grid">
-        ${prompts.map(p => `
-          <div class="prompt-card" data-prompt-id="${p.id}">
-            <div class="prompt-title">${this._escHtml(p.title)}</div>
-            <div class="prompt-preview">${this._escHtml(p.content)}</div>
-            <div class="prompt-tags">
-              ${(p.tags || []).map(t => `<span class="tag">${this._escHtml(t)}</span>`).join('')}
-            </div>
-            <div style="margin-top:8px; display:flex; gap:4px;">
-              <button class="btn btn-primary btn-sm" data-use-prompt="${p.id}">Использовать</button>
-              <button class="btn btn-secondary btn-sm" data-edit-prompt="${p.id}">✏</button>
-              <button class="btn btn-danger btn-sm" data-del-prompt="${p.id}">✕</button>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `;
-
-    container.querySelectorAll('[data-use-prompt]').forEach(el => {
-      el.addEventListener('click', () => this.usePrompt(el.dataset.usePrompt));
-    });
-
-    container.querySelectorAll('[data-edit-prompt]').forEach(el => {
-      el.addEventListener('click', () => this.showAddPromptModal(el.dataset.editPrompt));
-    });
-
-    container.querySelectorAll('[data-del-prompt]').forEach(el => {
-      el.addEventListener('click', async () => {
-        await this.agent.db.delete('prompts', el.dataset.delPrompt);
-        this.renderPrompts();
-      });
-    });
-  }
-*/
   async usePrompt(promptId) {
     const prompt = await this.agent.db.get('prompts', promptId);
     if (!prompt) return;
@@ -698,7 +578,8 @@ class UI {
 
   // ──────────────────────────────────────────────
   //  showSettingsModal — вызывается с modal: true,
-  //  чтобы клик по оверлею НЕ закрывал окно
+  //  чтобы клик по оверлею НЕ закрывал окно.
+  //  Настройки сгруппированы по вкладкам: Подключение / Модель / Журналирование.
   // ──────────────────────────────────────────────
   showSettingsModal() {
     const llm = this.agent.llm;
@@ -707,69 +588,107 @@ class UI {
     const customDisplay = llm.authType === 'custom' ? '' : 'display:none;';
     const bearerDisplay = llm.authType !== 'custom' ? '' : 'display:none;';
 
-    this._showModal('⚙ Настройки', '\
-      <div class="form-group">\
-        <label>API URL (OpenAI-compatible)</label>\
-        <input id="s_url" value="' + this._escHtml(llm.apiUrl) + '" placeholder="https://api.example.com/v1">\
-      </div>\
-      \
-      <div class="form-group">\
-        <label>Способ авторизации</label>\
-        <div style="display:flex;gap:16px;margin-top:4px;">\
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-primary);">\
-            <input type="radio" name="auth_type" value="bearer" ' + isBearerChecked + ' style="width:auto;"> Стандартный OpenAI (Bearer)\
-          </label>\
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-primary);">\
-            <input type="radio" name="auth_type" value="custom" ' + isCustomChecked + ' style="width:auto;"> Нестандартный заголовок\
-          </label>\
-        </div>\
-      </div>\
-      \
-      <div id="auth_bearer_section" style="' + bearerDisplay + '">\
-        <div class="form-group">\
-          <label>API Key</label>\
-          <input id="s_key" type="password" value="' + this._escHtml(llm.apiKey) + '" placeholder="sk-...">\
-        </div>\
-      </div>\
-      \
-      <div id="auth_custom_section" style="' + customDisplay + '">\
-        <div class="form-group">\
-          <label>Имя HTTP заголовка</label>\
-          <input id="s_custom_header" value="' + this._escHtml(llm.customHeaderName) + '" placeholder="X-API-Key">\
-        </div>\
-        <div class="form-group">\
-          <label>Значение заголовка</label>\
-          <input id="s_custom_value" type="password" value="' + this._escHtml(llm.customHeaderValue) + '" placeholder="your-secret-key">\
-        </div>\
-      </div>\
-      \
-      <div class="form-group">\
-        <label>Model</label>\
-        <div style="display:flex;gap:8px;">\
-          <select id="s_model_select" style="flex:1;">\
-            <option value="">-- Нажмите &quot;Загрузить модели&quot; --</option>\
-          </select>\
-          <input id="s_model_manual" value="' + this._escHtml(llm.model) + '" placeholder="или введите вручную" style="flex:1;">\
-        </div>\
-        <div style="margin-top:4px;font-size:11px;color:var(--text-muted);">Выберите из списка или введите вручную. Приоритет у выпадающего списка.</div>\
-      </div>\
-      \
-      <div class="form-group">\
-        <label>Max Tokens</label>\
-        <input id="s_tokens" type="number" value="' + llm.maxTokens + '">\
-      </div>\
-      \
-      <div class="form-group">\
-        <label>Temperature (0-2)</label>\
-        <input id="s_temp" type="number" step="0.1" min="0" max="2" value="' + llm.temperature + '">\
-      </div>\
-      \
-      <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">\
-        <button class="btn btn-success btn-sm" id="test-conn-btn">🔌 Тест и загрузка моделей</button>\
-        <span id="conn-result" style="font-size:12px;"></span>\
-      </div>\
-      <div id="models-status" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>\
-    ', async () => {
+    this._showModal('⚙ Настройки', `
+      <div class="settings-tabs">
+        <button type="button" class="tab-btn settings-tab-btn active" data-settings-tab="connection">🔌 Подключение</button>
+        <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="model">🧠 Модель</button>
+        <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="logging">🪵 Журналирование</button>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="connection">
+        <div class="form-group">
+          <label>API URL (OpenAI-compatible)</label>
+          <input id="s_url" value="${this._escHtml(llm.apiUrl)}" placeholder="https://api.example.com/v1">
+        </div>
+
+        <div class="form-group">
+          <label>Способ авторизации</label>
+          <div style="display:flex;gap:16px;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-primary);">
+              <input type="radio" name="auth_type" value="bearer" ${isBearerChecked} style="width:auto;"> Стандартный OpenAI (Bearer)
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-primary);">
+              <input type="radio" name="auth_type" value="custom" ${isCustomChecked} style="width:auto;"> Нестандартный заголовок
+            </label>
+          </div>
+        </div>
+
+        <div id="auth_bearer_section" style="${bearerDisplay}">
+          <div class="form-group">
+            <label>API Key</label>
+            <input id="s_key" type="password" value="${this._escHtml(llm.apiKey)}" placeholder="sk-...">
+          </div>
+        </div>
+
+        <div id="auth_custom_section" style="${customDisplay}">
+          <div class="form-group">
+            <label>Имя HTTP заголовка</label>
+            <input id="s_custom_header" value="${this._escHtml(llm.customHeaderName)}" placeholder="X-API-Key">
+          </div>
+          <div class="form-group">
+            <label>Значение заголовка</label>
+            <input id="s_custom_value" type="password" value="${this._escHtml(llm.customHeaderValue)}" placeholder="your-secret-key">
+          </div>
+        </div>
+
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="btn btn-success btn-sm" id="test-conn-btn">🔌 Тест и загрузка моделей</button>
+          <span id="conn-result" style="font-size:12px;"></span>
+        </div>
+        <div id="models-status" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="model" hidden>
+        <div class="form-group">
+          <label>Model</label>
+          <div style="display:flex;gap:8px;">
+            <select id="s_model_select" style="flex:1;">
+              <option value="">-- Нажмите &quot;Загрузить модели&quot; на вкладке «Подключение» --</option>
+            </select>
+            <input id="s_model_manual" value="${this._escHtml(llm.model)}" placeholder="или введите вручную" style="flex:1;">
+          </div>
+          <div style="margin-top:4px;font-size:11px;color:var(--text-muted);">Выберите из списка или введите вручную. Приоритет у выпадающего списка.</div>
+        </div>
+
+        <div class="form-group">
+          <label>Max Tokens</label>
+          <input id="s_tokens" type="number" value="${llm.maxTokens}">
+        </div>
+
+        <div class="form-group">
+          <label>Temperature (0-2)</label>
+          <input id="s_temp" type="number" step="0.1" min="0" max="2" value="${llm.temperature}">
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="logging" hidden>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+          Подробное логирование в консоль браузера (DevTools). Полезно для отладки,
+          но может писать в консоль содержимое переписки и аргументов инструментов —
+          по умолчанию выключено.
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="s_debug_llm" style="width:auto;" ${this.agent.llm.debug ? 'checked' : ''}>
+            Запросы/ответы LLM (llm-gateway)
+          </label>
+          <div style="margin-top:2px;font-size:11px;color:var(--text-muted);">
+            Эндпоинт, заголовки (ключ маскируется), тело запроса, сообщения, стрим-чанки, usage.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="s_debug_tools" style="width:auto;" ${this.agent.tools.debug ? 'checked' : ''}>
+            Вызовы инструментов (tools-engine)
+          </label>
+          <div style="margin-top:2px;font-size:11px;color:var(--text-muted);">
+            Какой tool вызван, с какими аргументами, что вернул.
+          </div>
+        </div>
+      </div>
+    `, async () => {
       const selectVal = document.getElementById('s_model_select').value;
       const manualVal = document.getElementById('s_model_manual').value.trim();
       const finalModel = selectVal || manualVal;
@@ -786,13 +705,44 @@ class UI {
         customHeaderName: document.getElementById('s_custom_header').value.trim(),
         customHeaderValue: document.getElementById('s_custom_value').value.trim(),
       };
-      llm.configure(config);
-      await this.agent.db.put('settings', { key: 'llm', ...config });
+      llm.configure(config); // в памяти держим и используем расшифрованные значения как есть
+
+      // Перед записью в IndexedDB шифруем секреты (apiKey/customHeaderValue)
+      // через SecretsVault (crypto-utils.js) — в самой БД они не должны
+      // лежать простым текстом. В памяти у `llm` остаются как обычные строки.
+      const storedConfig = {
+        ...config,
+        apiKey: await SecretsVault.encrypt(this.agent.db, config.apiKey),
+        customHeaderValue: await SecretsVault.encrypt(this.agent.db, config.customHeaderValue),
+      };
+      await this.agent.db.put('settings', { key: 'llm', ...storedConfig });
+
+      // Журналирование: значения не секретные, храним как есть (без шифрования).
+      const loggingConfig = {
+        llmDebug: document.getElementById('s_debug_llm').checked,
+        toolsDebug: document.getElementById('s_debug_tools').checked,
+      };
+      this.agent.llm.debug = loggingConfig.llmDebug;
+      this.agent.tools.debug = loggingConfig.toolsDebug;
+      await this.agent.db.put('settings', { key: 'logging', ...loggingConfig });
+
       this.updateConnectionStatus();
       this.updateModelDisplay();
     }, null, { modal: true }); // ← strict modal: overlay click does NOT close
 
     setTimeout(() => {
+      // --- Переключение вкладок ---
+      document.querySelectorAll('.settings-tab-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.settings-tab-btn').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          const target = btn.dataset.settingsTab;
+          document.querySelectorAll('.settings-tab-panel').forEach((p) => {
+            p.hidden = p.dataset.settingsPanel !== target;
+          });
+        });
+      });
+
       document.querySelectorAll('input[name="auth_type"]').forEach(function(radio) {
         radio.addEventListener('change', function() {
           var isBearerSelected = this.value === 'bearer';
@@ -1064,26 +1014,15 @@ class UI {
             enabled: true,
             builtin: false,
             mcpServer: url,
-            mcpToken: token,
+            // Токен шифруется перед сохранением в IndexedDB (SecretsVault,
+            // crypto-utils.js). Для регистрации handler'а ниже используем
+            // ещё не зашифрованный `token`, который уже есть в памяти.
+            mcpToken: await SecretsVault.encrypt(this.agent.db, token),
           };
           await this.agent.db.put('tools', toolObj);
-
-          this.agent.tools.registerHandler(toolObj.id, async (params) => {
-            const h = { 'Content-Type': 'application/json' };
-            if (token) h['Authorization'] = `Bearer ${token}`;
-            const r = await fetch(url, {
-              method: 'POST',
-              headers: h,
-              body: JSON.stringify({
-                jsonrpc: '2.0',
-                method: 'tools/call',
-                params: { name: mt.name, arguments: params },
-                id: Date.now(),
-              }),
-            });
-            const d = await r.json();
-            return d.result?.content?.[0]?.text || d.result || d;
-          });
+          // Общий метод: та же логика используется при восстановлении
+          // MCP-обработчиков на старте приложения в ToolsEngine.loadTools().
+          this.agent.tools._registerMcpHandler({ ...toolObj, mcpToken: token });
         }
 
         alert(`Импортировано ${mcpTools.length} tools с MCP-сервера`);
@@ -1199,156 +1138,6 @@ class UI {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
-  }
-
-    // === Универсальный рендер иерархии (папки + элементы + DnD) ===
-  async _renderHierarchy(type, mount, items, renderItemCard, bindItemEvents, refresh) {
-    if (!mount) {
-      console.warn('[hierarchy] контейнер для "' + type + '" не найден в DOM');
-      return;
-    }
-    const folders = await this.agent.folders.all(type);  
-
-    const byParent = {};
-    folders.forEach(f => { const k = f.parentId || 'root'; (byParent[k] = byParent[k] || []).push(f); });
-
-    const itemsByParent = {};
-    items.forEach(it => { const k = it.parentId || 'root'; (itemsByParent[k] = itemsByParent[k] || []).push(it); });
-
-    const esc = (s) => this._escHtml(s);
-
-    const buildChildren = (parentId) => {
-      const key = parentId || 'root';
-      const childFolders = (byParent[key] || []).slice().sort((a, b) => a.name.localeCompare(b.name));
-      const childItems = itemsByParent[key] || [];
-      let html = '';
-
-      for (const f of childFolders) {
-        html += `
-          <div class="tree-folder" data-folder-id="${f.id}" data-drop-folder="${f.id}" draggable="true">
-            <div class="tree-folder-header">
-              <span class="tree-toggle">▾</span>
-              <span class="tree-folder-name">📁 ${esc(f.name)}</span>
-              <span class="tree-folder-actions">
-                <button data-add-subfolder="${f.id}" title="Подпапка">＋</button>
-                <button data-rename-folder="${f.id}" title="Переименовать">✏</button>
-                <button data-del-folder="${f.id}" title="Удалить">✕</button>
-              </span>
-            </div>
-            <div class="tree-folder-body">${buildChildren(f.id)}</div>
-          </div>`;
-      }
-
-      if (childItems.length) {
-        html += `<div class="tree-items">` +
-          childItems.map(it => `<div class="tree-item-wrap" draggable="true" data-item-id="${it.id}">${renderItemCard(it)}</div>`).join('') +
-          `</div>`;
-      }
-
-      return html;
-    };
-
-    const rootHtml = buildChildren(null);
-    mount.innerHTML = `<div class="tree-root" data-drop-folder="root">${rootHtml || '<div class="tree-empty">Пусто. Создайте папку или перетащите сюда элементы.</div>'}</div>`;
-
-    bindItemEvents(mount);
-    this._bindTree(type, mount, refresh);
-  }
-
-  // === Привязка событий дерева: DnD + действия с папками ===
-  _bindTree(type, mount, refresh) {
-    const store = type; // 'tools' | 'skills' | 'prompts'
-
-    // --- drag start: элементы ---
-    mount.querySelectorAll('[data-item-id]').forEach(el => {
-      el.addEventListener('dragstart', (e) => {
-        e.stopPropagation();
-        e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'item', id: el.dataset.itemId }));
-        e.dataTransfer.effectAllowed = 'move';
-      });
-    });
-
-    // --- drag start: папки ---
-    mount.querySelectorAll('.tree-folder').forEach(el => {
-      el.addEventListener('dragstart', (e) => {
-        e.stopPropagation();
-        e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'folder', id: el.dataset.folderId }));
-        e.dataTransfer.effectAllowed = 'move';
-      });
-    });
-
-    // --- зоны сброса (папки + корень) ---
-    mount.querySelectorAll('[data-drop-folder]').forEach(zone => {
-      zone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        zone.classList.add('drop-hover');
-      });
-      zone.addEventListener('dragleave', (e) => {
-        e.stopPropagation();
-        zone.classList.remove('drop-hover');
-      });
-      zone.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        zone.classList.remove('drop-hover');
-
-        let data;
-        try { data = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
-
-        const targetFolder = zone.dataset.dropFolder === 'root' ? null : zone.dataset.dropFolder;
-
-        if (data.kind === 'item') {
-          const rec = await this.agent.db.get(store, data.id);
-          if (rec) { rec.parentId = targetFolder; await this.agent.db.put(store, rec); }
-        } else if (data.kind === 'folder') {
-          await this.agent.folders.move(data.id, targetFolder);
-        }
-        await refresh();
-      });
-    });
-
-    // --- сворачивание/разворачивание ---
-    mount.querySelectorAll('.tree-folder-header .tree-toggle').forEach(t => {
-      t.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const body = t.closest('.tree-folder').querySelector('.tree-folder-body');
-        const collapsed = body.classList.toggle('collapsed');
-        t.textContent = collapsed ? '▸' : '▾';
-      });
-    });
-
-    // --- действия с папками ---
-    mount.querySelectorAll('[data-add-subfolder]').forEach(b => b.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const name = prompt('Название подпапки:');
-      if (!name) return;
-      await this.agent.folders.create(type, name, b.dataset.addSubfolder);
-      await refresh();
-    }));
-
-    mount.querySelectorAll('[data-rename-folder]').forEach(b => b.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const f = await this.agent.db.get('folders', b.dataset.renameFolder);
-      const name = prompt('Новое название папки:', f ? f.name : '');
-      if (!name) return;
-      await this.agent.folders.rename(b.dataset.renameFolder, name);
-      await refresh();
-    }));
-
-    mount.querySelectorAll('[data-del-folder]').forEach(b => b.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (!confirm('Удалить папку? Вложенные элементы переместятся на уровень выше.')) return;
-      await this.agent.folders.remove(b.dataset.delFolder, store);
-      await refresh();
-    }));
-  }
-
-  async _createRootFolder(type, refresh) {
-    const name = prompt('Название новой папки:');
-    if (!name) return;
-    await this.agent.folders.create(type, name, null);
-    await refresh();
   }
 
    async renderTools() {

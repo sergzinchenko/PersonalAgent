@@ -5,7 +5,13 @@ class ToolsEngine {
   constructor(db) {
     this.db = db;
     this.ui = null;            // ← ссылка на UI устанавливается извне
+    this.folders = null;       // ← ссылка на FoldersEngine устанавливается извне (см. agent.js)
     this.registry = new Map();
+    // Подробное логирование каждого tool-вызова (аргументы, результат) в
+    // консоль. По умолчанию выключено — раньше писалось безусловно и могло
+    // содержать чувствительные данные из аргументов/результатов инструментов.
+    // Включить для отладки: agent.tools.debug = true (в DevTools console).
+    this.debug = false;
     this._initBuiltinTools();
   }
 
@@ -48,7 +54,27 @@ class ToolsEngine {
     // Built-in: fetch URL (proxy-free, limited by CORS)
     this.registerHandler('builtin_fetch', async (params) => {
       try {
-        const resp = await fetch(params.url, { method: params.method || 'GET' });
+        const urlStr = String(params.url || '').trim();
+        let u;
+        try {
+          u = new URL(urlStr);
+        } catch (e) {
+          return { error: 'Некорректный URL' };
+        }
+
+        if (!/^https?:$/.test(u.protocol)) {
+          return { error: 'Разрешены только http/https URL' };
+        }
+        if (this._isBlockedFetchHost(u.hostname)) {
+          return { error: 'Запрос к локальным/приватным/служебным адресам запрещён из соображений безопасности' };
+        }
+
+        const method = String(params.method || 'GET').toUpperCase();
+        if (method !== 'GET' && method !== 'POST') {
+          return { error: 'Метод должен быть GET или POST' };
+        }
+
+        const resp = await fetch(u.toString(), { method });
         const text = await resp.text();
         return { status: resp.status, body: text.substring(0, 4000) };
       } catch (e) {
@@ -128,14 +154,16 @@ class ToolsEngine {
 
     this.registerHandler('builtin_create_folder', async (params) => {
       try {
+        if (!this.folders) return { error: 'FoldersEngine не подключён к ToolsEngine (this.folders)' };
         const kind = String(params.kind || '').toLowerCase();
         if (!['tool', 'skill', 'prompt'].includes(kind)) return { error: 'kind должен быть tool|skill|prompt' };
         const name = String(params.name || '').trim();
         if (!name) return { error: 'Требуется name' };
         const type = kind + 's';
         const parentId = await this._resolveFolderId(type, params.parent, { createMissing: true });
-        const folder = { id: 'folder_' + uid(), type, name, parentId: parentId || null, createdAt: Date.now() };
-        await this.db.put('folders', folder);
+        // Саму запись создаёт FoldersEngine — единая точка правды для формата
+        // папки (id/createdAt и т.д.), без дублирования здесь.
+        const folder = await this.folders.create(type, name, parentId);
         this._refreshUI(type);
         return { success: true, id: folder.id, name: folder.name, parentId: folder.parentId };
       } catch (e) { return { error: e.message }; }
@@ -143,12 +171,12 @@ class ToolsEngine {
 
     this.registerHandler('builtin_rename_folder', async (params) => {
       try {
+        if (!this.folders) return { error: 'FoldersEngine не подключён к ToolsEngine (this.folders)' };
         const type = String(params.kind || '').toLowerCase() + 's';
         const id = await this._resolveFolderId(type, params.folder);
         if (!id) return { error: 'Папка не найдена' };
+        await this.folders.rename(id, params.name);
         const f = await this.db.get('folders', id);
-        f.name = String(params.name || '').trim() || f.name;
-        await this.db.put('folders', f);
         this._refreshUI(type);
         return { success: true, id, name: f.name };
       } catch (e) { return { error: e.message }; }
@@ -156,34 +184,47 @@ class ToolsEngine {
 
     this.registerHandler('builtin_move_folder', async (params) => {
       try {
+        if (!this.folders) return { error: 'FoldersEngine не подключён к ToolsEngine (this.folders)' };
         const type = String(params.kind || '').toLowerCase() + 's';
         const id = await this._resolveFolderId(type, params.folder);
         if (!id) return { error: 'Папка не найдена' };
         const target = await this._resolveFolderId(type, params.to, { createMissing: true });
         if (id === target) return { error: 'Нельзя переместить папку в саму себя' };
-        if (target && await this._isDescendant(type, id, target)) return { error: 'Нельзя переместить папку в свою подпапку' };
-        const f = await this.db.get('folders', id);
-        f.parentId = target || null;
-        await this.db.put('folders', f);
+
+        // FoldersEngine.move() уже содержит защиту от циклов (нельзя вложить
+        // папку в саму себя/потомка) — она просто тихо не применит изменение
+        // в этом случае, поэтому сверяем parentId до/после, чтобы вернуть
+        // модели понятную ошибку вместо молчаливого "success" без эффекта.
+        await this.folders.move(id, target);
+        const after = await this.db.get('folders', id);
+        if ((after.parentId || null) !== (target || null)) {
+          return { error: 'Нельзя переместить папку в свою подпапку (цикл)' };
+        }
+
         this._refreshUI(type);
-        return { success: true, id, parentId: f.parentId };
+        return { success: true, id, parentId: after.parentId };
       } catch (e) { return { error: e.message }; }
     });
 
     this.registerHandler('builtin_delete_folder', async (params) => {
       try {
+        if (!this.folders) return { error: 'FoldersEngine не подключён к ToolsEngine (this.folders)' };
+
         const type = String(params.kind || '').toLowerCase() + 's';
         const id = await this._resolveFolderId(type, params.folder);
         if (!id) return { error: 'Папка не найдена' };
-        const folder = await this.db.get('folders', id);
-        const parentId = folder.parentId || null;
-        const subs = (await this.db.getAll('folders')).filter(f => f.parentId === id);
-        for (const s of subs) { s.parentId = parentId; await this.db.put('folders', s); }
-        const items = (await this.db.getAll(type)).filter(it => (it.parentId || null) === id);
-        for (const it of items) { it.parentId = parentId; await this.db.put(type, it); }
-        await this.db.delete('folders', id);
+
+        // Считаем "до", чтобы вернуть модели информативный ответ —
+        // саму мутацию делаем через FoldersEngine.remove(), которая уже
+        // содержит эту же логику (поднять подпапки/элементы на уровень
+        // выше, затем удалить папку). Раньше здесь была дублирующая копия
+        // этой логики "инлайном".
+        const subsCount = (await this.db.getAll('folders')).filter(f => f.parentId === id).length;
+        const itemsCount = (await this.db.getAll(type)).filter(it => (it.parentId || null) === id).length;
+
+        await this.folders.remove(id, type);
         this._refreshUI(type);
-        return { success: true, deleted: id, movedSubfolders: subs.length, movedItems: items.length };
+        return { success: true, deleted: id, movedSubfolders: subsCount, movedItems: itemsCount };
       } catch (e) { return { error: e.message }; }
     });
 
@@ -308,19 +349,45 @@ class ToolsEngine {
             return { error: 'parameters должен быть JSON Schema { type:"object", properties:{...} }' };
           t.parameters = p;
         }
+        let handlerChanged = false;
         if (params.handlerCode !== undefined) {
           if (t.builtin) return { error: 'Нельзя менять handlerCode встроенного инструмента' };
           try { new Function('params', String(params.handlerCode)); }
           catch (e) { return { error: 'Ошибка в handlerCode: ' + e.message }; }
           t.handlerCode = String(params.handlerCode);
+          handlerChanged = true;
         }
-        if (params.enabled !== undefined) t.enabled = !!params.enabled;
+
+        // ─── Безопасность ───────────────────────────────────────────────
+        // Если код инструмента изменился, он ПРИНУДИТЕЛЬНО выключается,
+        // даже если в этом же вызове передали enabled:true. Изменённый
+        // handlerCode — это новый, непроверенный код: разрешать модели
+        // одним вызовом одновременно подменить логику И включить исполнение
+        // означало бы, что она может незаметно (в т.ч. под влиянием
+        // prompt injection из внешнего контента) превратить безобидный tool
+        // во вредоносный и сразу же начать его использовать. Пользователь
+        // должен вручную подтвердить это тумблером на вкладке Tools.
+        if (handlerChanged) {
+          t.enabled = false;
+        } else if (params.enabled !== undefined) {
+          t.enabled = !!params.enabled;
+        }
+
         if (params.folder !== undefined) t.parentId = await this._resolveFolderId('tools', params.folder, { createMissing: true });
 
         await this.db.put('tools', t);
-        if (params.handlerCode !== undefined && !t.builtin) this.unregisterHandler(t.id);
+        if (handlerChanged) this.unregisterHandler(t.id);
         this._refreshUI('tools');
-        return { success: true, id: t.id, name: t.name };
+        return {
+          success: true,
+          id: t.id,
+          name: t.name,
+          enabled: t.enabled,
+          needsUserConfirmation: handlerChanged,
+          note: handlerChanged
+            ? 'Код инструмента изменён, поэтому он выключен. Сообщи пользователю, что нужно включить его вручную на вкладке Tools после проверки.'
+            : undefined,
+        };
       } catch (e) { return { error: e.message }; }
     });
 
@@ -442,10 +509,15 @@ class ToolsEngine {
           return { error: 'parameters должен быть JSON Schema вида { type:"object", properties:{...}, required:[...] }' };
         }
 
-        // 3. Проверка, что handlerCode компилируется (тело функции с доступом только к params)
-        let fn;
+        // 3. Проверка, что handlerCode КОМПИЛИРУЕТСЯ (только статическая
+        //    проверка синтаксиса). Раньше здесь ещё и реально исполнялся
+        //    fn({}) «сухим прогоном» — то есть непроверенный, потенциально
+        //    сгенерированный под влиянием prompt injection код выполнялся
+        //    автоматически уже на этапе создания, ещё до какого-либо
+        //    подтверждения пользователем. Сейчас мы только проверяем, что
+        //    код синтаксически валиден, и не запускаем его.
         try {
-          fn = new Function('params', handlerCode);
+          new Function('params', handlerCode);
         } catch (e) {
           return { error: 'Синтаксическая ошибка в handlerCode: ' + e.message };
         }
@@ -456,31 +528,88 @@ class ToolsEngine {
           return { error: 'Tool с именем "' + name + '" уже существует' };
         }
 
-        // 5. Сухой прогон (best-effort): не должен бросать синхронно на пустом вводе
-        try { await fn({}); } catch (_) { /* ошибки рантайма на пустом вводе допустимы */ }
-
-        // 6. Сохранение в БД в формате, который понимает executeTool()
+        // ─── Безопасность ───────────────────────────────────────────────
+        // 5. Новый LLM-созданный инструмент ВСЕГДА сохраняется выключенным,
+        // независимо от того, что просит params.enabled. getEnabledToolsForAPI()
+        // отдаёт модели только enabled:true инструменты — значит, только что
+        // созданный tool не будет доступен для вызова, пока пользователь сам
+        // не включит его тумблером на вкладке Tools, ознакомившись с кодом.
+        // Это ключевой барьер против сценария, где модель (например, под
+        // влиянием враждебного контента, полученного через http_fetch)
+        // создаёт tool и в том же диалоге начинает его использовать.
         const def = {
           id: 'custom_' + name + '_' + Date.now(),
           name,
           description,
           parameters,
           handlerCode,       // ← исполняется через new Function('params', handlerCode)
-          enabled: params.enabled !== false,
+          enabled: false,
           builtin: false,
         };
         await this.db.put('tools', def);
+        this._refreshUI('tools');
 
-        return { success: true, id: def.id, name: def.name, enabled: def.enabled };
+        return {
+          success: true,
+          id: def.id,
+          name: def.name,
+          enabled: false,
+          needsUserConfirmation: true,
+          note: 'Инструмент создан, но выключен по умолчанию из соображений безопасности. Сообщи пользователю, что нужно проверить код и включить его вручную на вкладке Tools, прежде чем им можно будет пользоваться.',
+        };
       } catch (e) {
         return { error: e.message };
       }
     });
   }
 
+// ─── ХЕЛПЕР БЕЗОПАСНОСТИ: SSRF-защита для http_fetch ───
+//
+// Ограничивает http_fetch от обращений к локальным/приватным сетям —
+// иначе LLM (в том числе под влиянием prompt injection из ранее
+// полученного контента) могла бы дёргать внутренние сервисы пользователя
+// (роутер, локальные dev-сервера) или облачные metadata-эндпоинты
+// (169.254.169.254), которые часто не защищены аутентификацией.
+// ВАЖНО: это защита только по имени хоста/литералу IP из URL, видимому в
+// JS. Она НЕ защищает от DNS rebinding (домен, который резолвится в
+// приватный IP уже во время самого fetch) — браузер не даёт JS
+// разрешить имя в IP заранее. Для полной защиты такие запросы нужно
+// проксировать через контролируемый бэкенд с проверкой на этапе
+// установления соединения.
+_isBlockedFetchHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+
+  if (!h || h === 'localhost' || h === '0.0.0.0' || h.endsWith('.local') || h.endsWith('.internal')) {
+    return true;
+  }
+
+  // IPv6: loopback (::1), link-local (fe80::/10), unique-local (fc00::/7)
+  if (h === '::1' || h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) {
+    return true;
+  }
+
+  // IPv4 литерал
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+    if (a === 127) return true;                        // loopback
+    if (a === 10) return true;                          // private (RFC1918)
+    if (a === 172 && b >= 16 && b <= 31) return true;    // private (RFC1918)
+    if (a === 192 && b === 168) return true;             // private (RFC1918)
+    if (a === 169 && b === 254) return true;             // link-local, включая cloud metadata (169.254.169.254)
+    if (a === 0) return true;                             // "эта сеть"
+  }
+
+  return false;
+}
+
 // ─── ХЕЛПЕРЫ ДЛЯ УПРАВЛЕНИЯ ИЕРАРХИЕЙ ───
 
 	async _allFolders(type) {
+		// Делегируем в FoldersEngine — единственный источник правды для
+		// списка папок. Фоллбэк на прямой запрос к db оставлен на случай,
+		// если this.folders почему-то не подключён (см. agent.js).
+		if (this.folders) return this.folders.all(type);
 		const all = await this.db.getAll('folders');
 		return all.filter(f => f.type === type);
 	}
@@ -500,22 +629,19 @@ class ToolsEngine {
 		let found = folders.find(f => (f.parentId || null) === parentId && f.name.toLowerCase() === seg.toLowerCase());
 		if (!found) {
 			if (!createMissing) return null;
-			found = { id: 'folder_' + uid(), type, name: seg, parentId, createdAt: Date.now() };
-			await this.db.put('folders', found);
+			found = this.folders
+				? await this.folders.create(type, seg, parentId)
+				: await (async () => {
+					const f = { id: 'folder_' + uid(), type, name: seg, parentId, createdAt: Date.now() };
+					await this.db.put('folders', f);
+					return f;
+				})();
 			folders.push(found);
 		}
 		parentId = found.id;
 		current = found;
 		}
 		return current ? current.id : null;
-	}
-
-	async _isDescendant(type, folderId, candidateParentId) {
-		const folders = await this._allFolders(type);
-		const map = {}; folders.forEach(f => map[f.id] = f);
-		let p = candidateParentId;
-		while (p) { if (p === folderId) return true; p = map[p] ? map[p].parentId : null; }
-		return false;
 	}
 
 	_refreshUI(type) {
@@ -578,7 +704,8 @@ class ToolsEngine {
 	      {
 	        id: 'builtin_fetch',
 	        name: 'http_fetch',
-	        description: 'Выполняет HTTP-запрос к указанному URL (ограничено CORS)',
+	        description: 'Выполняет HTTP-запрос к указанному URL (ограничено CORS). Из соображений безопасности ' +
+	          'запрещены не-http(s) протоколы и запросы к localhost/приватным сетям/cloud-metadata адресам.',
 	        parameters: {
 	          type: 'object',
 	          properties: {
@@ -662,7 +789,11 @@ class ToolsEngine {
 	            'Передай name (snake_case), description, parameters (JSON Schema с type:"object") ' +
 	            'и handlerCode — ТЕЛО JS-функции, которая получает объект params и возвращает результат ' +
 	            '(можно async, доступен только аргумент params, никаких this/db/import). ' +
-	            'Результат — обычный объект; при ошибке верни { error: "..." }.',
+	            'Результат — обычный объект; при ошибке верни { error: "..." }. ' +
+	            'ВАЖНО: инструмент ВСЕГДА создаётся выключенным (enabled:false) — это осознанное ' +
+	            'ограничение безопасности, обойти его нельзя. Он не станет доступен для вызова, ' +
+	            'пока пользователь сам не включит его тумблером на вкладке Tools. После создания ' +
+	            'обязательно сообщи пользователю, что нужно проверить код и включить инструмент вручную.',
 	          parameters: {
 	            type: 'object',
 	            properties: {
@@ -850,7 +981,10 @@ class ToolsEngine {
 	        id: 'builtin_update_tool',
 	        name: 'update_tool',
 	        description: 'Изменяет существующий tool: описание, parameters, handlerCode (только для кастомных), enabled, папку, имя. ' +
-	          'Меняются только переданные поля.',
+	          'Меняются только переданные поля. ВАЖНО: если в этом вызове передан handlerCode, инструмент ' +
+	          'ПРИНУДИТЕЛЬНО выключается (даже если одновременно передан enabled:true) — это защита от ' +
+	          'подмены кода с немедленным включением. После изменения кода сообщи пользователю, что нужно ' +
+	          'проверить его и включить инструмент вручную на вкладке Tools.',
 	        parameters: {
 	          type: 'object',
 	          properties: {
@@ -870,6 +1004,39 @@ class ToolsEngine {
 	    ];
 	  }
 
+  // Регистрирует native-обработчик для MCP-инструмента (проксирует вызов на
+  // внешний MCP-сервер через JSON-RPC tools/call). Используется и при первом
+  // импорте с сервера (showAddMCPServerModal в ui.js), и при каждой загрузке
+  // приложения в loadTools() — обработчики живут только в this.registry
+  // (в памяти), а в БД для MCP-tool сохраняются только метаданные
+  // (mcpServer/mcpToken), поэтому без повторной регистрации на старте
+  // ранее импортированные MCP-инструменты «ломались» бы после релоада
+  // страницы: executeTool() не находил бы для них обработчик.
+  // ВАЖНО: toolRecord.mcpToken здесь ожидается уже РАСШИФРОВАННЫМ (обычная
+  // строка) — в БД он хранится зашифрованным через SecretsVault, вызывающий
+  // код (loadTools()/showAddMCPServerModal) отвечает за расшифровку/наличие
+  // plaintext-значения до вызова этого метода.
+  _registerMcpHandler(toolRecord) {
+    const { id, name, mcpServer, mcpToken } = toolRecord;
+    if (!mcpServer) return;
+    this.registerHandler(id, async (params) => {
+      const headers = { 'Content-Type': 'application/json' };
+      if (mcpToken) headers['Authorization'] = 'Bearer ' + mcpToken;
+      const resp = await fetch(mcpServer, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          params: { name, arguments: params },
+          id: Date.now(),
+        }),
+      });
+      const data = await resp.json();
+      return data.result?.content?.[0]?.text || data.result || data;
+    });
+  }
+
 	  async loadTools() {
 	    const existing = await this.db.getAll('tools');
 	    const existingIds = new Set(existing.map(t => t.id));
@@ -880,7 +1047,20 @@ class ToolsEngine {
 	      await this.db.put('tools', def);
 	    }
 
-	    return missing.length ? await this.db.getAll('tools') : existing;
+	    const all = missing.length ? await this.db.getAll('tools') : existing;
+
+	    // Восстанавливаем обработчики MCP-инструментов, не переживающие релоад (см. комментарий выше).
+	    for (const t of all) {
+	      if (t.mcpServer && !this.registry.has(t.id)) {
+	        // mcpToken в БД хранится зашифрованным (SecretsVault) — расшифровываем
+	        // перед тем, как передать в handler, который держит его в памяти
+	        // в замыкании как обычную строку (нужен для заголовка Authorization).
+	        const plainToken = await SecretsVault.decrypt(this.db, t.mcpToken);
+	        this._registerMcpHandler({ ...t, mcpToken: plainToken });
+	      }
+	    }
+
+	    return all;
 	  }
 
   async getEnabledToolsForAPI() {
@@ -905,11 +1085,13 @@ class ToolsEngine {
 	      parsedArgs = args;
 	    }
 
+	    if (this.debug) {
 	    console.group('%c🔧 TOOL CALL', 'color:#f39c12;font-weight:bold;font-size:13px;');
 	    console.log('%cTool:', 'color:#888;', toolName);
 	    console.log('%cArguments:', 'color:#888;');
 	    console.dir(parsedArgs);
 	    console.log('%cTimestamp:', 'color:#888;', new Date().toISOString());
+	    }
 	    var t0 = performance.now();
 
 	    var result;
@@ -946,9 +1128,12 @@ class ToolsEngine {
 	      }
 	    } catch (e) {
 	      result = { error: 'Tool engine error: ' + e.message };
-	      console.error('%c🔧 TOOL ENGINE ERROR', 'color:red;font-weight:bold', e);
+	      // Ошибку самого движка (не хендлера) логируем всегда, без this.debug —
+	      // это внутренний сбой, а не рутинный tool-вызов, полезно видеть сразу.
+	      console.error('🔧 TOOL ENGINE ERROR:', toolName, e);
 	    } finally {
 	      var elapsed = (performance.now() - t0).toFixed(0);
+	      if (this.debug) {
 	      if (result && result.error) {
 	        console.log('%c❌ Error:', 'color:#e74c3c;');
 	      } else {
@@ -957,6 +1142,7 @@ class ToolsEngine {
 	      console.dir(result);
 	      console.log('%cElapsed:', 'color:#888;', elapsed + 'ms');
 	      console.groupEnd();
+	      }
 	    }
 
 	    return result;

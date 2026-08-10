@@ -12,6 +12,12 @@ class LLMGateway {
     this.customHeaderName = '';
     this.customHeaderValue = '';
     this.availableModels = [];
+    // Подробное логирование запросов/ответов (включая содержимое сообщений
+    // и tool-аргументов) в консоль. По умолчанию выключено: раньше это
+    // писалось безусловно на каждый вызов, включая переписку пользователя
+    // и параметры инструментов — утечка в консоль браузера/расширения.
+    // Включить для отладки: agent.llm.debug = true (в DevTools console).
+    this.debug = false;
   }
 
   configure({ apiUrl, apiKey, model, maxTokens, temperature, authType, customHeaderName, customHeaderValue }) {
@@ -58,6 +64,7 @@ class LLMGateway {
     const endpoint = this.apiUrl + '/chat/completions';
     const headers = this._buildAuthHeaders();
 
+    if (this.debug) {
     // --- LOG REQUEST ---
     const logHeaders = Object.assign({}, headers);
     for (var hk in logHeaders) {
@@ -79,12 +86,15 @@ class LLMGateway {
     console.log('%cStream:', 'color:#888;', stream);
     console.log('%cTimestamp:', 'color:#888;', new Date().toISOString());
     console.groupEnd();
+    }
 
     var requestTimestamp = performance.now();
 
     if (stream && onChunk) {
       body.stream = true;
+      if (this.debug) {
       console.log('%c🔼 LLM REQUEST body.stream set to true', 'color:#6c5ce7;');
+      }
 
       const resp = await fetch(endpoint, {
         method: 'POST',
@@ -96,6 +106,7 @@ class LLMGateway {
 
       if (!resp.ok) {
         const err = await resp.text();
+        if (this.debug) {
         console.group('%c🔽❌ LLM RESPONSE (STREAM ERROR)', 'color:#e74c3c;font-weight:bold;font-size:13px;');
         console.log('%cStatus:', 'color:#888;', resp.status, resp.statusText);
         console.log('%cResponse Headers:', 'color:#888;');
@@ -103,15 +114,18 @@ class LLMGateway {
         console.log('%cError Body:', 'color:#e74c3c;', err);
         console.log('%cElapsed:', 'color:#888;', elapsed + 'ms');
         console.groupEnd();
+        }
         throw new Error('API Error ' + resp.status + ': ' + err);
       }
 
+      if (this.debug) {
       console.group('%c🔽 LLM RESPONSE (STREAM START)', 'color:#00b894;font-weight:bold;font-size:13px;');
       console.log('%cStatus:', 'color:#888;', resp.status, resp.statusText);
       console.log('%cResponse Headers:', 'color:#888;');
       resp.headers.forEach(function(v, k) { console.log('  ' + k + ': ' + v); });
       console.log('%cTime to first byte:', 'color:#888;', elapsed + 'ms');
       console.groupEnd();
+      }
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -163,6 +177,7 @@ class LLMGateway {
         tool_calls: toolCalls.length > 0 ? toolCalls : null,
       };
 
+      if (this.debug) {
       console.group('%c🔽 LLM RESPONSE (STREAM COMPLETE)', 'color:#00b894;font-weight:bold;font-size:13px;');
       console.log('%cTotal chunks:', 'color:#888;', chunkCount);
       console.log('%cTotal elapsed:', 'color:#888;', totalElapsed + 'ms');
@@ -175,6 +190,7 @@ class LLMGateway {
       console.log('%cFull assembled response:', 'color:#888;');
       console.dir(result);
       console.groupEnd();
+      }
 
       return result;
     }
@@ -190,6 +206,7 @@ class LLMGateway {
 
     if (!resp.ok) {
       const err = await resp.text();
+      if (this.debug) {
       console.group('%c🔽❌ LLM RESPONSE (ERROR)', 'color:#e74c3c;font-weight:bold;font-size:13px;');
       console.log('%cStatus:', 'color:#888;', resp.status, resp.statusText);
       console.log('%cResponse Headers:', 'color:#888;');
@@ -197,6 +214,7 @@ class LLMGateway {
       console.log('%cError Body:', 'color:#e74c3c;', err);
       console.log('%cElapsed:', 'color:#888;', elapsed2 + 'ms');
       console.groupEnd();
+      }
       throw new Error('API Error ' + resp.status + ': ' + err);
     }
 
@@ -207,6 +225,7 @@ class LLMGateway {
       tool_calls: choice.message.tool_calls || null,
     };
 
+    if (this.debug) {
     console.group('%c🔽 LLM RESPONSE (COMPLETE)', 'color:#00b894;font-weight:bold;font-size:13px;');
     console.log('%cStatus:', 'color:#888;', resp.status, resp.statusText);
     console.log('%cResponse Headers:', 'color:#888;');
@@ -223,6 +242,7 @@ class LLMGateway {
       console.dir(result2.tool_calls);
     }
     console.groupEnd();
+    }
 
     return result2;
   }
@@ -232,20 +252,24 @@ class LLMGateway {
     const headers = authHeaders || this._buildAuthHeaders();
     const endpoint = url + '/models';
 
+    if (this.debug) {
     console.group('%c🔼 MODELS REQUEST', 'color:#6c5ce7;font-weight:bold;');
     console.log('%cEndpoint:', 'color:#888;', endpoint);
     console.log('%cMethod:', 'color:#888;', 'GET');
     console.groupEnd();
+    }
 
     var t0 = performance.now();
     const resp = await fetch(endpoint, { headers });
     var elapsed = (performance.now() - t0).toFixed(0);
 
     if (!resp.ok) {
+      if (this.debug) {
       console.group('%c🔽❌ MODELS RESPONSE (ERROR)', 'color:#e74c3c;font-weight:bold;');
       console.log('%cStatus:', 'color:#888;', resp.status);
       console.log('%cElapsed:', 'color:#888;', elapsed + 'ms');
       console.groupEnd();
+      }
       throw new Error('Failed to fetch models: ' + resp.status);
     }
 
@@ -261,6 +285,7 @@ class LLMGateway {
     models.sort();
     this.availableModels = models;
 
+    if (this.debug) {
     console.group('%c🔽 MODELS RESPONSE', 'color:#00b894;font-weight:bold;');
     console.log('%cStatus:', 'color:#888;', resp.status);
     console.log('%cElapsed:', 'color:#888;', elapsed + 'ms');
@@ -269,6 +294,7 @@ class LLMGateway {
     console.dir(data);
     console.log('%cModel list:', 'color:#888;', models);
     console.groupEnd();
+    }
 
     return models;
   }

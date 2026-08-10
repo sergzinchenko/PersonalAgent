@@ -627,6 +627,17 @@ body {
 
 .modal .form-group { margin-bottom: 12px; }
 
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+}
+
+.settings-tab-panel { }
+.settings-tab-panel[hidden] { display: none; }
+
 .modal-actions {
   display: flex;
   gap: 8px;

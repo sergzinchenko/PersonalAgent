@@ -21,11 +21,29 @@ class AIAgent {
     this.skills = new SkillsEngine(this.db);
     this.prompts = new PromptsLibrary(this.db);
     this.folders = new FoldersEngine(this.db);
+    this.tools.folders = this.folders; // делаем builtin_delete_folder переиспользуемым (без дублирования логики)
 
     // 3. Load settings
     const settings = await this.db.get('settings', 'llm');
     if (settings) {
-      this.llm.configure(settings);
+      // apiKey/customHeaderValue хранятся в IndexedDB зашифрованными
+      // (SecretsVault, см. crypto-utils.js) — расшифровываем перед тем,
+      // как передать в LLMGateway, который держит их в памяти как обычные
+      // строки (нужны в чистом виде для формирования заголовка запроса).
+      const decrypted = {
+        ...settings,
+        apiKey: await SecretsVault.decrypt(this.db, settings.apiKey),
+        customHeaderValue: await SecretsVault.decrypt(this.db, settings.customHeaderValue),
+      };
+      this.llm.configure(decrypted);
+    }
+
+    // Настройки журналирования (не секрет — храним как есть, без шифрования).
+    // Управляются через ⚙ Настройки → вкладка «Журналирование».
+    const loggingSettings = await this.db.get('settings', 'logging');
+    if (loggingSettings) {
+      this.llm.debug = !!loggingSettings.llmDebug;
+      this.tools.debug = !!loggingSettings.toolsDebug;
     }
 
     // 4. Load tools (seed defaults if needed)
