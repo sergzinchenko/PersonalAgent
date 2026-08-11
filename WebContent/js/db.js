@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 6) {   
+  constructor(name = 'ai_agent_db', version = 7) {   
     this.name = name;
     this.version = version;
     this.db = null;
@@ -39,6 +39,12 @@ class AgentDB {
           const s = db.createObjectStore('folders', { keyPath: 'id' });
           s.createIndex('type', 'type');
           s.createIndex('parentId', 'parentId');
+        }
+        // Техническая статистика чата: израсходованные токены и агрегаты
+        // по вызовам инструментов. Хранится отдельно от 'chats', чтобы
+        // частые обновления счётчиков не переписывали саму запись чата.
+        if (!db.objectStoreNames.contains('chat_stats')) {
+          db.createObjectStore('chat_stats', { keyPath: 'chatId' });
         }
       };
       req.onsuccess = (e) => { this.db = e.target.result; resolve(this.db); };

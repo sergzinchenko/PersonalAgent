@@ -1,3 +1,14 @@
+// Конструктор асинхронных функций. Обычный `new Function(...)` создаёт
+// СИНХРОННУЮ функцию, внутри которой `await` — синтаксическая ошибка
+// («await is only valid in async functions»). При этом инструменты почти
+// всегда асинхронные (fetch, Notification.requestPermission, любые Web API
+// на промисах), и системный промпт для LLM явно разрешает async. Компилируя
+// через AsyncFunction, мы делаем тело handlerCode телом async-функции:
+// `await` работает без обёрток, а `return` отдаёт значение как обычно.
+// Синхронный код при этом продолжает работать без изменений — вызывающая
+// сторона в любом случае делает await над результатом.
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
 // ============================================================
 //  TOOLS ENGINE — MCP-compatible tool system
 // ============================================================
@@ -352,7 +363,7 @@ class ToolsEngine {
         let handlerChanged = false;
         if (params.handlerCode !== undefined) {
           if (t.builtin) return { error: 'Нельзя менять handlerCode встроенного инструмента' };
-          try { new Function('params', String(params.handlerCode)); }
+          try { new AsyncFunction('params', String(params.handlerCode)); }
           catch (e) { return { error: 'Ошибка в handlerCode: ' + e.message }; }
           t.handlerCode = String(params.handlerCode);
           handlerChanged = true;
@@ -517,7 +528,7 @@ class ToolsEngine {
         //    подтверждения пользователем. Сейчас мы только проверяем, что
         //    код синтаксически валиден, и не запускаем его.
         try {
-          new Function('params', handlerCode);
+          new AsyncFunction('params', handlerCode);
         } catch (e) {
           return { error: 'Синтаксическая ошибка в handlerCode: ' + e.message };
         }
@@ -542,7 +553,7 @@ class ToolsEngine {
           name,
           description,
           parameters,
-          handlerCode,       // ← исполняется через new Function('params', handlerCode)
+          handlerCode,       // ← исполняется через new AsyncFunction('params', handlerCode)
           enabled: false,
           builtin: false,
         };
@@ -805,9 +816,9 @@ _isBlockedFetchHost(hostname) {
 	              },
 	              handlerCode: {
 	                type: 'string',
-	                description: 'Тело JS-функции. Пример: "return { result: params.a + params.b };"',
+	                description: 'Тело JS-функции, выполняется как тело ASYNC-функции — await можно использовать напрямую на верхнем уровне. Пример: "const r = await fetch(params.url); return { status: r.status };"',
 	              },
-	              enabled: { type: 'boolean', description: 'Включить сразу (по умолчанию true)' },
+	              enabled: { type: 'boolean', description: 'Игнорируется: новый инструмент всегда создаётся выключенным до подтверждения пользователем.' },
 	            },
 	            required: ['name', 'description', 'parameters', 'handlerCode'],
 	          },
@@ -915,7 +926,7 @@ _isBlockedFetchHost(hostname) {
 	            systemPrompt: { type: 'string', description: 'Системный промпт навыка' },
 	            icon: { type: 'string', description: 'Эмодзи-иконка (по умолчанию 🤖)' },
 	            category: { type: 'string' },
-	            enabled: { type: 'boolean', description: 'Включить сразу (по умолчанию true)' },
+	            enabled: { type: 'boolean', description: 'Включить навык сразу (по умолчанию false)' },
 	            folder: { type: 'string', description: 'Папка: id/путь. Пусто = корень.' },
 	          },
 	          required: ['name', 'systemPrompt'],
@@ -993,7 +1004,7 @@ _isBlockedFetchHost(hostname) {
 	            newName: { type: 'string', description: 'Новое имя (snake_case)' },
 	            description: { type: 'string' },
 	            parameters: { type: 'object', description: 'JSON Schema { type:"object", properties:{...} }' },
-	            handlerCode: { type: 'string', description: 'Тело JS-функции (только для не-builtin)' },
+	            handlerCode: { type: 'string', description: 'Тело JS-функции (только для не-builtin). Выполняется как тело async-функции — await доступен напрямую.' },
 	            enabled: { type: 'boolean' },
 	            folder: { type: 'string', description: 'Переместить в папку: id/путь' },
 	          },
@@ -1077,7 +1088,14 @@ _isBlockedFetchHost(hostname) {
       }));
   }
 
-  async executeTool(toolName, args) {
+  // timeoutMs — ограничение на выполнение ОДНОГО вызова инструмента.
+  // Нужно, потому что handlerCode пишет LLM: бесконечный цикл или зависший
+  // fetch внутри него иначе повесил бы всю цепочку ответа навсегда.
+  // ВАЖНО: JS не умеет прерывать уже запущенный синхронный код — таймаут
+  // отпускает ожидание и возвращает ошибку, но сам handler, если он завис
+  // в синхронном цикле, продолжит занимать поток. Это ограничение среды;
+  // полноценное прерывание требует исполнения в Worker с terminate().
+  async executeTool(toolName, args, { timeoutMs = 0 } = {}) {
 	    var parsedArgs;
 	    try {
 	      parsedArgs = typeof args === 'string' ? JSON.parse(args) : args;
@@ -1096,6 +1114,18 @@ _isBlockedFetchHost(hostname) {
 
 	    var result;
 
+	    // Обёртка гонки с таймаутом (см. комментарий к сигнатуре метода).
+	    const withTimeout = (promise) => {
+	      if (!timeoutMs || timeoutMs <= 0) return promise;
+	      return Promise.race([
+	        promise,
+	        new Promise((resolve) => setTimeout(
+	          () => resolve({ error: 'Timeout: инструмент не ответил за ' + timeoutMs + ' мс' }),
+	          timeoutMs
+	        )),
+	      ]);
+	    };
+
 	    try {
 	      const tools = await this.loadTools();
 	      const tool = tools.find(function (t) { return t.name === toolName; });
@@ -1107,8 +1137,8 @@ _isBlockedFetchHost(hostname) {
 	        //   Компилируется заново на каждый вызов из актуальной записи в БД,
 	        //   поэтому правки из UI применяются сразу, без перезагрузки страницы.
 	        try {
-	          const fn = new Function('params', tool.handlerCode);
-	          result = await fn(parsedArgs);
+	          const fn = new AsyncFunction('params', tool.handlerCode);
+	          result = await withTimeout(Promise.resolve(fn(parsedArgs)));
 	        } catch (e) {
 	          result = { error: 'Execution error: ' + e.message };
 	        }
@@ -1118,7 +1148,7 @@ _isBlockedFetchHost(hostname) {
 	        const entry = this.registry.get(tool.id);
 	        if (entry && entry.handler) {
 	          try {
-	            result = await entry.handler(parsedArgs);
+	            result = await withTimeout(Promise.resolve(entry.handler(parsedArgs)));
 	          } catch (e) {
 	            result = { error: e.message };
 	          }

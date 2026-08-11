@@ -48,7 +48,7 @@ class LLMGateway {
     return !!(this.apiUrl && hasAuth && this.model);
   }
 
-  async chat(messages, { tools = null, stream = false, onChunk = null } = {}) {
+  async chat(messages, { tools = null, stream = false, onChunk = null, signal = null } = {}) {
     const body = {
       model: this.model,
       messages,
@@ -92,6 +92,11 @@ class LLMGateway {
 
     if (stream && onChunk) {
       body.stream = true;
+      // Просим провайдера прислать usage финальным чанком — иначе при
+      // stream:true счётчик токенов недоступен. Провайдеры, не знающие
+      // это поле, обычно его игнорируют; тогда usage останется null и
+      // UI просто не покажет цифры за этот запрос.
+      body.stream_options = { include_usage: true };
       if (this.debug) {
       console.log('%c🔼 LLM REQUEST body.stream set to true', 'color:#6c5ce7;');
       }
@@ -100,6 +105,7 @@ class LLMGateway {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(body),
+        signal: signal,
       });
 
       var elapsed = (performance.now() - requestTimestamp).toFixed(0);
@@ -132,6 +138,7 @@ class LLMGateway {
       let buffer = '';
       let fullContent = '';
       let toolCalls = [];
+      let streamUsage = null;
       var chunkCount = 0;
       var rawChunks = [];
 
@@ -151,6 +158,8 @@ class LLMGateway {
           try {
             const json = JSON.parse(trimmed.slice(6));
             chunkCount++;
+            // usage приходит отдельным финальным чанком (choices пустой)
+            if (json.usage) streamUsage = json.usage;
             const delta = json.choices?.[0]?.delta;
             if (delta?.content) {
               fullContent += delta.content;
@@ -175,6 +184,7 @@ class LLMGateway {
       var result = {
         content: fullContent,
         tool_calls: toolCalls.length > 0 ? toolCalls : null,
+        usage: streamUsage,
       };
 
       if (this.debug) {
@@ -200,6 +210,7 @@ class LLMGateway {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(body),
+      signal: signal,
     });
 
     var elapsed2 = (performance.now() - requestTimestamp).toFixed(0);
@@ -223,6 +234,7 @@ class LLMGateway {
     var result2 = {
       content: choice.message.content || '',
       tool_calls: choice.message.tool_calls || null,
+      usage: data.usage || null,
     };
 
     if (this.debug) {

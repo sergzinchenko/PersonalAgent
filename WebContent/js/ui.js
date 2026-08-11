@@ -8,9 +8,38 @@ class UI {
     this.currentChatId = null;
     this.isStreaming = false;
     this.folderSelection = { tools: null, skills: null, prompts: null };
-    // Защита от бесконечной рекурсии: сколько раз подряд _generateResponse()
-    // может сам себя вызвать из-за цепочки tool_calls в одном ответе пользователя.
-    this.maxToolSteps = 25;
+
+    // ── Ограничения работы агента при использовании tools ──
+    // Применяются к ОДНОМУ ходу пользователя (цепочке tool_calls подряд).
+    // Значения перекрываются сохранёнными настройками (settings/limits).
+    this.limits = {
+      maxToolSteps: 25,      // макс. итераций tool-calling подряд
+      maxTurnSeconds: 180,   // общий бюджет времени на ход, сек (0 — без лимита)
+      toolTimeoutSeconds: 30,// таймаут одного вызова инструмента, сек (0 — без лимита)
+      maxToolCallsPerTurn: 50, // суммарный потолок вызовов за ход
+    };
+
+    // Степень детализации вывода вызовов инструментов в чат:
+    // 'hidden' — не показывать, 'compact' — имя + краткий результат,
+    // 'detailed' — имя, аргументы, полный результат, время выполнения.
+    this.toolVerbosity = 'compact';
+
+    // Счётчики текущего хода (сбрасываются в sendMessage)
+    this._turnStartedAt = 0;
+    this._turnToolCalls = 0;
+
+    this.recognition = null;   // экземпляр SpeechRecognition (голосовой ввод)
+    this.isListening = false;
+
+    // Прерывание работы агента пользователем
+    this._abortCtl = null;      // AbortController текущего запроса к LLM
+    this._stopRequested = false;// флаг: прервать цепочку между шагами
+
+    // Окно контекста модели. contextLimit=0 → определяем автоматически
+    // по имени модели; contextWarnPercent — порог предупреждения.
+    this.contextLimit = 0;
+    this.contextWarnPercent = 75;
+
     this._bindGlobalEvents();
   }
 
@@ -37,6 +66,8 @@ class UI {
     });
 
     document.getElementById('send-btn').addEventListener('click', () => this.sendMessage());
+    document.getElementById('voice-btn').addEventListener('click', () => this.toggleVoiceInput());
+    document.getElementById('stop-btn').addEventListener('click', () => this.stopAgent());
     document.getElementById('add-tool-btn').addEventListener('click', () => this.showAddToolModal());
     document.getElementById('add-mcp-server-btn').addEventListener('click', () => this.showAddMCPServerModal());
     document.getElementById('add-skill-btn').addEventListener('click', () => this.showAddSkillModal());
@@ -45,6 +76,15 @@ class UI {
     document.getElementById('add-tool-folder-btn').addEventListener('click', () => this._createFolder('tools'));
     document.getElementById('add-skill-folder-btn').addEventListener('click', () => this._createFolder('skills'));
     document.getElementById('add-prompt-folder-btn').addEventListener('click', () => this._createFolder('prompts'));
+
+    // Экспорт/импорт. Из шапки панели (Tools/Skills/Промпты) открывается
+    // ВЫБОРОЧНЫЙ экспорт только этого раздела — с отметкой конкретных
+    // объектов. Полный экспорт и любой импорт — только через
+    // ⚙ Настройки → Отображение, чтобы случайное нажатие в панели
+    // не перезаписало чужими данными всю базу.
+    document.querySelectorAll('.export-import-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.showSelectiveExportModal(btn.dataset.section));
+    });
   }
 
   // === Tab switching ===
@@ -351,15 +391,65 @@ class UI {
   async updateChatToolbar() {
     const toolbar = document.getElementById('chat-toolbar');
     const skills = await this.agent.skills.loadSkills();
-    const chat = this.currentChatId ? await this.agent.db.get('chats', this.currentChatId) : null;
+    const llm = this.agent.llm;
 
-    toolbar.innerHTML = skills.map(s => `
-      <span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
-        ${s.icon} ${s.name}
-      </span>
-    `).join('');
+    const stats = this.currentChatId ? await this.agent.db.get('chat_stats', this.currentChatId) : null;
+    const fmt = (n) => (n || 0).toLocaleString('ru-RU');
 
-    toolbar.querySelectorAll('.chip').forEach(chip => {
+    // Быстрый выбор модели: список из ранее загруженных моделей;
+    // если их ещё не запрашивали — показываем только текущую.
+    const models = llm.availableModels.length ? llm.availableModels
+                 : (llm.model ? [llm.model] : []);
+    const modelOptions = models.map(m =>
+      `<option value="${this._escHtml(m)}" ${m === llm.model ? 'selected' : ''}>${this._escHtml(m)}</option>`
+    ).join('');
+
+    const approx = stats && stats.estimated ? '≈' : '';
+    const tokensChip = stats && stats.totalTokens
+      ? `<span class="chip stat-chip" id="tokens-chip" title="Промпт: ${approx}${fmt(stats.promptTokens)} · Ответ: ${approx}${fmt(stats.completionTokens)} · Запросов: ${fmt(stats.requests)}${stats.estimated ? '\nПровайдер не вернул usage — значения оценены приблизительно' : ''}">🎫 ${approx}${fmt(stats.totalTokens)} токенов</span>`
+      : `<span class="chip stat-chip muted" title="Появится после первого ответа модели">🎫 — токенов</span>`;
+
+    // Чип контекста: сколько токенов ушло в последний запрос и сколько
+    // вмещает модель. Цвет меняется при приближении к границе.
+    const ctxLimit = this.effectiveContextLimit();
+    const ctxUsed = stats?.lastContextTokens || 0;
+    let contextChip = '';
+    if (ctxUsed) {
+      const ctxApprox = stats.lastContextEstimated ? '≈' : '';
+      if (ctxLimit) {
+        const pct = Math.round((ctxUsed / ctxLimit) * 100);
+        const cls = pct >= 100 ? ' ctx-danger' : (pct >= this.contextWarnPercent ? ' ctx-warn' : '');
+        contextChip = `<span class="chip stat-chip${cls}" title="Контекст последнего запроса: ${ctxApprox}${fmt(ctxUsed)} из ${fmt(ctxLimit)} токенов${this.contextLimit ? ' (лимит задан вручную)' : ' (лимит определён по названию модели)'}">📐 ${ctxApprox}${fmt(ctxUsed)} / ${this._fmtLimit(ctxLimit)} · ${pct}%</span>`;
+      } else {
+        contextChip = `<span class="chip stat-chip" title="Окно контекста для этой модели неизвестно — задайте его в ⚙ Настройки → Модель">📐 ${ctxApprox}${fmt(ctxUsed)} / ?</span>`;
+      }
+    } else if (ctxLimit) {
+      contextChip = `<span class="chip stat-chip muted" title="Окно контекста выбранной модели">📐 окно ${this._fmtLimit(ctxLimit)}</span>`;
+    }
+
+    const toolsChip = stats && stats.toolCalls
+      ? `<span class="chip stat-chip" id="tool-stats-chip" title="Нажмите для подробной статистики">🔧 ${fmt(stats.toolCalls)} вызовов${stats.toolErrors ? ` · ${fmt(stats.toolErrors)} ошибок` : ''}</span>`
+      : `<span class="chip stat-chip muted">🔧 нет вызовов</span>`;
+
+    toolbar.innerHTML = `
+      <div class="toolbar-row">
+        ${skills.map(s => `
+          <span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
+            ${s.icon} ${this._escHtml(s.name)}
+          </span>
+        `).join('')}
+      </div>
+      <div class="toolbar-row toolbar-meta">
+        <select id="quick-model-select" class="quick-model" title="Быстрый выбор модели">
+          ${modelOptions || '<option value="">модель не выбрана</option>'}
+        </select>
+        ${tokensChip}
+        ${contextChip}
+        ${toolsChip}
+      </div>
+    `;
+
+    toolbar.querySelectorAll('.chip[data-skill]').forEach(chip => {
       chip.addEventListener('click', async () => {
         const skill = await this.agent.db.get('skills', chip.dataset.skill);
         skill.enabled = !skill.enabled;
@@ -367,6 +457,83 @@ class UI {
         this.updateChatToolbar();
       });
     });
+
+    // Быстрая смена модели — меняет её и в памяти, и в сохранённых настройках,
+    // чтобы выбор пережил перезагрузку (секреты при этом не трогаем).
+    const modelSel = document.getElementById('quick-model-select');
+    modelSel?.addEventListener('change', async () => {
+      const chosen = modelSel.value;
+      if (!chosen) return;
+      llm.configure({ model: chosen });
+      const saved = await this.agent.db.get('settings', 'llm');
+      if (saved) {
+        saved.model = chosen;
+        await this.agent.db.put('settings', saved);
+      }
+      this.updateModelDisplay();
+    });
+
+    document.getElementById('tool-stats-chip')?.addEventListener('click', () => this.showChatStatsModal());
+  }
+
+  // 128000 → «128k», 1000000 → «1M» — иначе чип занимает пол-панели.
+  _fmtLimit(n) {
+    if (!n) return '?';
+    if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + 'M';
+    if (n >= 1000) return Math.round(n / 1000) + 'k';
+    return String(n);
+  }
+
+  // Подробная техническая статистика текущего чата
+  async showChatStatsModal() {
+    const stats = this.currentChatId ? await this.agent.db.get('chat_stats', this.currentChatId) : null;
+    const fmt = (n) => (n || 0).toLocaleString('ru-RU');
+
+    if (!stats) {
+      this._showModal('📊 Статистика чата', '<p style="color:var(--text-secondary);">Пока нет данных по этому чату.</p>', null);
+      return;
+    }
+
+    const rows = Object.entries(stats.byTool || {})
+      .sort((a, b) => b[1].calls - a[1].calls)
+      .map(([name, s]) => `
+        <tr>
+          <td>${this._escHtml(name)}</td>
+          <td style="text-align:right;">${fmt(s.calls)}</td>
+          <td style="text-align:right;color:${s.errors ? 'var(--danger)' : 'inherit'};">${fmt(s.errors)}</td>
+          <td style="text-align:right;">${fmt(Math.round(s.timeMs))} мс</td>
+          <td style="text-align:right;">${fmt(Math.round(s.timeMs / Math.max(1, s.calls)))} мс</td>
+        </tr>`).join('');
+
+    this._showModal('📊 Статистика чата', `
+      <div class="form-group">
+        <label>Токены</label>
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.8;">
+          Всего: <strong style="color:var(--text-primary);">${stats.estimated ? '≈' : ''}${fmt(stats.totalTokens)}</strong><br>
+          Промпт: ${fmt(stats.promptTokens)} · Ответ: ${fmt(stats.completionTokens)}<br>
+          Запросов к модели: ${fmt(stats.requests)}
+        </div>
+        ${stats.estimated ? `<div style="font-size:11px;color:var(--warning);margin-top:6px;">
+          ≈ — провайдер не возвращает usage, значения посчитаны приблизительно по объёму текста и не подходят для сверки со счётом.
+        </div>` : ''}
+      </div>
+      <div class="form-group">
+        <label>Вызовы инструментов</label>
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.8;">
+          Всего: <strong style="color:var(--text-primary);">${fmt(stats.toolCalls)}</strong> ·
+          Ошибок: ${fmt(stats.toolErrors)} ·
+          Суммарное время: ${fmt(Math.round(stats.toolTimeMs))} мс
+        </div>
+      </div>
+      ${rows ? `
+      <div class="form-group">
+        <label>По инструментам</label>
+        <table class="stats-table">
+          <thead><tr><th>Инструмент</th><th>Вызовов</th><th>Ошибок</th><th>Время</th><th>Среднее</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>` : ''}
+    `, null);
   }
 
   async sendMessage() {
@@ -409,29 +576,63 @@ class UI {
     container.insertAdjacentHTML('beforeend', this._renderMessage(userMsg));
     container.scrollTop = container.scrollHeight;
 
+    // Новый ход пользователя — обнуляем бюджет времени и счётчик вызовов,
+    // которые действуют на всю цепочку tool_calls этого хода.
+    this._turnStartedAt = Date.now();
+    this._turnToolCalls = 0;
+    this._stopRequested = false;
+
     await this._generateResponse();
+  }
+
+  // Останавливает ход и сообщает причину. Возвращает true — значит выше
+  // по стеку нужно прекратить цепочку tool-calling.
+  _stopTurn(container, reason) {
+    container.insertAdjacentHTML('beforeend',
+      `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
+    container.scrollTop = container.scrollHeight;
+    this._setBusy(false);
   }
 
   async _generateResponse(depth = 0) {
     const container = document.getElementById('chat-messages');
+    const L = this.limits;
 
-    // Защита от бесконечного цикла tool-calling: модель может зациклиться
-    // на вызовах инструментов (особенно локальные/слабые модели). Без этой
-    // проверки рекурсия по result.tool_calls ниже была бы неограниченной.
-    if (depth >= this.maxToolSteps) {
-      container.insertAdjacentHTML('beforeend',
-        `<div class="message system">⚠️ Достигнут лимит автоматических шагов с вызовом инструментов (${this.maxToolSteps} подряд в рамках одного ответа). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.</div>`);
-      container.scrollTop = container.scrollHeight;
-      this.isStreaming = false;
-      document.getElementById('send-btn').disabled = false;
+    // ── Прерывание пользователем: проверяем между шагами цепочки ──
+    if (this._stopRequested) {
+      this._setBusy(false);
       return;
     }
 
-    this.isStreaming = true;
-    document.getElementById('send-btn').disabled = true;
+    // ── Лимит 1: количество итераций tool-calling ──
+    if (L.maxToolSteps > 0 && depth >= L.maxToolSteps) {
+      this._stopTurn(container, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.`);
+      return;
+    }
+
+    // ── Лимит 2: общий бюджет времени на ход ──
+    if (L.maxTurnSeconds > 0 && this._turnStartedAt) {
+      const elapsedSec = (Date.now() - this._turnStartedAt) / 1000;
+      if (elapsedSec >= L.maxTurnSeconds) {
+        this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с). Цепочка вызовов инструментов остановлена.`);
+        return;
+      }
+    }
+
+    this._setBusy(true);
 
     container.insertAdjacentHTML('beforeend', '<div class="typing-indicator" id="typing"><span></span><span></span><span></span></div>');
     container.scrollTop = container.scrollHeight;
+
+    // AbortController прерывает сам HTTP-запрос к LLM — и по таймауту хода,
+    // и по кнопке «⏹» (stopAgent() вызывает abort() через this._abortCtl).
+    const abortCtl = new AbortController();
+    this._abortCtl = abortCtl;
+    let turnTimer = null;
+    if (L.maxTurnSeconds > 0 && this._turnStartedAt) {
+      const remainingMs = L.maxTurnSeconds * 1000 - (Date.now() - this._turnStartedAt);
+      turnTimer = setTimeout(() => abortCtl.abort(), Math.max(0, remainingMs));
+    }
 
     try {
       const allMsgs = await this.agent.db.getAllByIndex('messages', 'chatId', this.currentChatId);
@@ -463,12 +664,31 @@ class UI {
       const result = await this.agent.llm.chat(apiMessages, {
         tools: tools.length > 0 ? tools : null,
         stream: true,
+        signal: abortCtl.signal,
         onChunk: (chunk) => {
           fullContent += chunk;
           msgEl.innerHTML = renderMarkdown(fullContent);
           container.scrollTop = container.scrollHeight;
         },
       });
+
+      // Учёт токенов. Многие провайдеры игнорируют stream_options и не
+      // присылают usage при stream:true — тогда считаем приблизительно
+      // сами, иначе счётчик навсегда остался бы нулевым.
+      let contextTokens;
+      if (result.usage) {
+        await this._recordUsage(result.usage);
+        // prompt_tokens = ровно то, что модель приняла на вход,
+        // то есть фактический размер контекста этого запроса.
+        contextTokens = result.usage.prompt_tokens || 0;
+      } else {
+        const est = this._estimateUsage(apiMessages, result);
+        await this._recordUsage(est, true);
+        contextTokens = est.prompt_tokens;
+      }
+      await this._recordContextSize(contextTokens, !result.usage);
+      this.updateChatToolbar();
+      await this._checkContextThresholds(container, contextTokens);
 
       if (result.tool_calls && result.tool_calls.length > 0) {
         const assistantMsg = {
@@ -484,17 +704,57 @@ class UI {
         for (const tc of result.tool_calls) {
           if (tc === undefined) {
         		    continue; // Пропускаем текущую итерацию, если tc undefined - из-за null в списках от некоторых LLM
-          }        	
-          const toolResultDiv = document.createElement('div');
-          toolResultDiv.className = 'message tool-call';
-          toolResultDiv.textContent = `🔧 Вызываю: ${tc.function.name}(${tc.function.arguments})...`;
-          container.appendChild(toolResultDiv);
-          container.scrollTop = container.scrollHeight;
+          }
 
-          const toolResult = await this.agent.tools.executeTool(tc.function.name, tc.function.arguments);
+          // ── Прерывание пользователем ──
+          if (this._stopRequested) {
+            clearTimeout(turnTimer);
+            this._setBusy(false);
+            return;
+          }
+
+          // ── Лимит 3: суммарное число вызовов за ход ──
+          if (L.maxToolCallsPerTurn > 0 && this._turnToolCalls >= L.maxToolCallsPerTurn) {
+            clearTimeout(turnTimer);
+            this._stopTurn(container, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`);
+            return;
+          }
+          // ── Лимит 2 (повторная проверка между вызовами) ──
+          if (L.maxTurnSeconds > 0 && this._turnStartedAt &&
+              (Date.now() - this._turnStartedAt) / 1000 >= L.maxTurnSeconds) {
+            clearTimeout(turnTimer);
+            this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`);
+            return;
+          }
+          this._turnToolCalls++;
+
+          const toolResultDiv = this.toolVerbosity === 'hidden' ? null : document.createElement('div');
+          if (toolResultDiv) {
+            toolResultDiv.className = 'message tool-call';
+            toolResultDiv.textContent = `🔧 Вызываю: ${tc.function.name}...`;
+            container.appendChild(toolResultDiv);
+            container.scrollTop = container.scrollHeight;
+          }
+
+          const startedAt = performance.now();
+          const toolResult = await this.agent.tools.executeTool(
+            tc.function.name,
+            tc.function.arguments,
+            { timeoutMs: (L.toolTimeoutSeconds || 0) * 1000 }
+          );
+          const elapsedMs = Math.round(performance.now() - startedAt);
           const resultStr = JSON.stringify(toolResult);
+          const isError = !!(toolResult && toolResult.error);
 
-          toolResultDiv.textContent = `🔧 ${tc.function.name} → ${resultStr.substring(0, 200)}`;
+          await this._recordToolCall(tc.function.name, elapsedMs, isError);
+          this.updateChatToolbar();
+
+          if (toolResultDiv) {
+            toolResultDiv.innerHTML = this._renderToolCallBlock(
+              tc.function.name, tc.function.arguments, resultStr, elapsedMs, isError
+            );
+            container.scrollTop = container.scrollHeight;
+          }
 
           const toolMsg = {
             id: uid(),
@@ -504,10 +764,13 @@ class UI {
             tool_call_id: tc.id,
             name: tc.function.name,
             timestamp: Date.now(),
+            durationMs: elapsedMs,
+            isError,
           };
           await this.agent.db.put('messages', toolMsg);
         }
 
+        clearTimeout(turnTimer);
         this.isStreaming = false;
         document.getElementById('send-btn').disabled = false;
         await this._generateResponse(depth + 1);
@@ -525,18 +788,780 @@ class UI {
 
     } catch (error) {
       document.getElementById('typing')?.remove();
-      container.insertAdjacentHTML('beforeend', `<div class="message system">❌ Ошибка: ${this._escHtml(error.message)}</div>`);
-      container.scrollTop = container.scrollHeight;
+      if (error.name === 'AbortError' && this._stopRequested) {
+        // Сообщение об остановке уже показал stopAgent() — не дублируем.
+      } else {
+        const msg = error.name === 'AbortError'
+          ? `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с).`
+          : `Ошибка: ${error.message}`;
+        container.insertAdjacentHTML('beforeend', `<div class="message system">❌ ${this._escHtml(msg)}</div>`);
+        container.scrollTop = container.scrollHeight;
+      }
+    } finally {
+      clearTimeout(turnTimer);
+      this._abortCtl = null;
     }
 
     this.isStreaming = false;
     document.getElementById('send-btn').disabled = false;
+    this.updateChatToolbar();
+  }
+
+  // Разметка блока вызова инструмента с учётом выбранной детализации.
+  _renderToolCallBlock(name, argsRaw, resultStr, elapsedMs, isError) {
+    const icon = isError ? '❌' : '🔧';
+    if (this.toolVerbosity === 'detailed') {
+      let argsPretty = argsRaw;
+      try { argsPretty = JSON.stringify(JSON.parse(argsRaw), null, 2); } catch (_) {}
+      let resPretty = resultStr;
+      try { resPretty = JSON.stringify(JSON.parse(resultStr), null, 2); } catch (_) {}
+      return `
+        <div><strong>${icon} ${this._escHtml(name)}</strong> <span class="tool-meta">${elapsedMs} мс</span></div>
+        <div class="tool-section">Аргументы:</div>
+        <pre class="tool-pre">${this._escHtml(argsPretty)}</pre>
+        <div class="tool-section">Результат:</div>
+        <pre class="tool-pre">${this._escHtml(resPretty)}</pre>
+      `;
+    }
+    // compact
+    return `<div class="tool-compact">${icon} ${this._escHtml(name)} → ` +
+           `${this._escHtml(resultStr.substring(0, 300))}${resultStr.length > 300 ? '…' : ''}</div>` +
+           `<span class="tool-meta">${elapsedMs} мс</span>`;
+  }
+
+  // ── Окно контекста модели ──
+  // Точного способа узнать лимит через OpenAI-совместимый API нет:
+  // /models почти никогда не отдаёт context_length. Поэтому используем
+  // таблицу известных семейств моделей, а пользователь может задать
+  // значение вручную в ⚙ Настройки → Модель (оно имеет приоритет).
+  _knownContextLimit(modelName) {
+    const m = String(modelName || '').toLowerCase();
+    const table = [
+      [/gpt-4\.1|gpt-4o|o1|o3|o4/, 128000],
+      [/gpt-4-turbo|gpt-4-1106|gpt-4-0125/, 128000],
+      [/gpt-4-32k/, 32768],
+      [/gpt-4/, 8192],
+      [/gpt-3\.5-turbo-16k/, 16384],
+      [/gpt-3\.5/, 16385],
+      [/claude-3|claude-4|claude-opus|claude-sonnet|claude-haiku/, 200000],
+      [/claude-2\.1/, 200000],
+      [/claude-2/, 100000],
+      [/gemini-1\.5-pro|gemini-2/, 1000000],
+      [/gemini/, 32768],
+      [/llama-?3\.[12]|llama-?3-?70|llama-?3-?8/, 128000],
+      [/llama-?2/, 4096],
+      [/mixtral|mistral-large/, 32768],
+      [/mistral/, 32768],
+      [/qwen2?\.5|qwen3/, 128000],
+      [/deepseek/, 64000],
+      [/command-r/, 128000],
+      [/yi-/, 200000],
+      [/phi-3/, 128000],
+    ];
+    for (const [re, limit] of table) if (re.test(m)) return limit;
+    return 0; // неизвестно
+  }
+
+  // Эффективный лимит: ручная настройка > таблица > 0 (неизвестно)
+  effectiveContextLimit() {
+    return this.contextLimit > 0
+      ? this.contextLimit
+      : this._knownContextLimit(this.agent.llm.model);
+  }
+
+  // Грубая оценка числа токенов, когда провайдер не вернул usage.
+  // Эвристика: латиница ≈ 4 символа на токен, кириллица дробится
+  // токенизаторами мельче — ≈ 2. Это ОЦЕНКА, а не факт: в UI такие
+  // значения помечаются знаком «≈», чтобы их не принимали за биллинговые.
+  _estimateTokens(text) {
+    if (!text) return 0;
+    const s = String(text);
+    const cyr = (s.match(/[\u0400-\u04FF]/g) || []).length;
+    const rest = s.length - cyr;
+    return Math.ceil(cyr / 2 + rest / 4);
+  }
+
+  _estimateUsage(apiMessages, result) {
+    let promptChars = 0;
+    for (const m of apiMessages) {
+      promptChars += this._estimateTokens(m.content || '');
+      if (m.tool_calls) promptChars += this._estimateTokens(JSON.stringify(m.tool_calls));
+    }
+    let completion = this._estimateTokens(result.content || '');
+    if (result.tool_calls) completion += this._estimateTokens(JSON.stringify(result.tool_calls));
+    return { prompt_tokens: promptChars, completion_tokens: completion };
+  }
+
+  // Сохраняем размер контекста последнего запроса — он показывается
+  // в панели чата и переживает перезагрузку вместе со статистикой.
+  async _recordContextSize(tokens, isEstimate) {
+    const stats = await this._getChatStats(this.currentChatId);
+    if (!stats) return;
+    stats.lastContextTokens = tokens;
+    stats.lastContextEstimated = !!isEstimate;
+    await this.agent.db.put('chat_stats', stats);
+  }
+
+  // Предупреждения о приближении к границе окна контекста.
+  // Каждый уровень показывается один раз за чат, иначе сообщение
+  // повторялось бы после каждого запроса и засоряло переписку.
+  async _checkContextThresholds(container, contextTokens) {
+    const limit = this.effectiveContextLimit();
+    if (!limit || !contextTokens) return;
+
+    const stats = await this._getChatStats(this.currentChatId);
+    if (!stats) return;
+
+    const percent = Math.round((contextTokens / limit) * 100);
+    const warnAt = this.contextWarnPercent;
+
+    // Достигнут максимум окна контекста
+    if (percent >= 100 && stats.contextAlertLevel !== 'max') {
+      stats.contextAlertLevel = 'max';
+      await this.agent.db.put('chat_stats', stats);
+      container.insertAdjacentHTML('beforeend', `
+        <div class="message system context-alert danger">
+          🛑 Контекст исчерпан: ${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов (${percent}%).
+          Модель начнёт терять начало переписки или возвращать ошибку.
+          <div style="margin-top:8px;">
+            <button class="btn btn-primary btn-sm" id="ctx-new-chat-btn">➕ Создать новый чат</button>
+          </div>
+        </div>`);
+      document.getElementById('ctx-new-chat-btn')?.addEventListener('click', () => this.newChat());
+      container.scrollTop = container.scrollHeight;
+      return;
+    }
+
+    // Достигнут рекомендуемый порог
+    if (percent >= warnAt && percent < 100 && !stats.contextAlertLevel) {
+      stats.contextAlertLevel = 'warn';
+      await this.agent.db.put('chat_stats', stats);
+      container.insertAdjacentHTML('beforeend', `
+        <div class="message system context-alert warn">
+          ⚠️ Контекст заполнен на ${percent}% (${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов).
+          Дальше расходы растут, а качество ответов может падать — стоит завершить тему или начать новый чат.
+        </div>`);
+      container.scrollTop = container.scrollHeight;
+    }
+  }
+
+  // ── Персистентная техническая статистика чата (store 'chat_stats') ──
+  async _getChatStats(chatId) {
+    if (!chatId) return null;
+    const existing = await this.agent.db.get('chat_stats', chatId);
+    return existing || {
+      chatId,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      requests: 0,
+      estimated: false,  // true — хотя бы часть цифр получена оценкой
+      lastContextTokens: 0,      // размер контекста последнего запроса
+      lastContextEstimated: false,
+      contextAlertLevel: null,   // null | 'warn' | 'max' — какое предупреждение уже показано
+      toolCalls: 0,
+      toolErrors: 0,
+      toolTimeMs: 0,
+      byTool: {},   // { имя: { calls, errors, timeMs } }
+    };
+  }
+
+  async _recordUsage(usage, isEstimate = false) {
+    const stats = await this._getChatStats(this.currentChatId);
+    if (!stats) return;
+    stats.promptTokens += usage.prompt_tokens || 0;
+    stats.completionTokens += usage.completion_tokens || 0;
+    stats.totalTokens += usage.total_tokens ||
+      ((usage.prompt_tokens || 0) + (usage.completion_tokens || 0));
+    stats.requests += 1;
+    if (isEstimate) stats.estimated = true;
+    await this.agent.db.put('chat_stats', stats);
+  }
+
+  async _recordToolCall(name, elapsedMs, isError) {
+    const stats = await this._getChatStats(this.currentChatId);
+    if (!stats) return;
+    stats.toolCalls += 1;
+    stats.toolTimeMs += elapsedMs;
+    if (isError) stats.toolErrors += 1;
+    const entry = stats.byTool[name] || { calls: 0, errors: 0, timeMs: 0 };
+    entry.calls += 1;
+    entry.timeMs += elapsedMs;
+    if (isError) entry.errors += 1;
+    stats.byTool[name] = entry;
+    await this.agent.db.put('chat_stats', stats);
+  }
+
+  // ── Голосовой ввод (Web Speech API) ──
+  // Поддержка сильно зависит от браузера: в Chrome/Edge работает
+  // (распознавание идёт на серверах Google), в Firefox по умолчанию нет.
+  // Требует HTTPS (или localhost) и разрешения на микрофон.
+  toggleVoiceInput() {
+    const btn = document.getElementById('voice-btn');
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SR) {
+      alert('Голосовой ввод не поддерживается этим браузером.\nРаботает в Chrome и Edge; страница должна быть открыта по HTTPS или с localhost.');
+      return;
+    }
+
+    if (this.isListening) {
+      this.recognition?.stop();
+      return;
+    }
+
+    const input = document.getElementById('chat-input');
+    const rec = new SR();
+    rec.lang = 'ru-RU';
+    rec.interimResults = true;
+    rec.continuous = false;
+
+    // Текст, который был в поле до начала диктовки — распознанное
+    // дописываем к нему, а не затираем пользовательский ввод.
+    const baseText = input.value;
+
+    rec.onstart = () => {
+      this.isListening = true;
+      btn.classList.add('listening');
+      btn.title = 'Идёт запись — нажмите, чтобы остановить';
+    };
+
+    rec.onresult = (e) => {
+      let text = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        text += e.results[i][0].transcript;
+      }
+      input.value = (baseText ? baseText + ' ' : '') + text;
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    };
+
+    rec.onerror = (e) => {
+      const reasons = {
+        'not-allowed': 'Доступ к микрофону запрещён. Разрешите его в настройках сайта.',
+        'no-speech': 'Речь не распознана — попробуйте ещё раз.',
+        'network': 'Ошибка сети при распознавании речи.',
+        'service-not-allowed': 'Сервис распознавания недоступен (нужен HTTPS).',
+      };
+      const msg = reasons[e.error] || ('Ошибка распознавания: ' + e.error);
+      const container = document.getElementById('chat-messages');
+      container.insertAdjacentHTML('beforeend',
+        `<div class="message system">🎙 ${this._escHtml(msg)}</div>`);
+      container.scrollTop = container.scrollHeight;
+    };
+
+    rec.onend = () => {
+      this.isListening = false;
+      btn.classList.remove('listening');
+      btn.title = 'Голосовой ввод';
+      input.focus();
+    };
+
+    this.recognition = rec;
+    try {
+      rec.start();
+    } catch (e) {
+      this.isListening = false;
+      btn.classList.remove('listening');
+    }
+  }
+
+  // ── Выборочный экспорт одного раздела ──
+  // Вызывается из шапки панели и учитывает, в какой папке пользователь
+  // сейчас находится: по умолчанию предлагается текущая папка со всем
+  // вложенным. Импорта здесь намеренно нет — он живёт только в полном
+  // окне (⚙ Настройки → Отображение).
+  async showSelectiveExportModal(section) {
+    const titles = { tools: '🔧 инструментов', skills: '🧩 навыков', prompts: '📋 промптов' };
+    if (!titles[section]) return this.showExportImportModal();
+
+    let allItems = await this.agent.db.getAll(section);
+    if (section === 'tools') allItems = allItems.filter(t => !t.builtin);
+    const allFolders = (await this.agent.db.getAll('folders')).filter(f => f.type === section);
+
+    const currentFolder = this.folderSelection[section] || null;
+    const path = await this._folderPath(section, currentFolder);
+
+    // Состояние модалки живёт здесь: переключение охвата перерисовывает
+    // только список, не пересоздавая окно.
+    // ВАЖНО: unchecked хранит id, которые пользователь СНЯЛ вручную.
+    // Хранить именно снятые, а не отмеченные, нужно потому, что при
+    // смене охвата в список приходят новые объекты — они должны быть
+    // отмечены по умолчанию, а ранее снятые остаться снятыми.
+    const state = {
+      scope: currentFolder ? 'subtree' : 'all',
+      unchecked: new Set(),
+    };
+
+    this._showModal(`⬆ Экспорт ${titles[section]}`, `
+      <div class="form-group">
+        <label>Откуда выгружать</label>
+        <div class="folder-breadcrumb" style="margin-bottom:8px;">${path}</div>
+        <select id="sel-scope">
+          <option value="current">Только эта папка (без вложенных)</option>
+          <option value="subtree">Эта папка со вложенными</option>
+          <option value="all">Весь раздел целиком</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Объекты <span id="sel-count" style="color:var(--text-muted);font-weight:400;"></span></label>
+        <div style="display:flex;gap:8px;margin:6px 0;">
+          <button type="button" class="btn btn-secondary btn-sm" id="sel-all">Выделить все</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="sel-none">Снять все</button>
+        </div>
+        <div class="sel-list" id="sel-list"></div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+          Папки отмеченных объектов выгружаются автоматически вместе со всей цепочкой родителей.
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Пароль для шифрования архива</label>
+        <input id="sel_pass" type="password" placeholder="минимум 8 символов">
+      </div>
+      <div class="form-group">
+        <label>Повторите пароль</label>
+        <input id="sel_pass2" type="password" placeholder="ещё раз">
+      </div>
+      <button class="btn btn-primary btn-sm" id="sel-export-btn">⬆ Скачать зашифрованный архив</button>
+      <span id="sel-status" style="font-size:12px;margin-left:8px;"></span>
+    `, null, null, { modal: true, wide: true });
+
+    // Все папки-потомки заданной (для охвата «со вложенными»)
+    const descendants = (rootId) => {
+      const out = new Set([rootId]);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const f of allFolders) {
+          if (f.parentId && out.has(f.parentId) && !out.has(f.id)) { out.add(f.id); grew = true; }
+        }
+      }
+      return out;
+    };
+
+    const itemsForScope = () => {
+      if (state.scope === 'all') return allItems;
+      if (state.scope === 'current') {
+        return allItems.filter(it => (it.parentId || null) === currentFolder);
+      }
+      // subtree
+      if (!currentFolder) return allItems; // корень со вложенными = весь раздел
+      const set = descendants(currentFolder);
+      return allItems.filter(it => it.parentId && set.has(it.parentId));
+    };
+
+    const folderName = (id) => allFolders.find(x => x.id === id)?.name || null;
+
+    const renderList = () => {
+      const items = itemsForScope();
+      // При смене охвата сохраняем ранее снятые галочки, а новые
+      // элементы добавляем уже отмеченными.
+      const list = document.getElementById('sel-list');
+      if (!list) return;
+      list.innerHTML = items.length ? items.map(it => `
+        <label class="check-row">
+          <input type="checkbox" class="sel-item" value="${this._escHtml(it.id)}" ${state.unchecked.has(it.id) ? '' : 'checked'}>
+          <span>${it.icon ? it.icon + ' ' : ''}${this._escHtml(it.title || it.name || it.id)}</span>
+          ${it.parentId ? `<span class="sel-folder">📁 ${this._escHtml(folderName(it.parentId) || '—')}</span>` : ''}
+        </label>`).join('')
+        : '<div style="color:var(--text-muted);font-size:13px;">В выбранной области нет объектов.</div>';
+
+      list.querySelectorAll('.sel-item').forEach(b => {
+        b.addEventListener('change', () => {
+          if (b.checked) state.unchecked.delete(b.value); else state.unchecked.add(b.value);
+          updateCount();
+        });
+      });
+      updateCount();
+    };
+
+    const updateCount = () => {
+      const boxes = Array.from(document.querySelectorAll('.sel-item'));
+      const n = boxes.filter(b => b.checked).length;
+      const el = document.getElementById('sel-count');
+      if (el) el.textContent = `— выбрано ${n} из ${boxes.length}`;
+    };
+
+    setTimeout(() => {
+      const scopeSel = document.getElementById('sel-scope');
+      if (scopeSel) {
+        scopeSel.value = state.scope;
+        scopeSel.addEventListener('change', () => { state.scope = scopeSel.value; renderList(); });
+      }
+      document.getElementById('sel-all')?.addEventListener('click', () => {
+        document.querySelectorAll('.sel-item').forEach(b => { b.checked = true; state.unchecked.delete(b.value); });
+        updateCount();
+      });
+      document.getElementById('sel-none')?.addEventListener('click', () => {
+        document.querySelectorAll('.sel-item').forEach(b => { b.checked = false; state.unchecked.add(b.value); });
+        updateCount();
+      });
+      document.getElementById('sel-export-btn')?.addEventListener('click', () => this._doSelectiveExport(section));
+      renderList();
+    }, 50);
+  }
+
+  async _doSelectiveExport(section) {
+    const status = document.getElementById('sel-status');
+    const setErr = (msg) => { status.textContent = '❌ ' + msg; status.style.color = 'var(--danger)'; };
+
+    const pass = document.getElementById('sel_pass').value;
+    const pass2 = document.getElementById('sel_pass2').value;
+    if (pass.length < 8) return setErr('пароль короче 8 символов');
+    if (pass !== pass2) return setErr('пароли не совпадают');
+
+    const chosenIds = new Set(
+      Array.from(document.querySelectorAll('.sel-item')).filter(b => b.checked).map(b => b.value)
+    );
+    if (!chosenIds.size) return setErr('не выбрано ни одного объекта');
+
+    status.textContent = '⏳ Шифрую...';
+    status.style.color = 'var(--warning)';
+
+    try {
+      let items = (await this.agent.db.getAll(section)).filter(i => chosenIds.has(i.id));
+      if (section === 'tools') {
+        items = items.map(t => { const { mcpToken, ...rest } = t; return rest; });
+      }
+
+      // Выгружаем только те папки, которые реально нужны выбранным
+      // объектам, — вместе со всей цепочкой родителей, иначе на импорте
+      // подпапка осталась бы без своего родителя.
+      // Ограничиваем разделом: папки tools/skills/prompts лежат в одном
+      // store и различаются полем type.
+      const allFolders = (await this.agent.db.getAll('folders')).filter(f => f.type === section);
+      const byId = {};
+      allFolders.forEach(f => { byId[f.id] = f; });
+      const needed = new Set();
+      for (const it of items) {
+        let p = it.parentId;
+        const guard = new Set();
+        while (p && byId[p] && !guard.has(p)) {
+          guard.add(p);
+          needed.add(p);
+          p = byId[p].parentId;
+        }
+      }
+
+      const payload = {
+        version: 1,
+        createdAt: new Date().toISOString(),
+        partial: true,
+        sections: {
+          [section]: { items, folders: allFolders.filter(f => needed.has(f.id)) },
+        },
+      };
+
+      const envelope = await ArchiveCrypto.encryptPayload(payload, pass);
+      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      a.href = url;
+      a.download = `ai-agent-${section}-${stamp}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      status.textContent = `✅ Выгружено: ${items.length}, папок: ${payload.sections[section].folders.length}`;
+      status.style.color = 'var(--success)';
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  //  ЭКСПОРТ / ИМПОРТ (tools, skills, prompts + папки)
+  //  Архив шифруется паролем пользователя (ArchiveCrypto:
+  //  PBKDF2-SHA256 → AES-GCM, см. crypto-utils.js).
+  // ──────────────────────────────────────────────
+  showExportImportModal() {
+    this._showModal('📦 Экспорт / импорт', `
+      <div class="settings-tabs">
+        <button type="button" class="tab-btn settings-tab-btn active" data-settings-tab="export">⬆ Экспорт</button>
+        <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="import">⬇ Импорт</button>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="export">
+        <div class="form-group">
+          <label>Что выгружать</label>
+          <label class="check-row"><input type="checkbox" id="exp_tools" checked> 🔧 Tools</label>
+          <label class="check-row"><input type="checkbox" id="exp_skills" checked> 🧩 Skills</label>
+          <label class="check-row"><input type="checkbox" id="exp_prompts" checked> 📋 Промпты</label>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+            Структура папок выгружается автоматически для выбранных разделов.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Пароль для шифрования архива</label>
+          <input id="exp_pass" type="password" placeholder="минимум 8 символов">
+        </div>
+        <div class="form-group">
+          <label>Повторите пароль</label>
+          <input id="exp_pass2" type="password" placeholder="ещё раз">
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
+          Файл можно расшифровать только этим паролем — восстановить его невозможно.
+          Стойкость архива определяется тем, насколько сложный пароль вы выберете.
+        </div>
+        <button class="btn btn-primary btn-sm" id="do-export-btn">⬆ Скачать зашифрованный архив</button>
+        <span id="exp-status" style="font-size:12px;margin-left:8px;"></span>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="import" hidden>
+        <div class="form-group">
+          <label>Файл архива (.json)</label>
+          <input id="imp_file" type="file" accept="application/json,.json">
+        </div>
+        <div class="form-group">
+          <label>Пароль архива</label>
+          <input id="imp_pass" type="password" placeholder="пароль, заданный при экспорте">
+        </div>
+        <div class="form-group">
+          <label>Режим импорта</label>
+          <label class="check-row"><input type="radio" name="imp_mode" value="merge" checked> Добавить к существующим (дубликаты по id пропускаются)</label>
+          <label class="check-row"><input type="radio" name="imp_mode" value="overwrite"> Перезаписать элементы с совпадающими id</label>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
+          Импортированные инструменты с собственным кодом всегда добавляются
+          <strong>выключенными</strong> — включите их вручную после проверки кода.
+        </div>
+        <button class="btn btn-primary btn-sm" id="do-import-btn">⬇ Расшифровать и импортировать</button>
+        <span id="imp-status" style="font-size:12px;margin-left:8px;"></span>
+      </div>
+    `, null, null, { modal: true, wide: true });
+
+    setTimeout(() => {
+      document.querySelectorAll('.settings-tab-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.settings-tab-btn').forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          const target = btn.dataset.settingsTab;
+          document.querySelectorAll('.settings-tab-panel').forEach((p) => {
+            p.hidden = p.dataset.settingsPanel !== target;
+          });
+        });
+      });
+
+      document.getElementById('do-export-btn').addEventListener('click', () => this._doExport());
+      document.getElementById('do-import-btn').addEventListener('click', () => this._doImport());
+    }, 50);
+  }
+
+  async _doExport() {
+    const status = document.getElementById('exp-status');
+    const pass = document.getElementById('exp_pass').value;
+    const pass2 = document.getElementById('exp_pass2').value;
+
+    const setErr = (msg) => { status.textContent = '❌ ' + msg; status.style.color = 'var(--danger)'; };
+
+    if (pass.length < 8) return setErr('пароль короче 8 символов');
+    if (pass !== pass2) return setErr('пароли не совпадают');
+
+    const want = {
+      tools: document.getElementById('exp_tools').checked,
+      skills: document.getElementById('exp_skills').checked,
+      prompts: document.getElementById('exp_prompts').checked,
+    };
+    if (!want.tools && !want.skills && !want.prompts) return setErr('не выбран ни один раздел');
+
+    status.textContent = '⏳ Шифрую...';
+    status.style.color = 'var(--warning)';
+
+    try {
+      const payload = { version: 1, createdAt: new Date().toISOString(), sections: {} };
+      const allFolders = await this.agent.db.getAll('folders');
+
+      for (const [section, enabled] of Object.entries(want)) {
+        if (!enabled) continue;
+        let items = await this.agent.db.getAll(section);
+        if (section === 'tools') {
+          // Встроенные инструменты не выгружаем: они и так создаются
+          // при первом запуске, а их id совпадут на любой установке.
+          // mcpToken вырезаем — это секрет от чужого сервера, ему не место
+          // в архиве, который пользователь может передать другому человеку.
+          items = items.filter(t => !t.builtin).map(t => {
+            const { mcpToken, ...rest } = t;
+            return rest;
+          });
+        }
+        payload.sections[section] = {
+          items,
+          folders: allFolders.filter(f => f.type === section),
+        };
+      }
+
+      const envelope = await ArchiveCrypto.encryptPayload(payload, pass);
+      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      a.href = url;
+      a.download = `ai-agent-archive-${stamp}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      const counts = Object.entries(payload.sections)
+        .map(([k, v]) => `${k}: ${v.items.length}`).join(', ');
+      status.textContent = `✅ Готово (${counts})`;
+      status.style.color = 'var(--success)';
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  async _doImport() {
+    const status = document.getElementById('imp-status');
+    const fileInput = document.getElementById('imp_file');
+    const pass = document.getElementById('imp_pass').value;
+    const mode = document.querySelector('input[name="imp_mode"]:checked')?.value || 'merge';
+
+    const setErr = (msg) => { status.textContent = '❌ ' + msg; status.style.color = 'var(--danger)'; };
+
+    if (!fileInput.files || !fileInput.files[0]) return setErr('файл не выбран');
+    if (!pass) return setErr('введите пароль');
+
+    status.textContent = '⏳ Расшифровываю...';
+    status.style.color = 'var(--warning)';
+
+    try {
+      const text = await fileInput.files[0].text();
+      let envelope;
+      try { envelope = JSON.parse(text); }
+      catch (e) { return setErr('файл не является корректным JSON'); }
+
+      const payload = await ArchiveCrypto.decryptPayload(envelope, pass);
+
+      let added = 0, skipped = 0, foldersAdded = 0, foldersReused = 0;
+
+      for (const [section, block] of Object.entries(payload.sections || {})) {
+        if (!['tools', 'skills', 'prompts'].includes(section)) continue;
+
+        // ── Папки ──
+        // Импортируем ДО элементов, чтобы их parentId указывал на реально
+        // существующие записи. Сопоставление не только по id: одна и та же
+        // по смыслу папка на другой машине имеет другой id, поэтому папку
+        // с тем же именем на том же уровне ПЕРЕИСПОЛЬЗУЕМ, а не дублируем.
+        const existingFolders = await this.agent.db.getAll('folders');
+
+        // Старый id из архива → фактический id в этой базе.
+        const folderIdMap = {};
+        const incoming = block.folders || [];
+        const incomingById = {};
+        incoming.forEach(f => { incomingById[f.id] = f; });
+
+        // Обрабатываем сверху вниз: родитель должен быть сопоставлен раньше
+        // ребёнка, иначе уровень вложенности определится неверно.
+        const depthOf = (f) => {
+          let d = 0, p = f.parentId;
+          const seen = new Set();
+          while (p && incomingById[p] && !seen.has(p)) { seen.add(p); d++; p = incomingById[p].parentId; }
+          return d;
+        };
+        const ordered = incoming.slice().sort((a, b) => depthOf(a) - depthOf(b));
+
+        const norm = (s) => String(s || '').trim().toLowerCase();
+
+        for (const f of ordered) {
+          const mappedParent = f.parentId ? (folderIdMap[f.parentId] || f.parentId) : null;
+
+          // 1) Совпадение по id — та же самая папка, ничего не создаём.
+          const sameId = existingFolders.find(e => e.id === f.id);
+          if (sameId && mode !== 'overwrite') {
+            folderIdMap[f.id] = sameId.id;
+            foldersReused++;
+            continue;
+          }
+
+          // 2) Совпадение по имени на том же уровне и в том же разделе —
+          //    переиспользуем существующую папку.
+          const twin = existingFolders.find(e =>
+            e.type === f.type &&
+            (e.parentId || null) === (mappedParent || null) &&
+            norm(e.name) === norm(f.name)
+          );
+          if (twin) {
+            folderIdMap[f.id] = twin.id;
+            foldersReused++;
+            continue;
+          }
+
+          const record = { ...f, parentId: mappedParent };
+          await this.agent.db.put('folders', record);
+          existingFolders.push(record);
+          folderIdMap[f.id] = record.id;
+          foldersAdded++;
+        }
+
+        const existingItems = await this.agent.db.getAll(section);
+        const existingIds = new Set(existingItems.map(i => i.id));
+
+        for (const item of (block.items || [])) {
+          if (existingIds.has(item.id) && mode !== 'overwrite') { skipped++; continue; }
+
+          const record = { ...item };
+          // parentId элемента тоже перемаппим — иначе он указывал бы на id
+          // папки из чужой базы, которую мы переиспользовали под другим id.
+          if (record.parentId) {
+            record.parentId = folderIdMap[record.parentId] || record.parentId;
+          }
+          // Тот же принцип, что и для create_tool: чужой исполняемый код
+          // не должен становиться активным без явного решения пользователя.
+          if (section === 'tools' && record.handlerCode) record.enabled = false;
+
+          await this.agent.db.put(section, record);
+          added++;
+        }
+      }
+
+      status.textContent = `✅ Импортировано: ${added}, папок создано: ${foldersAdded}` +
+        `${foldersReused ? `, папок переиспользовано: ${foldersReused}` : ''}` +
+        `${skipped ? `, пропущено: ${skipped}` : ''}`;
+      status.style.color = 'var(--success)';
+
+      await this.agent.tools.loadTools();
+      this.renderTools();
+      this.renderSkills();
+      this.renderPrompts();
+      this.refreshSidebar();
+      this.updateChatToolbar();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  // ── Прерывание работы агента пользователем ──
+  // Работает на двух уровнях: abort() рвёт текущий HTTP-запрос к модели
+  // (в том числе посреди стриминга), а флаг _stopRequested проверяется
+  // между шагами цепочки — чтобы не начать следующую итерацию или
+  // следующий вызов инструмента. Уже запущенный вызов инструмента
+  // дождётся своего таймаута: прервать чужой код на полпути нельзя.
+  stopAgent() {
+    if (!this.isStreaming) return;
+    this._stopRequested = true;
+    try { this._abortCtl?.abort(); } catch (_) {}
+    const container = document.getElementById('chat-messages');
+    container.insertAdjacentHTML('beforeend',
+      '<div class="message system">⏹ Работа агента прервана пользователем.</div>');
+    container.scrollTop = container.scrollHeight;
+  }
+
+  // Единая точка переключения "агент занят / свободен":
+  // раньше disabled у send-btn выставлялся в семи местах вразнобой.
+  _setBusy(busy) {
+    this.isStreaming = busy;
+    const send = document.getElementById('send-btn');
+    const stop = document.getElementById('stop-btn');
+    if (send) send.disabled = busy;
+    if (stop) stop.hidden = !busy;
   }
 
   async deleteChat(chatId) {
     await this.agent.db.delete('chats', chatId);
     const msgs = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
     for (const m of msgs) await this.agent.db.delete('messages', m.id);
+    // Техническая статистика живёт в отдельном store — чистим и её,
+    // иначе останется «сирота» с токенами удалённого чата.
+    await this.agent.db.delete('chat_stats', chatId);
 
     if (this.currentChatId === chatId) {
       this.currentChatId = null;
@@ -592,6 +1617,8 @@ class UI {
       <div class="settings-tabs">
         <button type="button" class="tab-btn settings-tab-btn active" data-settings-tab="connection">🔌 Подключение</button>
         <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="model">🧠 Модель</button>
+        <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="limits">⏱ Ограничения</button>
+        <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="display">👁 Отображение</button>
         <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="logging">🪵 Журналирование</button>
       </div>
 
@@ -659,6 +1686,79 @@ class UI {
           <label>Temperature (0-2)</label>
           <input id="s_temp" type="number" step="0.1" min="0" max="2" value="${llm.temperature}">
         </div>
+
+        <div class="form-group">
+          <label>Окно контекста модели, токенов</label>
+          <input id="s_ctx_limit" type="number" min="0" value="${this.contextLimit}"
+                 placeholder="0 — определять автоматически">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            0 — определяется по названию модели${this._knownContextLimit(llm.model) ? ` (сейчас: ${this._fmtLimit(this._knownContextLimit(llm.model))})` : ' (для этой модели не распознано — укажите вручную)'}.
+            API обычно не сообщает этот лимит, поэтому значение задаётся здесь.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Предупреждать при заполнении контекста, %</label>
+          <input id="s_ctx_warn" type="number" min="1" max="99" value="${this.contextWarnPercent}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            При достижении этого порога появится предупреждение, при 100% — предложение создать новый чат.
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="limits" hidden>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+          Ограничения применяются к одному ответу агента — то есть ко всей цепочке
+          вызовов инструментов, запущенной вашим сообщением. 0 — без ограничения.
+        </div>
+        <div class="settings-grid">
+        <div class="form-group">
+          <label>Максимум итераций с вызовом инструментов</label>
+          <input id="s_max_steps" type="number" min="0" value="${this.limits.maxToolSteps}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Сколько раз подряд модель может вызвать инструменты и получить ответ. Защита от зацикливания.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Бюджет времени на ответ, секунд</label>
+          <input id="s_max_turn_sec" type="number" min="0" value="${this.limits.maxTurnSeconds}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            По истечении запрос к модели прерывается, цепочка останавливается.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Таймаут одного вызова инструмента, секунд</label>
+          <input id="s_tool_timeout_sec" type="number" min="0" value="${this.limits.toolTimeoutSeconds}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Зависший инструмент вернёт ошибку таймаута вместо бесконечного ожидания.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Максимум вызовов инструментов за ответ</label>
+          <input id="s_max_calls" type="number" min="0" value="${this.limits.maxToolCallsPerTurn}">
+        </div>
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-panel="display" hidden>
+        <div class="form-group">
+          <label>Детализация вызовов инструментов в чате</label>
+          <select id="s_tool_verbosity">
+            <option value="hidden" ${this.toolVerbosity === 'hidden' ? 'selected' : ''}>Скрывать — не показывать вызовы</option>
+            <option value="compact" ${this.toolVerbosity === 'compact' ? 'selected' : ''}>Кратко — имя и начало результата</option>
+            <option value="detailed" ${this.toolVerbosity === 'detailed' ? 'selected' : ''}>Подробно — аргументы, полный результат, время</option>
+          </select>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+            Влияет только на отображение. Вызовы выполняются и сохраняются в истории в любом случае.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Данные</label>
+          <button class="btn btn-secondary btn-sm" id="open-export-import-btn">📦 Экспорт / импорт tools, skills, промптов</button>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+            Архив шифруется паролем, структура папок сохраняется.
+          </div>
+        </div>
       </div>
 
       <div class="settings-tab-panel" data-settings-panel="logging" hidden>
@@ -717,6 +1817,29 @@ class UI {
       };
       await this.agent.db.put('settings', { key: 'llm', ...storedConfig });
 
+      // Окно контекста: ручной лимит и порог предупреждения.
+      this.contextLimit = Math.max(0, parseInt(document.getElementById('s_ctx_limit').value) || 0);
+      this.contextWarnPercent = Math.min(99, Math.max(1, parseInt(document.getElementById('s_ctx_warn').value) || 75));
+      await this.agent.db.put('settings', {
+        key: 'context',
+        contextLimit: this.contextLimit,
+        contextWarnPercent: this.contextWarnPercent,
+      });
+
+      // Ограничения работы агента при использовании tools.
+      const limits = {
+        maxToolSteps: Math.max(0, parseInt(document.getElementById('s_max_steps').value) || 0),
+        maxTurnSeconds: Math.max(0, parseInt(document.getElementById('s_max_turn_sec').value) || 0),
+        toolTimeoutSeconds: Math.max(0, parseInt(document.getElementById('s_tool_timeout_sec').value) || 0),
+        maxToolCallsPerTurn: Math.max(0, parseInt(document.getElementById('s_max_calls').value) || 0),
+      };
+      this.limits = limits;
+      await this.agent.db.put('settings', { key: 'limits', ...limits });
+
+      // Отображение хода вызова инструментов.
+      this.toolVerbosity = document.getElementById('s_tool_verbosity').value;
+      await this.agent.db.put('settings', { key: 'display', toolVerbosity: this.toolVerbosity });
+
       // Журналирование: значения не секретные, храним как есть (без шифрования).
       const loggingConfig = {
         llmDebug: document.getElementById('s_debug_llm').checked,
@@ -728,7 +1851,8 @@ class UI {
 
       this.updateConnectionStatus();
       this.updateModelDisplay();
-    }, null, { modal: true }); // ← strict modal: overlay click does NOT close
+      this.updateChatToolbar();
+    }, null, { modal: true, wide: true }); // ← strict modal: overlay click does NOT close
 
     setTimeout(() => {
       // --- Переключение вкладок ---
@@ -741,6 +1865,10 @@ class UI {
             p.hidden = p.dataset.settingsPanel !== target;
           });
         });
+      });
+
+      document.getElementById('open-export-import-btn')?.addEventListener('click', () => {
+        this.showExportImportModal();
       });
 
       document.querySelectorAll('input[name="auth_type"]').forEach(function(radio) {
@@ -867,12 +1995,12 @@ class UI {
   //            (прежнее поведение)
   // ══════════════════════════════════════════════
   _showModal(title, bodyHtml, onSave, onCancel, options = {}) {
-    const { modal = false } = options;
+    const { modal = false, wide = false } = options;
     const id = 'modal_' + uid();
     const modals = document.getElementById('modals');
     modals.innerHTML = `
       <div class="modal-overlay" id="${id}">
-        <div class="modal">
+        <div class="modal${wide ? ' modal-wide' : ''}">
           <h2>${title}</h2>
           ${bodyHtml}
           <div class="modal-actions">

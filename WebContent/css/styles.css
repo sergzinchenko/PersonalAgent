@@ -226,6 +226,10 @@ body {
   line-height: 1.6;
   position: relative;
   animation: msgIn 0.3s ease;
+  /* Без этого длинный URL или строка JSON без пробелов растягивает
+     сообщение за пределы контейнера чата. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 @keyframes msgIn {
@@ -264,6 +268,16 @@ body {
   font-size: 12px;
   font-family: monospace;
   max-width: 90%;
+  /* Результаты инструментов — это JSON и URL: длинные строки без пробелов
+     не переносятся сами и вылезали за рамку (заметно в Edge/Chrome).
+     min-width:0 нужен, потому что элемент — flex-ребёнок: без него
+     содержимое распирает бокс сверх max-width.
+     Прокрутки здесь НЕТ намеренно: в кратком режиме текст просто
+     переносится по словам. Своя прокрутка есть только у .tool-pre
+     внутри подробного режима. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message pre {
@@ -357,9 +371,174 @@ body {
 
 .chat-toolbar {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   margin-bottom: 8px;
+}
+
+.toolbar-row {
+  display: flex;
+  gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.toolbar-meta { border-top: 1px solid var(--border); padding-top: 6px; }
+
+.quick-model {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 10px;
+  max-width: 240px;
+  cursor: pointer;
+}
+.quick-model:hover { border-color: var(--accent); color: var(--accent-light); }
+
+.chip.stat-chip { cursor: default; }
+.chip.stat-chip#tool-stats-chip { cursor: pointer; }
+.chip.stat-chip.muted { opacity: 0.6; }
+.chip.stat-chip.ctx-warn {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.chip.stat-chip.ctx-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(225,112,85,0.12);
+}
+
+.message.system.context-alert { max-width: 90%; font-size: 13px; }
+.message.system.context-alert.warn {
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: rgba(253,203,110,0.10);
+}
+.message.system.context-alert.danger {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  background: rgba(225,112,85,0.12);
+}
+
+#voice-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 17px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+#voice-btn:hover { border-color: var(--accent); color: var(--accent-light); }
+#voice-btn.listening {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  animation: pulseRec 1.2s ease-in-out infinite;
+}
+
+@keyframes pulseRec {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+#stop-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--danger);
+  border: none;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+#stop-btn[hidden] { display: none; }
+#stop-btn:hover { filter: brightness(1.15); }
+
+.message.tool-call .tool-meta { color: var(--text-muted); font-size: 11px; }
+
+/* Краткий режим: результат не должен растягивать ленту чата.
+   Три строки, дальше — многоточие; полный результат доступен
+   в подробном режиме (⚙ Настройки → Отображение). */
+.message.tool-call .tool-compact {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.message.tool-call .tool-section {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.message.tool-call .tool-pre {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  margin-top: 2px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.stats-table th, .stats-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.stats-table th {
+  text-align: left;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  margin-top: 4px;
+}
+.check-row input { width: auto; }
+
+.sel-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: var(--bg-primary);
+}
+.sel-list .check-row { justify-content: flex-start; }
+.sel-folder {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .chip {
@@ -613,6 +792,49 @@ body {
   max-height: 80vh;
   overflow-y: auto;
   animation: slideUp 0.3s ease;
+}
+
+/* Широкий вариант — для окон с вкладками (настройки, экспорт/импорт),
+   где при 520px содержимое не помещалось и появлялась прокрутка.
+   resize: both позволяет пользователю растянуть окно ещё больше;
+   для работы resize обязателен overflow, отличный от visible. */
+.modal.modal-wide {
+  width: min(1100px, 94vw);
+  max-width: 94vw;
+  max-height: 90vh;
+  resize: both;
+  overflow: auto;
+  min-width: 480px;
+  min-height: 320px;
+}
+
+/* Подсказка о том, что угол можно тянуть */
+.modal.modal-wide::after {
+  content: '⁘';
+  position: sticky;
+  float: right;
+  bottom: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* Вкладки в широком окне не должны переноситься на вторую строку —
+   при нехватке места прокручиваем их горизонтально. */
+.modal.modal-wide .settings-tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.modal.modal-wide .settings-tabs .tab-btn { white-space: nowrap; flex-shrink: 0; }
+
+/* Двухколоночная раскладка внутри широкой модалки: на узких экранах
+   auto-fit сам сложит поля в одну колонку. */
+.modal.modal-wide .settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 0 24px;
+  align-items: start;
 }
 
 @keyframes slideUp {

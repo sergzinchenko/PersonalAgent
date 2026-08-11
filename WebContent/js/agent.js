@@ -54,6 +54,25 @@ class AIAgent {
     // 5. Init UI
     this.ui = new UI(this);
     this.tools.ui = this.ui;
+
+    // Пользовательские ограничения работы с tools и настройки отображения.
+    // Применяем ПОСЛЕ создания UI (значения живут в нём), перекрывая дефолты
+    // из конструктора только теми полями, что реально сохранены.
+    const limits = await this.db.get('settings', 'limits');
+    if (limits) {
+      const { key, ...values } = limits;
+      this.ui.limits = { ...this.ui.limits, ...values };
+    }
+    const display = await this.db.get('settings', 'display');
+    if (display && display.toolVerbosity) {
+      this.ui.toolVerbosity = display.toolVerbosity;
+    }
+    const context = await this.db.get('settings', 'context');
+    if (context) {
+      if (typeof context.contextLimit === 'number') this.ui.contextLimit = context.contextLimit;
+      if (typeof context.contextWarnPercent === 'number') this.ui.contextWarnPercent = context.contextWarnPercent;
+    }
+
     this.ui.updateConnectionStatus();
     this.ui.updateModelDisplay();
     this.ui.refreshSidebar();

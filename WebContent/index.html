@@ -47,6 +47,8 @@
         <div class="chat-toolbar" id="chat-toolbar"></div>
         <div id="chat-input-row">
           <textarea id="chat-input" placeholder="Введите сообщение... (Shift+Enter — новая строка)" rows="1"></textarea>
+          <button id="voice-btn" title="Голосовой ввод">🎙</button>
+          <button id="stop-btn" title="Прервать работу агента" hidden>⏹</button>
           <button id="send-btn" title="Отправить">▶</button>
         </div>
       </div>
@@ -59,6 +61,7 @@
         <button class="btn btn-secondary btn-sm" id="add-tool-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-tool-btn">+ Добавить Tool</button>
         <button class="btn btn-secondary btn-sm" id="add-mcp-server-btn">+ MCP Server</button>
+        <button class="btn btn-secondary btn-sm export-import-btn" data-section="tools" title="Выборочный экспорт инструментов">📦 Экспорт</button>
       </div>
       <div class="tools-grid" id="tools-grid"></div>   
     </div>
@@ -69,6 +72,7 @@
         <h3 style="flex:1;">Skills</h3>
         <button class="btn btn-secondary btn-sm" id="add-skill-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-skill-btn">+ Новый Skill</button>
+        <button class="btn btn-secondary btn-sm export-import-btn" data-section="skills" title="Выборочный экспорт навыков">📦 Экспорт</button>
       </div>
       <div class="skills-container" id="skills-container"></div>  
     </div>
@@ -79,6 +83,7 @@
         <h3 style="flex:1;">Библиотека промптов</h3>
         <button class="btn btn-secondary btn-sm" id="add-prompt-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-prompt-btn">+ Новый промпт</button>
+        <button class="btn btn-secondary btn-sm export-import-btn" data-section="prompts" title="Выборочный экспорт промптов">📦 Экспорт</button>
       </div>
       <div class="prompts-container" id="prompts-container"></div>   
     </div>
