@@ -18,18 +18,28 @@
       <button class="tab-btn" data-tab="skills">🧩 Skills</button>
       <button class="tab-btn" data-tab="prompts">📋 Промпты</button>
     </div>
+    <button id="sidebar-toggle" title="Свернуть/развернуть панель">◧</button>
     <span id="connection-status"><span class="status-dot offline"></span></span>
     <button id="settings-btn" title="Настройки">⚙</button>
   </header>
 
   <!-- SIDEBAR -->
   <aside id="sidebar">
+    <div id="sidebar-resizer" title="Потяните, чтобы изменить ширину"></div>
     <div class="sidebar-header">
       <input type="text" id="sidebar-search" placeholder="Поиск...">
     </div>
     <div class="sidebar-list" id="sidebar-list"></div>
     <div class="sidebar-footer">
       <button class="btn btn-primary btn-block" id="sidebar-new-btn">+ Создать</button>
+      <div class="sidebar-footer-row" id="chat-io-row">
+        <button class="btn btn-secondary btn-sm" id="chat-export-btn" title="Выгрузить текущий чат в файл">⬆ Экспорт чата</button>
+        <button class="btn btn-secondary btn-sm" id="chat-import-btn" title="Загрузить чат из файла">⬇ Импорт чата</button>
+      </div>
+      <div class="sidebar-footer-row" id="chats-io-row">
+        <button class="btn btn-secondary btn-sm" id="chats-export-btn" title="Выгрузить несколько чатов с выбором">📦 Экспорт чатов</button>
+        <button class="btn btn-secondary btn-sm" id="chats-import-btn" title="Загрузить несколько чатов из архива">📥 Импорт чатов</button>
+      </div>
     </div>
   </aside>
 
@@ -62,6 +72,7 @@
         <button class="btn btn-primary btn-sm" id="add-tool-btn">+ Добавить Tool</button>
         <button class="btn btn-secondary btn-sm" id="add-mcp-server-btn">+ MCP Server</button>
         <button class="btn btn-secondary btn-sm export-import-btn" data-section="tools" title="Выборочный экспорт инструментов">📦 Экспорт</button>
+        <button class="btn btn-secondary btn-sm import-btn" data-section="tools" title="Импорт из зашифрованного архива">📥 Импорт</button>
       </div>
       <div class="tools-grid" id="tools-grid"></div>   
     </div>
@@ -73,6 +84,7 @@
         <button class="btn btn-secondary btn-sm" id="add-skill-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-skill-btn">+ Новый Skill</button>
         <button class="btn btn-secondary btn-sm export-import-btn" data-section="skills" title="Выборочный экспорт навыков">📦 Экспорт</button>
+        <button class="btn btn-secondary btn-sm import-btn" data-section="skills" title="Импорт из зашифрованного архива">📥 Импорт</button>
       </div>
       <div class="skills-container" id="skills-container"></div>  
     </div>
@@ -84,6 +96,7 @@
         <button class="btn btn-secondary btn-sm" id="add-prompt-folder-btn">📁 Папка</button>
         <button class="btn btn-primary btn-sm" id="add-prompt-btn">+ Новый промпт</button>
         <button class="btn btn-secondary btn-sm export-import-btn" data-section="prompts" title="Выборочный экспорт промптов">📦 Экспорт</button>
+        <button class="btn btn-secondary btn-sm import-btn" data-section="prompts" title="Импорт из зашифрованного архива">📥 Импорт</button>
       </div>
       <div class="prompts-container" id="prompts-container"></div>   
     </div>
@@ -101,7 +114,16 @@
 <script src="js/prompts-library.js"></script>
 <script src="js/folders-engine.js"></script>
 <script src="js/markdown.js"></script>
-<script src="js/ui.js"></script>
+<!-- UI разбит на функциональные модули. ui-core.js объявляет класс UI,
+     остальные дополняют UI.prototype примесями — порядок важен:
+     ui-core.js должен идти первым. -->
+<script src="js/ui-core.js"></script>
+<script src="js/ui-navigation.js"></script>
+<script src="js/ui-chat.js"></script>
+<script src="js/ui-metrics.js"></script>
+<script src="js/ui-settings.js"></script>
+<script src="js/ui-editors.js"></script>
+<script src="js/ui-transfer.js"></script>
 <script src="js/agent.js"></script>
 <script src="js/app.js"></script>
 </body>

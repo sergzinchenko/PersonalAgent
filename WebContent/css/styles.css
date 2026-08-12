@@ -104,7 +104,48 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
+
+/* Свёрнутое состояние: панель убирается целиком, ширину колонки
+   обнуляем на #app (см. .sidebar-collapsed), поэтому здесь достаточно
+   спрятать содержимое. */
+#app.sidebar-collapsed { grid-template-columns: 0 1fr; }
+#app.sidebar-collapsed #sidebar { display: none; }
+
+/* Полоса для перетаскивания правой границы панели.
+   Лежит поверх границы, поэтому визуально не занимает места. */
+#sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+#sidebar-resizer:hover,
+#sidebar-resizer.dragging { background: var(--accent); opacity: 0.55; }
+
+/* Кнопка сворачивания в шапке */
+#sidebar-toggle {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  font-size: 14px;
+  flex-shrink: 0;
+  transition: var(--transition);
+}
+#sidebar-toggle:hover { border-color: var(--accent); color: var(--accent-light); }
+
+/* Во время перетаскивания гасим выделение текста и подсказки —
+   иначе курсор «цепляет» содержимое дерева. */
+body.resizing-sidebar { user-select: none; cursor: col-resize; }
+body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 .sidebar-header {
   padding: 12px;
@@ -279,6 +320,87 @@ body {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+.sidebar-footer-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.sidebar-footer-row[hidden] { display: none; }
+.sidebar-footer-row .btn { flex: 1; font-size: 11px; padding: 5px 6px; }
+
+/* Чаты внутри дерева папок */
+.sidebar-item.chat-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 14px;
+  cursor: grab;
+}
+.sidebar-item.chat-item:active { cursor: grabbing; }
+.sidebar-item.chat-item .title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Подпись под сообщением: время, модель-автор, длительность */
+.message.system.model-switch {
+  border: 1px dashed var(--accent);
+  color: var(--accent-light);
+  background: rgba(108,92,231,0.10);
+  font-size: 12px;
+  max-width: 90%;
+}
+
+.msg-footer {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+.code-block {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+.code-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.code-lang { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.code-copy-btn {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.code-copy-btn:hover { border-color: var(--accent); color: var(--accent-light); }
+.code-copy-btn.copied { border-color: var(--success); color: var(--success); }
+.code-block pre { margin: 0; border: none; border-radius: 0; }
 
 .message pre {
   background: var(--bg-primary);
@@ -534,6 +656,15 @@ body {
   background: var(--bg-primary);
 }
 .sel-list .check-row { justify-content: flex-start; }
+.sel-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .sel-folder {
   margin-left: auto;
   font-size: 11px;

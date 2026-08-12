@@ -62,6 +62,503 @@ class ToolsEngine {
       return { error: 'Unknown action' };
     });
 
+    // Built-in: массовый экспорт чатов (с папками и полными метаданными)
+    this.registerHandler('builtin_export_chats', async (params) => {
+      try {
+        const all = await this.db.getAll('chats');
+        if (!all.length) return { error: 'Нет чатов для выгрузки' };
+
+        let selected;
+        if (Array.isArray(params.chatIds) && params.chatIds.length) {
+          const set = new Set(params.chatIds);
+          selected = all.filter(c => set.has(c.id));
+        } else if (params.folder) {
+          const fid = await this._resolveFolderId('chats', params.folder);
+          if (!fid) return { error: 'Папка не найдена' };
+          const folders = await this._allFolders('chats');
+          // Собираем поддерево папок, чтобы забрать и вложенные чаты.
+          const subtree = new Set([fid]);
+          let grew = true;
+          while (grew) {
+            grew = false;
+            for (const f of folders) {
+              if (f.parentId && subtree.has(f.parentId) && !subtree.has(f.id)) { subtree.add(f.id); grew = true; }
+            }
+          }
+          selected = all.filter(c => c.parentId && subtree.has(c.parentId));
+        } else {
+          selected = all;
+        }
+
+        if (!selected.length) return { error: 'Под условие не попал ни один чат' };
+
+        const allFolders = await this._allFolders('chats');
+        const byId = {};
+        allFolders.forEach(f => { byId[f.id] = f; });
+
+        // Выгружаем только нужные папки — вместе со всей цепочкой родителей,
+        // иначе на импорте вложенная папка осталась бы без своей ветки.
+        const needed = new Set();
+        for (const c of selected) {
+          let p = c.parentId;
+          const guard = new Set();
+          while (p && byId[p] && !guard.has(p)) { guard.add(p); needed.add(p); p = byId[p].parentId; }
+        }
+
+        const chats = [];
+        for (const c of selected) {
+          const msgs = (await this.db.getAllByIndex('messages', 'chatId', c.id))
+            .sort((a, b) => a.timestamp - b.timestamp);
+          const stats = await this.db.get('chat_stats', c.id);
+          chats.push({
+            // Полный набор сведений о чате: без него импорт терял бы
+            // привязку к папке, исходные даты и статистику.
+            id: c.id,
+            title: c.title,
+            createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : null,
+            updatedAt: c.updatedAt ? new Date(c.updatedAt).toISOString() : null,
+            parentId: c.parentId || null,
+            model: c.model,
+            skillIds: c.skillIds || [],
+            stats: stats || null,
+            messages: msgs.map(m => ({
+              role: m.role,
+              kind: m.kind || undefined,          // служебные отметки (смена модели)
+              name: m.name || undefined,
+              content: m.content,
+              timestamp: new Date(m.timestamp).toISOString(),
+              tool_calls: m.tool_calls || undefined,
+              tool_call_id: m.tool_call_id || undefined,
+              model: m.model || undefined,        // какая модель ответила
+              durationMs: m.durationMs,           // время генерации ответа
+              turnDurationMs: m.turnDurationMs,   // полное время обработки запроса
+              from: m.from || undefined,          // для отметки смены модели
+              to: m.to || undefined,
+              isError: m.isError,
+            })),
+          });
+        }
+
+        const payload = {
+          format: 'ai-agent-chats-v1',
+          exportedAt: new Date().toISOString(),
+          folders: allFolders.filter(f => needed.has(f.id))
+            .map(f => ({ id: f.id, name: f.name, parentId: f.parentId || null, type: 'chats' })),
+          chats,
+        };
+
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        this._downloadFile(JSON.stringify(payload, null, 2),
+          `ai-agent-chats-${stamp}.json`, 'application/json');
+
+        const totalMsgs = chats.reduce((n, c) => n + c.messages.length, 0);
+        return { success: true, chats: chats.length, folders: payload.folders.length, messages: totalMsgs };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
+    // Built-in: массовый импорт чатов
+    this.registerHandler('builtin_import_chats', async (params) => {
+      try {
+        const raw = String(params.content || '').trim();
+        if (!raw) return { error: 'Требуется content — содержимое файла' };
+
+        let data;
+        try { data = JSON.parse(raw); }
+        catch (e) { return { error: 'Файл не является корректным JSON' }; }
+
+        if (data.format !== 'ai-agent-chats-v1' || !Array.isArray(data.chats)) {
+          return { error: 'Ожидается архив чатов (формат ai-agent-chats-v1) — используйте export_chats' };
+        }
+
+        const existingFolders = await this._allFolders('chats');
+        const folderIdMap = {};
+        const incoming = data.folders || [];
+        const incomingById = {};
+        incoming.forEach(f => { incomingById[f.id] = f; });
+
+        // Родители раньше детей — уровень вложенности ребёнка зависит от
+        // того, куда лёг его родитель.
+        const depthOf = (f) => {
+          let d = 0, p = f.parentId, guard = new Set();
+          while (p && incomingById[p] && !guard.has(p)) { guard.add(p); d++; p = incomingById[p].parentId; }
+          return d;
+        };
+        const norm = (s) => String(s || '').trim().toLowerCase();
+        let foldersAdded = 0, foldersReused = 0;
+
+        for (const f of incoming.slice().sort((a, b) => depthOf(a) - depthOf(b))) {
+          const mappedParent = f.parentId ? (folderIdMap[f.parentId] || f.parentId) : null;
+          const same = existingFolders.find(e => e.id === f.id);
+          if (same) { folderIdMap[f.id] = same.id; foldersReused++; continue; }
+          // Папка с тем же именем на том же уровне переиспользуется,
+          // а не дублируется (как и при импорте разделов).
+          const twin = existingFolders.find(e =>
+            (e.parentId || null) === (mappedParent || null) && norm(e.name) === norm(f.name));
+          if (twin) { folderIdMap[f.id] = twin.id; foldersReused++; continue; }
+          const created = await this.folders.create('chats', f.name, mappedParent);
+          existingFolders.push(created);
+          folderIdMap[f.id] = created.id;
+          foldersAdded++;
+        }
+
+        const existingChats = await this.db.getAll('chats');
+        const existingIds = new Set(existingChats.map(c => c.id));
+        const overwrite = params.mode === 'overwrite';
+
+        let chatsAdded = 0, chatsSkipped = 0, messagesAdded = 0;
+        let lastChatId = null;
+
+        for (const src of data.chats) {
+          let chatId = src.id;
+          if (existingIds.has(chatId)) {
+            if (!overwrite) { chatsSkipped++; continue; }
+            // Перезапись: старые сообщения убираем, иначе они удвоятся.
+            const old = await this.db.getAllByIndex('messages', 'chatId', chatId);
+            for (const m of old) await this.db.delete('messages', m.id);
+          }
+
+          const parentId = src.parentId ? (folderIdMap[src.parentId] || null) : null;
+          const now = Date.now();
+          await this.db.put('chats', {
+            id: chatId,
+            title: src.title || 'Импортированный чат',
+            createdAt: src.createdAt ? Date.parse(src.createdAt) || now : now,
+            updatedAt: src.updatedAt ? Date.parse(src.updatedAt) || now : now,
+            parentId,
+            model: src.model,
+            skillIds: src.skillIds || [],
+            imported: true,
+          });
+
+          let seq = 0;
+          for (const m of (src.messages || [])) {
+            if (!m || !m.role) continue;
+            const ts = m.timestamp ? (Date.parse(m.timestamp) || Date.now() + seq) : Date.now() + seq;
+            seq++;
+            await this.db.put('messages', {
+              id: uid(),
+              chatId,
+              role: m.role,
+              kind: m.kind,
+              name: m.name,
+              content: m.content,
+              tool_calls: m.tool_calls,
+              tool_call_id: m.tool_call_id,
+              model: m.model,
+              durationMs: m.durationMs,
+              turnDurationMs: m.turnDurationMs,
+              from: m.from,
+              to: m.to,
+              isError: m.isError,
+              timestamp: ts,
+            });
+            messagesAdded++;
+          }
+
+          if (src.stats) {
+            await this.db.put('chat_stats', { ...src.stats, chatId });
+          }
+
+          chatsAdded++;
+          lastChatId = chatId;
+        }
+
+        this._refreshChatUI();
+        if (this.ui && params.open !== false && lastChatId) {
+          await this.ui.loadChat(lastChatId);
+        }
+
+        return {
+          success: true,
+          chats: chatsAdded,
+          skipped: chatsSkipped,
+          messages: messagesAdded,
+          foldersCreated: foldersAdded,
+          foldersReused,
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
+    // Built-in: импорт чата из ранее выгруженного файла
+    this.registerHandler('builtin_import_chat', async (params) => {
+      try {
+        const raw = String(params.content || '').trim();
+        if (!raw) return { error: 'Требуется content — содержимое файла экспорта' };
+
+        let data;
+        try { data = JSON.parse(raw); }
+        catch (e) { return { error: 'Ожидается JSON-выгрузка чата (формат json из export_chat)' }; }
+
+        const srcMessages = Array.isArray(data.messages) ? data.messages : null;
+        if (!srcMessages || !srcMessages.length) {
+          return { error: 'В файле нет массива messages — это не выгрузка чата' };
+        }
+
+        const folderId = params.folder
+          ? await this._resolveFolderId('chats', params.folder, { createMissing: true })
+          : (this.ui?.folderSelection?.chats || null);
+
+        const now = Date.now();
+        const chatId = 'chat_' + uid();
+        const chat = {
+          id: chatId,
+          title: String(params.title || data.title || 'Импортированный чат'),
+          createdAt: data.createdAt ? Date.parse(data.createdAt) || now : now,
+          updatedAt: now,
+          parentId: folderId,
+          skillIds: [],
+          imported: true,
+        };
+        await this.db.put('chats', chat);
+
+        // Порядок сообщений задаём заново по возрастанию: чат
+        // отображается сортировкой по timestamp, а исходные метки могут
+        // совпадать или отсутствовать.
+        let seq = 0;
+        let imported = 0;
+        for (const m of srcMessages) {
+          if (!m || !m.role) continue;
+          const ts = m.timestamp ? (Date.parse(m.timestamp) || now + seq) : now + seq;
+          seq++;
+          await this.db.put('messages', {
+            id: uid(),
+            chatId,
+            role: m.role,
+            kind: m.kind,
+            content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
+            name: m.name,
+            tool_calls: m.tool_calls,
+            tool_call_id: m.tool_call_id,
+            model: m.model,
+            durationMs: m.durationMs,
+            turnDurationMs: m.turnDurationMs,
+            from: m.from,
+            to: m.to,
+            timestamp: ts,
+          });
+          imported++;
+        }
+
+        if (this.ui) {
+          await this.ui.refreshSidebar();
+          if (params.open !== false) await this.ui.loadChat(chatId);
+        }
+
+        return { success: true, chatId, title: chat.title, messages: imported };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
+    // Built-in: папки чатов (создание/переименование/перемещение/удаление)
+    this.registerHandler('builtin_chat_folder', async (params) => {
+      try {
+        if (!this.folders) return { error: 'FoldersEngine не подключён к ToolsEngine' };
+        const action = String(params.action || '').toLowerCase();
+
+        if (action === 'list') {
+          const all = await this.folders.all('chats');
+          const chats = await this.db.getAll('chats');
+          const path = (f) => {
+            const names = [f.name];
+            let p = f.parentId;
+            const guard = new Set();
+            while (p && !guard.has(p)) {
+              guard.add(p);
+              const parent = all.find(x => x.id === p);
+              if (!parent) break;
+              names.unshift(parent.name);
+              p = parent.parentId;
+            }
+            return names.join('/');
+          };
+          return {
+            folders: all.map(f => ({
+              id: f.id,
+              path: path(f),
+              chats: chats.filter(c => (c.parentId || null) === f.id).length,
+            })),
+            rootChats: chats.filter(c => !c.parentId).length,
+          };
+        }
+
+        if (action === 'create') {
+          const name = String(params.name || '').trim();
+          if (!name) return { error: 'Требуется name' };
+          const parentId = params.parent
+            ? await this._resolveFolderId('chats', params.parent, { createMissing: true })
+            : null;
+          const f = await this.folders.create('chats', name, parentId);
+          this._refreshChatUI();
+          return { success: true, id: f.id, name: f.name, parentId: f.parentId };
+        }
+
+        const id = await this._resolveFolderId('chats', params.folder);
+        if (!id) return { error: 'Папка не найдена' };
+
+        if (action === 'rename') {
+          if (!params.name) return { error: 'Требуется name' };
+          await this.folders.rename(id, params.name);
+          this._refreshChatUI();
+          return { success: true, id, name: String(params.name).trim() };
+        }
+
+        if (action === 'move') {
+          const target = params.to
+            ? await this._resolveFolderId('chats', params.to, { createMissing: true })
+            : null;
+          if (id === target) return { error: 'Нельзя переместить папку в саму себя' };
+          await this.folders.move(id, target);
+          const after = await this.db.get('folders', id);
+          if ((after.parentId || null) !== (target || null)) {
+            return { error: 'Нельзя переместить папку в свою подпапку (цикл)' };
+          }
+          this._refreshChatUI();
+          return { success: true, id, parentId: after.parentId };
+        }
+
+        if (action === 'delete') {
+          // Содержимое поднимается на уровень выше — чаты не пропадают.
+          const chats = await this.db.getAll('chats');
+          const moved = chats.filter(c => (c.parentId || null) === id).length;
+          await this.folders.remove(id, 'chats');
+          this._refreshChatUI();
+          return { success: true, deleted: id, movedChats: moved };
+        }
+
+        return { error: 'action должен быть create | rename | move | delete | list' };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
+    // Built-in: переместить чат в папку
+    this.registerHandler('builtin_move_chat', async (params) => {
+      try {
+        const chats = await this.db.getAll('chats');
+        const needle = String(params.chat || '').trim();
+        const chat = params.chat
+          ? (chats.find(c => c.id === needle)
+             || chats.find(c => (c.title || '').toLowerCase() === needle.toLowerCase())
+             || chats.find(c => (c.title || '').toLowerCase().includes(needle.toLowerCase())))
+          : chats.find(c => c.id === this.ui?.currentChatId);
+
+        if (!chat) return { error: 'Чат не найден' };
+
+        const target = params.folder
+          ? await this._resolveFolderId('chats', params.folder, { createMissing: true })
+          : null;
+
+        chat.parentId = target;
+        await this.db.put('chats', chat);
+        this._refreshChatUI();
+        return { success: true, chatId: chat.id, title: chat.title, parentId: target };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
+    // Built-in: экспорт чата в файл
+    this.registerHandler('builtin_export_chat', async (params) => {
+      try {
+        const format = String(params.format || 'markdown').toLowerCase();
+        if (!['html', 'json', 'markdown', 'excel'].includes(format)) {
+          return { error: 'format должен быть html | json | markdown | excel' };
+        }
+
+        const chatId = params.chatId || this.ui?.currentChatId;
+        if (!chatId) return { error: 'Не указан chatId и нет открытого чата' };
+
+        const chat = await this.db.get('chats', chatId);
+        if (!chat) return { error: 'Чат не найден' };
+
+        const msgs = (await this.db.getAllByIndex('messages', 'chatId', chatId))
+          .sort((a, b) => a.timestamp - b.timestamp);
+        if (!msgs.length) return { error: 'В чате нет сообщений' };
+
+        const includeTools = params.includeToolCalls !== false;
+        const visible = includeTools ? msgs : msgs.filter(m => m.role !== 'tool' && !m.tool_calls);
+
+        const stats = await this.db.get('chat_stats', chatId);
+        const built = this._buildChatExport(format, chat, visible, stats);
+
+        this._downloadFile(built.content, built.filename, built.mime);
+
+        return {
+          success: true,
+          format,
+          filename: built.filename,
+          messages: visible.length,
+          note: 'Файл скачан через браузер.',
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
+    // Built-in: поиск по чатам
+    this.registerHandler('builtin_search_chats', async (params) => {
+      try {
+        const query = String(params.query || '').trim();
+        if (!query) return { error: 'Требуется query' };
+
+        const limit = Math.min(100, Math.max(1, parseInt(params.limit) || 20));
+        const caseSensitive = params.caseSensitive === true;
+        const scopeChatId = params.chatId || null;
+
+        const needle = caseSensitive ? query : query.toLowerCase();
+        const chats = await this.db.getAll('chats');
+        const chatById = {};
+        chats.forEach(c => { chatById[c.id] = c; });
+
+        let msgs = scopeChatId
+          ? await this.db.getAllByIndex('messages', 'chatId', scopeChatId)
+          : await this.db.getAll('messages');
+
+        if (params.role) msgs = msgs.filter(m => m.role === params.role);
+
+        const matches = [];
+        for (const m of msgs) {
+          const raw = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+          if (!raw) continue;
+          const hay = caseSensitive ? raw : raw.toLowerCase();
+          const at = hay.indexOf(needle);
+          if (at === -1) continue;
+
+          // Фрагмент вокруг совпадения, чтобы результат был читаемым
+          // и не тянул в контекст модели целые сообщения.
+          const from = Math.max(0, at - 60);
+          const to = Math.min(raw.length, at + query.length + 60);
+          matches.push({
+            chatId: m.chatId,
+            chatTitle: chatById[m.chatId]?.title || '(без названия)',
+            role: m.role,
+            date: new Date(m.timestamp).toISOString(),
+            excerpt: (from > 0 ? '…' : '') + raw.slice(from, to) + (to < raw.length ? '…' : ''),
+          });
+        }
+
+        matches.sort((a, b) => b.date.localeCompare(a.date));
+        const byChat = {};
+        matches.forEach(m => { byChat[m.chatTitle] = (byChat[m.chatTitle] || 0) + 1; });
+
+        return {
+          query,
+          totalMatches: matches.length,
+          chatsAffected: Object.keys(byChat).length,
+          countsByChat: byChat,
+          results: matches.slice(0, limit),
+          truncated: matches.length > limit,
+        };
+      } catch (e) {
+        return { error: e.message };
+      }
+    });
+
     // Built-in: fetch URL (proxy-free, limited by CORS)
     this.registerHandler('builtin_fetch', async (params) => {
       try {
@@ -574,6 +1071,146 @@ class ToolsEngine {
     });
   }
 
+// ─── ХЕЛПЕРЫ ЭКСПОРТА ЧАТА ───
+
+// Инициирует скачивание файла в браузере.
+_downloadFile(content, filename, mime) {
+  // BOM нужен, чтобы Excel корректно открыл кириллицу в CSV/HTML-таблице.
+  const needsBom = /csv|excel|html/.test(mime);
+  const blob = new Blob([needsBom ? '\uFEFF' + content : content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+_escapeHtmlExport(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+_roleLabel(role) {
+  return { user: 'Пользователь', assistant: 'Ассистент', tool: 'Инструмент', system: 'Система' }[role] || role;
+}
+
+// Собирает содержимое файла для выбранного формата.
+_buildChatExport(format, chat, msgs, stats) {
+  const safeTitle = String(chat.title || 'chat').replace(/[^\wа-яА-ЯёЁ\- ]+/g, '').trim().slice(0, 60) || 'chat';
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const dt = (ts) => new Date(ts).toLocaleString('ru-RU');
+
+  if (format === 'json') {
+    return {
+      content: JSON.stringify({
+        title: chat.title,
+        exportedAt: new Date().toISOString(),
+        createdAt: chat.createdAt ? new Date(chat.createdAt).toISOString() : null,
+        stats: stats || null,
+        messages: msgs.map(m => ({
+          role: m.role,
+          kind: m.kind || undefined,
+          name: m.name || undefined,
+          timestamp: new Date(m.timestamp).toISOString(),
+          content: m.content,
+          tool_calls: m.tool_calls || undefined,
+          // Модель-автор ответа и длительности — часть истории, без них
+          // обратный импорт терял бы, чем и за сколько сформирован ответ.
+          model: m.model || undefined,
+          tool_call_id: m.tool_call_id || undefined,
+          durationMs: m.durationMs,
+          turnDurationMs: m.turnDurationMs,
+          from: m.from || undefined,
+          to: m.to || undefined,
+          isError: m.isError,
+        })),
+      }, null, 2),
+      filename: `${safeTitle}-${stamp}.json`,
+      mime: 'application/json',
+    };
+  }
+
+  if (format === 'markdown') {
+    let out = `# ${chat.title || 'Чат'}\n\n`;
+    out += `_Выгружено: ${dt(Date.now())}_\n\n`;
+    if (stats?.totalTokens) out += `_Токенов: ${stats.totalTokens}, вызовов инструментов: ${stats.toolCalls || 0}_\n\n`;
+    out += `---\n\n`;
+    for (const m of msgs) {
+      out += `### ${this._roleLabel(m.role)}${m.name ? ' · ' + m.name : ''}\n`;
+      out += `_${dt(m.timestamp)}_\n\n`;
+      if (m.tool_calls) {
+        for (const tc of m.tool_calls) {
+          if (!tc) continue;
+          out += `**Вызов инструмента:** \`${tc.function?.name}\`\n\n\`\`\`json\n${tc.function?.arguments || ''}\n\`\`\`\n\n`;
+        }
+      }
+      if (m.content) out += `${m.content}\n\n`;
+      out += `---\n\n`;
+    }
+    return { content: out, filename: `${safeTitle}-${stamp}.md`, mime: 'text/markdown' };
+  }
+
+  if (format === 'html') {
+    const rows = msgs.map(m => `
+      <div class="msg ${this._escapeHtmlExport(m.role)}">
+        <div class="meta"><strong>${this._escapeHtmlExport(this._roleLabel(m.role))}</strong>${m.name ? ' · ' + this._escapeHtmlExport(m.name) : ''} <span>${this._escapeHtmlExport(dt(m.timestamp))}</span></div>
+        ${m.tool_calls ? m.tool_calls.filter(Boolean).map(tc =>
+          `<pre class="tool">🔧 ${this._escapeHtmlExport(tc.function?.name)}(${this._escapeHtmlExport(tc.function?.arguments || '')})</pre>`).join('') : ''}
+        ${m.content ? `<pre class="body">${this._escapeHtmlExport(m.content)}</pre>` : ''}
+      </div>`).join('\n');
+
+    // Экспортируем как самодостаточный файл со встроенными стилями.
+    // Всё содержимое экранировано — открытие файла не должно исполнять
+    // разметку, пришедшую когда-то из ответа модели.
+    const content = `<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8">
+<title>${this._escapeHtmlExport(chat.title || 'Чат')}</title>
+<style>
+body{font-family:system-ui,Segoe UI,sans-serif;background:#0f0f14;color:#e8e8f0;max-width:900px;margin:0 auto;padding:24px;}
+h1{font-size:22px;} .sub{color:#9999bb;font-size:13px;margin-bottom:20px;}
+.msg{border:1px solid #2d2d4a;border-radius:10px;padding:12px 16px;margin-bottom:12px;}
+.msg.user{background:#1a1a24;} .msg.assistant{background:#16161f;}
+.msg.tool{background:rgba(0,184,148,0.08);border-color:#00b894;}
+.meta{font-size:12px;color:#9999bb;margin-bottom:8px;} .meta span{float:right;}
+pre{white-space:pre-wrap;word-break:break-word;margin:0;font-family:ui-monospace,Consolas,monospace;font-size:13px;}
+pre.tool{color:#00b894;font-size:12px;margin-bottom:6px;}
+</style></head><body>
+<h1>${this._escapeHtmlExport(chat.title || 'Чат')}</h1>
+<div class="sub">Выгружено: ${this._escapeHtmlExport(dt(Date.now()))}${stats?.totalTokens ? ` · Токенов: ${stats.totalTokens} · Вызовов инструментов: ${stats.toolCalls || 0}` : ''} · Сообщений: ${msgs.length}</div>
+${rows}
+</body></html>`;
+    return { content, filename: `${safeTitle}-${stamp}.html`, mime: 'text/html' };
+  }
+
+  // excel — HTML-таблица с расширением .xls.
+  // Настоящий .xlsx — это ZIP-контейнер с XML внутри; собрать его без
+  // внешней библиотеки в браузере нельзя, а тянуть зависимость ради
+  // выгрузки чата несоразмерно. Excel и LibreOffice открывают такой
+  // файл штатно, сохраняя таблицу и типы колонок.
+  const cells = msgs.map((m, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${this._escapeHtmlExport(dt(m.timestamp))}</td>
+      <td>${this._escapeHtmlExport(this._roleLabel(m.role))}</td>
+      <td>${this._escapeHtmlExport(m.name || '')}</td>
+      <td>${this._escapeHtmlExport(m.content || '')}</td>
+      <td>${m.tool_calls ? this._escapeHtmlExport(m.tool_calls.filter(Boolean).map(t => t.function?.name).join(', ')) : ''}</td>
+      <td>${m.durationMs != null ? m.durationMs : ''}</td>
+    </tr>`).join('');
+
+  const content = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="UTF-8">
+<style>table{border-collapse:collapse;} td,th{border:1px solid #999;padding:4px;vertical-align:top;mso-number-format:"\\@";}
+th{background:#ddd;font-weight:bold;}</style></head><body>
+<table>
+<tr><th colspan="7">${this._escapeHtmlExport(chat.title || 'Чат')} — выгружено ${this._escapeHtmlExport(dt(Date.now()))}</th></tr>
+<tr><th>№</th><th>Время</th><th>Роль</th><th>Инструмент</th><th>Содержимое</th><th>Вызовы инструментов</th><th>Длительность, мс</th></tr>
+${cells}
+</table></body></html>`;
+  return { content, filename: `${safeTitle}-${stamp}.xls`, mime: 'application/vnd.ms-excel' };
+}
+
 // ─── ХЕЛПЕР БЕЗОПАСНОСТИ: SSRF-защита для http_fetch ───
 //
 // Ограничивает http_fetch от обращений к локальным/приватным сетям —
@@ -655,6 +1292,14 @@ _isBlockedFetchHost(hostname) {
 		return current ? current.id : null;
 	}
 
+	_refreshChatUI() {
+		// Чаты живут прямо в дереве сайдбара, отдельной панели у них нет —
+		// поэтому достаточно перерисовать сайдбар (в отличие от _refreshUI,
+		// который обновляет ещё и панель раздела справа).
+		const ui = this.ui;
+		if (!ui) return;
+		try { ui.refreshSidebar && ui.refreshSidebar(); } catch (_) {}
+	}
 	_refreshUI(type) {
 		const ui = this.ui;
 		if (!ui) return;
@@ -708,6 +1353,134 @@ _isBlockedFetchHost(hostname) {
 	            value: { description: 'значение для записи (любой тип)' },
 	          },
 	          required: ['action'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_export_chats',
+	        name: 'export_chats',
+	        description: 'Выгружает несколько чатов в один архив вместе со структурой папок, статистикой и полными ' +
+	          'метаданными сообщений (модель-автор ответа, время генерации, время обработки запроса). ' +
+	          'Без параметров выгружает все чаты; можно ограничить списком chatIds или папкой.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            chatIds: { type: 'array', items: { type: 'string' }, description: 'ID конкретных чатов' },
+	            folder: { type: 'string', description: 'Выгрузить чаты этой папки со вложенными (id или путь «A/B»)' },
+	          },
+	          required: [],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_import_chats',
+	        name: 'import_chats',
+	        description: 'Загружает архив чатов, созданный export_chats: восстанавливает чаты, их папки, статистику ' +
+	          'и все метаданные сообщений. Папка с тем же именем на том же уровне переиспользуется. ' +
+	          'По умолчанию чаты с уже существующими id пропускаются (mode=merge).',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            content: { type: 'string', description: 'Содержимое JSON-архива' },
+	            mode: { type: 'string', enum: ['merge', 'overwrite'], description: 'merge — пропускать существующие, overwrite — заменять' },
+	            open: { type: 'boolean', description: 'Открыть последний импортированный чат (по умолчанию true)' },
+	          },
+	          required: ['content'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_import_chat',
+	        name: 'import_chat',
+	        description: 'Импортирует чат из ранее выгруженного JSON-файла (формат json инструмента export_chat). ' +
+	          'Содержимое файла передаётся в content как текст. Создаёт новый чат со всей перепиской; ' +
+	          'без folder помещает его в папку, выбранную сейчас в дереве чатов.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            content: { type: 'string', description: 'Содержимое JSON-файла выгрузки' },
+	            title: { type: 'string', description: 'Название чата. Пусто = взять из файла.' },
+	            folder: { type: 'string', description: 'Папка чатов: id или путь «A/B». Пусто = текущая выбранная.' },
+	            open: { type: 'boolean', description: 'Открыть чат после импорта (по умолчанию true)' },
+	          },
+	          required: ['content'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_chat_folder',
+	        name: 'chat_folder',
+	        description: 'Управляет папками чатов: создание, переименование, перемещение, удаление и просмотр списка. ' +
+	          'Папки могут вкладываться произвольно. При удалении папки её чаты и подпапки поднимаются на уровень ' +
+	          'выше — сами чаты не удаляются.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            action: { type: 'string', enum: ['create', 'rename', 'move', 'delete', 'list'], description: 'Что сделать' },
+	            folder: { type: 'string', description: 'Целевая папка (id или путь «A/B») — для rename/move/delete' },
+	            name: { type: 'string', description: 'Название — для create/rename' },
+	            parent: { type: 'string', description: 'Родительская папка — для create. Пусто = корень.' },
+	            to: { type: 'string', description: 'Куда переместить — для move. Пусто = в корень.' },
+	          },
+	          required: ['action'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_move_chat',
+	        name: 'move_chat',
+	        description: 'Перемещает чат в папку. Чат ищется по id или названию (допускается частичное совпадение); ' +
+	          'без указания chat перемещается текущий открытый чат. Пустой folder переносит чат в корень.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            chat: { type: 'string', description: 'ID или название чата. Пусто = текущий открытый.' },
+	            folder: { type: 'string', description: 'Папка назначения: id или путь «A/B». Пусто = корень.' },
+	          },
+	          required: [],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_export_chat',
+	        name: 'export_chat',
+	        description: 'Выгружает переписку чата в файл с хронологией сообщений. Форматы: html (готовый к просмотру документ), ' +
+	          'json (структурированные данные), markdown (текст), excel (таблица для Excel/LibreOffice). ' +
+	          'Без chatId выгружает текущий открытый чат. Файл скачивается браузером.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            format: { type: 'string', enum: ['html', 'json', 'markdown', 'excel'], description: 'Формат файла' },
+	            chatId: { type: 'string', description: 'ID чата. Пусто = текущий открытый чат.' },
+	            includeToolCalls: { type: 'boolean', description: 'Включать вызовы инструментов и их результаты (по умолчанию true)' },
+	          },
+	          required: ['format'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_search_chats',
+	        name: 'search_chats',
+	        description: 'Ищет подстроку по содержимому сообщений во всех чатах (или в одном, если задан chatId). ' +
+	          'Возвращает фрагменты вокруг совпадений с указанием чата, роли и даты — удобно, чтобы вспомнить, ' +
+	          'где обсуждалась тема. Поиск буквальный (подстрокой), не семантический.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            query: { type: 'string', description: 'Искомый текст (подстрока)' },
+	            chatId: { type: 'string', description: 'Искать только в этом чате. Пусто = во всех.' },
+	            role: { type: 'string', enum: ['user', 'assistant', 'tool'], description: 'Ограничить поиск ролью автора' },
+	            limit: { type: 'number', description: 'Сколько совпадений вернуть (по умолчанию 20, максимум 100)' },
+	            caseSensitive: { type: 'boolean', description: 'Учитывать регистр (по умолчанию false)' },
+	          },
+	          required: ['query'],
 	        },
 	        enabled: true,
 	        builtin: true,

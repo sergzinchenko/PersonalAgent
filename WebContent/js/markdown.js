@@ -21,8 +21,28 @@ function renderMarkdown(text) {
   // не было экранирования вообще, и ответ ассистента (roль assistant) шёл
   // прямиком в innerHTML — это давало прямой XSS через содержимое ответа LLM.
   var html = _escapeHtmlForMarkdown(text);
-  // Code blocks
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>');
+
+  // Блоки кода вынимаем из текста ДО остальных преобразований и
+  // возвращаем в самом конце. Иначе к их содержимому применялись бы
+  // правила разметки: `*` внутри кода превращался в <em>, `#` в начале
+  // строки — в заголовок, а финальная замена \n → <br> добавляла лишние
+  // переносы поверх тех, что <pre> и так сохраняет (строки двоились).
+  var codeBlocks = [];
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function (m, lang, code) {
+    const label = lang ? '<span class="code-lang">' + lang + '</span>' : '';
+    // Текст для копирования обработчик берёт напрямую из <code>
+    // через textContent — ни экранировать повторно, ни хранить копию
+    // в data-атрибуте не требуется.
+    codeBlocks.push(
+      '<div class="code-block">' +
+        '<div class="code-bar">' + label +
+          '<button class="code-copy-btn" type="button" title="Копировать код">⧉ Копировать</button>' +
+        '</div>' +
+        '<pre><code class="lang-' + lang + '">' + code + '</code></pre>' +
+      '</div>'
+    );
+    return '\u0000CODEBLOCK' + (codeBlocks.length - 1) + '\u0000';
+  });
   // Inline code
   var inlineCodeRe = new RegExp('[`]([^`]+)[`]', 'g');
   html = html.replace(inlineCodeRe, '<code>$1</code>');
@@ -43,6 +63,11 @@ function renderMarkdown(text) {
   });
   // Line breaks
   html = html.replace(/\n/g, '<br>');
+
+  // Возвращаем блоки кода на место — уже после всех текстовых правил.
+  html = html.replace(/\u0000CODEBLOCK(\d+)\u0000/g, function (m, i) {
+    return codeBlocks[Number(i)];
+  });
   return html;
 }
 

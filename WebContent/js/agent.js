@@ -73,6 +73,10 @@ class AIAgent {
       if (typeof context.contextWarnPercent === 'number') this.ui.contextWarnPercent = context.contextWarnPercent;
     }
 
+    // Раскладка панели навигации: ширина и свёрнутое состояние.
+    const layout = await this.db.get('settings', 'layout');
+    this.ui.applyLayout(layout);
+
     this.ui.updateConnectionStatus();
     this.ui.updateModelDisplay();
     this.ui.refreshSidebar();
