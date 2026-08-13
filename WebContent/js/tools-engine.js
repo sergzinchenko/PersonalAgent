@@ -148,11 +148,34 @@ class ToolsEngine {
         };
 
         const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-        this._downloadFile(JSON.stringify(payload, null, 2),
-          `ai-agent-chats-${stamp}.json`, 'application/json');
+
+        // Шифрование НЕОБЯЗАТЕЛЬНО: без пароля файл остаётся читаемым
+        // JSON (удобно для просмотра и обработки), с паролем —
+        // зашифрованный конверт того же формата, что у архивов
+        // tools/skills/prompts (PBKDF2-SHA256 → AES-GCM).
+        const password = params.password ? String(params.password) : '';
+        let fileContent, filename;
+        if (password) {
+          if (password.length < 8) return { error: 'Пароль короче 8 символов' };
+          const envelope = await ArchiveCrypto.encryptPayload(payload, password);
+          fileContent = JSON.stringify(envelope, null, 2);
+          filename = `ai-agent-chats-${stamp}.enc.json`;
+        } else {
+          fileContent = JSON.stringify(payload, null, 2);
+          filename = `ai-agent-chats-${stamp}.json`;
+        }
+
+        this._downloadFile(fileContent, filename, 'application/json');
 
         const totalMsgs = chats.reduce((n, c) => n + c.messages.length, 0);
-        return { success: true, chats: chats.length, folders: payload.folders.length, messages: totalMsgs };
+        return {
+          success: true,
+          chats: chats.length,
+          folders: payload.folders.length,
+          messages: totalMsgs,
+          encrypted: !!password,
+          filename,
+        };
       } catch (e) {
         return { error: e.message };
       }
@@ -167,6 +190,20 @@ class ToolsEngine {
         let data;
         try { data = JSON.parse(raw); }
         catch (e) { return { error: 'Файл не является корректным JSON' }; }
+
+        // Зашифрованный архив узнаём по конверту ArchiveCrypto.
+        // Формат определяется автоматически — пользователю не нужно
+        // помнить, шифровал он этот файл или нет.
+        if (data && data.format === ArchiveCrypto.FORMAT) {
+          if (!params.password) {
+            return { error: 'Архив зашифрован — требуется password', needsPassword: true };
+          }
+          try {
+            data = await ArchiveCrypto.decryptPayload(data, String(params.password));
+          } catch (e) {
+            return { error: e.message };
+          }
+        }
 
         if (data.format !== 'ai-agent-chats-v1' || !Array.isArray(data.chats)) {
           return { error: 'Ожидается архив чатов (формат ai-agent-chats-v1) — используйте export_chats' };
@@ -1362,12 +1399,14 @@ _isBlockedFetchHost(hostname) {
 	        name: 'export_chats',
 	        description: 'Выгружает несколько чатов в один архив вместе со структурой папок, статистикой и полными ' +
 	          'метаданными сообщений (модель-автор ответа, время генерации, время обработки запроса). ' +
-	          'Без параметров выгружает все чаты; можно ограничить списком chatIds или папкой.',
+	          'Без параметров выгружает все чаты; можно ограничить списком chatIds или папкой. ' +
+	          'Архив можно необязательно зашифровать паролем (PBKDF2 → AES-GCM), как архивы tools/skills/промптов.',
 	        parameters: {
 	          type: 'object',
 	          properties: {
 	            chatIds: { type: 'array', items: { type: 'string' }, description: 'ID конкретных чатов' },
 	            folder: { type: 'string', description: 'Выгрузить чаты этой папки со вложенными (id или путь «A/B»)' },
+	            password: { type: 'string', description: 'Необязательно: зашифровать архив этим паролем (минимум 8 символов). Без пароля файл — обычный JSON.' },
 	          },
 	          required: [],
 	        },
@@ -1379,12 +1418,14 @@ _isBlockedFetchHost(hostname) {
 	        name: 'import_chats',
 	        description: 'Загружает архив чатов, созданный export_chats: восстанавливает чаты, их папки, статистику ' +
 	          'и все метаданные сообщений. Папка с тем же именем на том же уровне переиспользуется. ' +
-	          'По умолчанию чаты с уже существующими id пропускаются (mode=merge).',
+	          'По умолчанию чаты с уже существующими id пропускаются (mode=merge). ' +
+	          'Понимает и обычные, и зашифрованные архивы — для последних нужен password.',
 	        parameters: {
 	          type: 'object',
 	          properties: {
 	            content: { type: 'string', description: 'Содержимое JSON-архива' },
 	            mode: { type: 'string', enum: ['merge', 'overwrite'], description: 'merge — пропускать существующие, overwrite — заменять' },
+	            password: { type: 'string', description: 'Пароль, если архив зашифрован. Формат определяется автоматически.' },
 	            open: { type: 'boolean', description: 'Открыть последний импортированный чат (по умолчанию true)' },
 	          },
 	          required: ['content'],

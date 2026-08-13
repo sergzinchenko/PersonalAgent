@@ -352,6 +352,14 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 }
 
 /* Подпись под сообщением: время, модель-автор, длительность */
+.message.system.truncation-notice {
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  background: rgba(253,203,110,0.10);
+  font-size: 13px;
+  max-width: 90%;
+}
+
 .message.system.model-switch {
   border: 1px dashed var(--accent);
   color: var(--accent-light);
@@ -418,6 +426,45 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 .message p { margin-bottom: 8px; }
 .message p:last-child { margin-bottom: 0; }
+
+/* Панель хода работы агента */
+.agent-status {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 90%;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.agent-status .status-text { color: var(--text-primary); }
+.agent-status .status-detail { color: var(--text-muted); font-size: 11px; }
+.agent-status .status-timer {
+  margin-left: auto;
+  padding-left: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.agent-status .status-timer.near-limit { color: var(--warning); }
+
+.status-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: statusSpin 0.8s linear infinite;
+}
+
+@keyframes statusSpin { to { transform: rotate(360deg); } }
 
 .typing-indicator {
   display: flex;

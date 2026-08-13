@@ -38,6 +38,7 @@ class UI {
     this.isListening = false;
 
     // Прерывание работы агента пользователем
+    this._statusTimer = null;   // интервал обновления панели статуса
     this._abortCtl = null;      // AbortController текущего запроса к LLM
     this._stopRequested = false;// флаг: прервать цепочку между шагами
 

@@ -52,6 +52,28 @@ Object.assign(UI.prototype, {
           а также модель-автор каждого ответа и тайминги.
         </div>
       </div>
+      <div class="form-group">
+        <label class="check-row" style="margin:0;">
+          <input type="checkbox" id="chats_enc_on"> 🔒 Зашифровать архив паролем
+        </label>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+          Без пароля файл остаётся обычным JSON — его удобно просматривать и обрабатывать.
+          С паролем применяется то же шифрование, что и для архивов tools/skills/промптов.
+        </div>
+      </div>
+      <div id="chats_enc_fields" hidden>
+        <div class="form-group">
+          <label>Пароль</label>
+          <input id="chats_pass" type="password" placeholder="минимум 8 символов">
+        </div>
+        <div class="form-group">
+          <label>Повторите пароль</label>
+          <input id="chats_pass2" type="password" placeholder="ещё раз">
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
+          Восстановить пароль невозможно — без него архив не открыть.
+        </div>
+      </div>
       <button class="btn btn-primary btn-sm" id="chats-do-export">📦 Скачать архив</button>
       <span id="chats-exp-status" style="font-size:12px;margin-left:8px;"></span>
     `, null, null, { modal: true, wide: true });
@@ -67,6 +89,13 @@ Object.assign(UI.prototype, {
       document.getElementById('chats-sel-none')?.addEventListener('click', () => { boxes().forEach(b => b.checked = false); count(); });
       count();
 
+      // Поля пароля показываем только при включённом шифровании —
+      // по умолчанию выгрузка остаётся простым JSON.
+      const encBox = document.getElementById('chats_enc_on');
+      encBox?.addEventListener('change', () => {
+        document.getElementById('chats_enc_fields').hidden = !encBox.checked;
+      });
+
       document.getElementById('chats-do-export')?.addEventListener('click', async () => {
         const status = document.getElementById('chats-exp-status');
         const ids = boxes().filter(b => b.checked).map(b => b.value);
@@ -75,16 +104,35 @@ Object.assign(UI.prototype, {
           status.style.color = 'var(--danger)';
           return;
         }
-        status.textContent = '⏳ Готовлю архив...';
+
+        let password = '';
+        if (encBox?.checked) {
+          password = document.getElementById('chats_pass').value;
+          const repeat = document.getElementById('chats_pass2').value;
+          if (password.length < 8) {
+            status.textContent = '❌ пароль короче 8 символов';
+            status.style.color = 'var(--danger)';
+            return;
+          }
+          if (password !== repeat) {
+            status.textContent = '❌ пароли не совпадают';
+            status.style.color = 'var(--danger)';
+            return;
+          }
+        }
+
+        status.textContent = password ? '⏳ Шифрую архив...' : '⏳ Готовлю архив...';
         status.style.color = 'var(--warning)';
 
         // Работу делает встроенный инструмент — тот же, что доступен агенту.
-        const res = await this.agent.tools.executeTool('export_chats', { chatIds: ids });
+        const res = await this.agent.tools.executeTool('export_chats',
+          password ? { chatIds: ids, password } : { chatIds: ids });
         if (res && res.error) {
           status.textContent = '❌ ' + res.error;
           status.style.color = 'var(--danger)';
         } else {
-          status.textContent = `✅ Чатов: ${res.chats}, сообщений: ${res.messages}, папок: ${res.folders}`;
+          status.textContent = `✅ Чатов: ${res.chats}, сообщений: ${res.messages}, папок: ${res.folders}` +
+            (res.encrypted ? ' · зашифровано' : '');
           status.style.color = 'var(--success)';
         }
       });
@@ -103,8 +151,13 @@ Object.assign(UI.prototype, {
         <label class="check-row"><input type="radio" name="chats_imp_mode" value="merge" checked> Добавить (чаты с существующими id пропускаются)</label>
         <label class="check-row"><input type="radio" name="chats_imp_mode" value="overwrite"> Перезаписать чаты с совпадающими id</label>
       </div>
+      <div class="form-group">
+        <label>Пароль <span style="color:var(--text-muted);font-weight:400;">— только для зашифрованных архивов</span></label>
+        <input id="chats_imp_pass" type="password" placeholder="оставьте пустым, если архив не зашифрован">
+      </div>
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
-        Подходит архив, созданный кнопкой «Экспорт чатов». Структура папок восстанавливается;
+        Подходит архив, созданный кнопкой «Экспорт чатов» — как обычный, так и зашифрованный
+        (определяется автоматически). Структура папок восстанавливается;
         папка с тем же именем на том же уровне переиспользуется, а не дублируется.
       </div>
       <button class="btn btn-primary btn-sm" id="chats-do-import">📥 Загрузить</button>
@@ -125,10 +178,16 @@ Object.assign(UI.prototype, {
 
         const content = await fileInput.files[0].text();
         const mode = document.querySelector('input[name="chats_imp_mode"]:checked')?.value || 'merge';
+        const password = document.getElementById('chats_imp_pass').value;
 
-        const res = await this.agent.tools.executeTool('import_chats', { content, mode, open: false });
+        const res = await this.agent.tools.executeTool('import_chats',
+          { content, mode, open: false, ...(password ? { password } : {}) });
         if (res && res.error) {
-          status.textContent = '❌ ' + res.error;
+          // Инструмент сам распознаёт зашифрованный архив и просит пароль —
+          // подсказываем это явно, а не показываем сухую ошибку.
+          status.textContent = res.needsPassword
+            ? '🔒 Архив зашифрован — введите пароль'
+            : '❌ ' + res.error;
           status.style.color = 'var(--danger)';
         } else {
           status.textContent = `✅ Чатов: ${res.chats}, сообщений: ${res.messages}` +

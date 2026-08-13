@@ -108,6 +108,10 @@ Object.assign(UI.prototype, {
     if (msg.role === 'assistant') {
       if (msg.model) parts.push('🧠 ' + this._escHtml(msg.model));
       if (msg.durationMs != null) parts.push('⏱ ' + this._fmtDuration(msg.durationMs));
+      // Явно помечаем неполные ответы, чтобы обрыв не выглядел
+      // «странным поведением модели».
+      if (msg.truncated) parts.push('✂️ оборван по лимиту токенов');
+      if (msg.interrupted) parts.push('⏹ прерван, сохранена полученная часть');
     }
     return parts.join(' · ');
   },
@@ -201,11 +205,89 @@ Object.assign(UI.prototype, {
 
   // Останавливает ход и сообщает причину. Возвращает true — значит выше
   // по стеку нужно прекратить цепочку tool-calling.
-  _stopTurn(container, reason) {
+  // depth важен: состоянием «агент занят» владеет ТОЛЬКО корневой кадр
+  // цепочки (depth === 0). Вложенные кадры не снимают занятость, иначе
+  // на середине цепочки tool-calling кнопка отправки разблокируется,
+  // а кнопка останова остаётся висеть от следующего шага.
+  // Предупреждение об обрыве ответа по лимиту токенов + продолжение.
+  // Продолжение реализовано как обычное сообщение пользователя: обрезанный
+  // ответ уже лежит в истории, поэтому модель видит, где остановилась.
+  // ── Индикатор хода работы ──
+  // Раньше во время работы висели три статичные точки, которые к тому же
+  // снимались перед вызовами инструментов — то есть на самом долгом этапе
+  // пользователь не видел вообще ничего. Панель показывает текущую стадию,
+  // счётчик прошедшего времени и (когда задан) остаток бюджета на ход.
+  _showStatus(text, detail = '') {
+    const container = document.getElementById('chat-messages');
+    let el = document.getElementById('agent-status');
+    if (!el) {
+      container.insertAdjacentHTML('beforeend', `
+        <div class="agent-status" id="agent-status">
+          <span class="status-spinner"></span>
+          <span class="status-text"></span>
+          <span class="status-detail"></span>
+          <span class="status-timer"></span>
+        </div>`);
+      el = document.getElementById('agent-status');
+      container.scrollTop = container.scrollHeight;
+    }
+    el.querySelector('.status-text').textContent = text;
+    el.querySelector('.status-detail').textContent = detail;
+
+    // Таймер запускаем один раз на весь ход, а не на каждую стадию:
+    // пользователю важно общее время ожидания.
+    if (!this._statusTimer) {
+      const started = this._turnStartedAt || Date.now();
+      const budget = this.limits.maxTurnSeconds;
+      const tick = () => {
+        const node = document.getElementById('agent-status');
+        if (!node) return;
+        const sec = Math.floor((Date.now() - started) / 1000);
+        const timer = node.querySelector('.status-timer');
+        if (!timer) return;
+        timer.textContent = budget > 0
+          ? `${sec} с из ${budget}`
+          : `${sec} с`;
+        // Ближе к исчерпанию бюджета подсвечиваем — обрыв не должен
+        // становиться неожиданностью.
+        timer.classList.toggle('near-limit', budget > 0 && sec >= budget * 0.75);
+      };
+      tick();
+      this._statusTimer = setInterval(tick, 1000);
+    }
+  },
+
+  _hideStatus() {
+    clearInterval(this._statusTimer);
+    this._statusTimer = null;
+    document.getElementById('agent-status')?.remove();
+  },
+
+  _showTruncationNotice(container) {
+    const max = this.agent.llm.maxTokens;
+    const id = 'trunc_' + uid();
+    container.insertAdjacentHTML('beforeend', `
+      <div class="message system truncation-notice" id="${id}">
+        ✂️ Ответ оборван: исчерпан лимит ответа (max_tokens = ${max}).
+        Увеличьте его в ⚙ Настройки → Модель или продолжите ответ.
+        <div style="margin-top:8px;">
+          <button class="btn btn-primary btn-sm" data-continue="1">▶ Продолжить ответ</button>
+        </div>
+      </div>`);
+    const el = document.getElementById(id);
+    el?.querySelector('[data-continue]')?.addEventListener('click', () => {
+      el.remove();
+      const input = document.getElementById('chat-input');
+      input.value = 'Продолжи ответ с того места, где он оборвался, не повторяя уже написанное.';
+      this.sendMessage();
+    });
+  },
+
+  _stopTurn(container, reason, depth = 0) {
     container.insertAdjacentHTML('beforeend',
       `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
     container.scrollTop = container.scrollHeight;
-    this._setBusy(false);
+    if (depth === 0) { this._setBusy(false); this._hideStatus(); }
   },
 
 
@@ -215,13 +297,13 @@ Object.assign(UI.prototype, {
 
     // ── Прерывание пользователем: проверяем между шагами цепочки ──
     if (this._stopRequested) {
-      this._setBusy(false);
+      if (depth === 0) { this._setBusy(false); this._hideStatus(); }
       return;
     }
 
     // ── Лимит 1: количество итераций tool-calling ──
     if (L.maxToolSteps > 0 && depth >= L.maxToolSteps) {
-      this._stopTurn(container, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.`);
+      this._stopTurn(container, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.`, depth);
       return;
     }
 
@@ -229,15 +311,17 @@ Object.assign(UI.prototype, {
     if (L.maxTurnSeconds > 0 && this._turnStartedAt) {
       const elapsedSec = (Date.now() - this._turnStartedAt) / 1000;
       if (elapsedSec >= L.maxTurnSeconds) {
-        this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с). Цепочка вызовов инструментов остановлена.`);
+        this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с). Цепочка вызовов инструментов остановлена.`, depth);
         return;
       }
     }
 
     this._setBusy(true);
 
-    container.insertAdjacentHTML('beforeend', '<div class="typing-indicator" id="typing"><span></span><span></span><span></span></div>');
-    container.scrollTop = container.scrollHeight;
+    this._showStatus(
+      depth === 0 ? 'Отправляю запрос модели…' : `Продолжаю работу (шаг ${depth + 1})…`,
+      this.agent.llm.model ? '🧠 ' + this.agent.llm.model : ''
+    );
 
     // AbortController прерывает сам HTTP-запрос к LLM — и по таймауту хода,
     // и по кнопке «⏹» (stopAgent() вызывает abort() через this._abortCtl).
@@ -249,7 +333,14 @@ Object.assign(UI.prototype, {
       turnTimer = setTimeout(() => abortCtl.abort(), Math.max(0, remainingMs));
     }
 
+    // Объявлены выше try: при прерывании (таймаут или кнопка «⏹») к ним
+    // нужно обратиться из catch, чтобы не потерять уже полученный текст.
+    let msgEl = null;
+    let fullContent = '';
+    const requestStartedAt = performance.now();
+
     try {
+      this._showStatus('Собираю контекст…', 'история чата и активные навыки');
       const allMsgs = await this.agent.db.getAllByIndex('messages', 'chatId', this.currentChatId);
       allMsgs.sort((a, b) => a.timestamp - b.timestamp);
 
@@ -272,28 +363,36 @@ Object.assign(UI.prototype, {
 
       const tools = await this.agent.tools.getEnabledToolsForAPI();
 
-      document.getElementById('typing')?.remove();
-
-      const msgEl = document.createElement('div');
+      msgEl = document.createElement('div');
       msgEl.className = 'message assistant';
       container.appendChild(msgEl);
 
-      let fullContent = '';
+      this._showStatus('Жду ответ модели…',
+        `${apiMessages.length} сообщений в запросе` + (tools.length ? `, ${tools.length} инструментов` : ''));
 
-      // Засекаем время именно вокруг обращения к модели: это то, что
-      // показывается в чате как длительность ответа.
-      const requestStartedAt = performance.now();
-
+      let firstChunkSeen = false;
       const result = await this.agent.llm.chat(apiMessages, {
         tools: tools.length > 0 ? tools : null,
         stream: true,
         signal: abortCtl.signal,
         onChunk: (chunk) => {
           fullContent += chunk;
+          if (!firstChunkSeen) {
+            firstChunkSeen = true;
+            this._showStatus('Модель отвечает…', '');
+          }
+          // Обновляем объём не на каждый чанк, а раз в ~200 символов:
+          // запись в DOM на каждом токене заметно грузит отрисовку.
+          if (fullContent.length % 200 < chunk.length) {
+            const d = document.querySelector('#agent-status .status-detail');
+            if (d) d.textContent = `${fullContent.length} символов`;
+          }
           msgEl.innerHTML = renderMarkdown(fullContent);
           container.scrollTop = container.scrollHeight;
         },
       });
+
+      this._showStatus('Обрабатываю ответ…', '');
 
       // Учёт токенов. Многие провайдеры игнорируют stream_options и не
       // присылают usage при stream:true — тогда считаем приблизительно
@@ -337,21 +436,21 @@ Object.assign(UI.prototype, {
           // ── Прерывание пользователем ──
           if (this._stopRequested) {
             clearTimeout(turnTimer);
-            this._setBusy(false);
+            if (depth === 0) { this._setBusy(false); this._hideStatus(); }
             return;
           }
 
           // ── Лимит 3: суммарное число вызовов за ход ──
           if (L.maxToolCallsPerTurn > 0 && this._turnToolCalls >= L.maxToolCallsPerTurn) {
             clearTimeout(turnTimer);
-            this._stopTurn(container, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`);
+            this._stopTurn(container, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`, depth);
             return;
           }
           // ── Лимит 2 (повторная проверка между вызовами) ──
           if (L.maxTurnSeconds > 0 && this._turnStartedAt &&
               (Date.now() - this._turnStartedAt) / 1000 >= L.maxTurnSeconds) {
             clearTimeout(turnTimer);
-            this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`);
+            this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`, depth);
             return;
           }
           this._turnToolCalls++;
@@ -363,6 +462,15 @@ Object.assign(UI.prototype, {
             container.appendChild(toolResultDiv);
             container.scrollTop = container.scrollHeight;
           }
+
+          // Самая долгая и самая непрозрачная стадия: показываем, какой
+          // именно инструмент выполняется и сколько их всего в этом шаге.
+          this._showStatus(
+            `Выполняю инструмент: ${tc.function.name}`,
+            result.tool_calls.length > 1
+              ? `вызов ${this._turnToolCalls} из ${result.tool_calls.length} в этом шаге`
+              : `всего вызовов за ход: ${this._turnToolCalls}`
+          );
 
           const startedAt = performance.now();
           const toolResult = await this.agent.tools.executeTool(
@@ -399,8 +507,12 @@ Object.assign(UI.prototype, {
         }
 
         clearTimeout(turnTimer);
-        this.isStreaming = false;
-        document.getElementById('send-btn').disabled = false;
+        // Занятость НЕ снимаем: цепочка продолжается следующим шагом.
+        // Раньше здесь стоял сырой сброс isStreaming и send-btn.disabled —
+        // он открывал окно, в котором пользователь мог отправить второе
+        // сообщение параллельно текущей цепочке. Два одновременных хода
+        // затирали состояние друг друга, и кнопка останова оставалась
+        // висеть после завершения одного из них.
         await this._generateResponse(depth + 1);
         return;
       }
@@ -413,21 +525,54 @@ Object.assign(UI.prototype, {
         timestamp: Date.now(),
         model: this.agent.llm.model,
         durationMs: Math.round(performance.now() - requestStartedAt),
+        // 'length' означает, что провайдер оборвал ответ, упёршись в
+        // max_tokens. Раньше это никак не показывалось — ответ просто
+        // выглядел незаконченным, и понять причину было невозможно.
+        truncated: result.finish_reason === 'length',
       };
       await this.agent.db.put('messages', assistantMsg);
 
       // Элемент ответа уже отрисован стримингом — дописываем подпись
       // (время, модель, длительность), не перерисовывая содержимое.
+      msgEl.dataset.msgId = assistantMsg.id;
       msgEl.insertAdjacentHTML('beforeend', this._msgFooter(assistantMsg));
+
+      if (assistantMsg.truncated) this._showTruncationNotice(container);
       container.scrollTop = container.scrollHeight;
 
     } catch (error) {
-      document.getElementById('typing')?.remove();
+
+      // ── Сохраняем частично полученный ответ ──
+      // Прерывание (таймаут хода или кнопка «⏹») происходит во время
+      // стриминга: текст уже отрисован на экране, но запись в БД шла
+      // ПОСЛЕ await, поэтому раньше он терялся — ответ выглядел
+      // неполным, а после перезагрузки чата исчезал совсем и выпадал
+      // из контекста следующего запроса.
+      if (fullContent.trim()) {
+        const partial = {
+          id: uid(),
+          chatId: this.currentChatId,
+          role: 'assistant',
+          content: fullContent,
+          timestamp: Date.now(),
+          model: this.agent.llm.model,
+          durationMs: Math.round(performance.now() - requestStartedAt),
+          interrupted: true,
+        };
+        await this.agent.db.put('messages', partial);
+        if (msgEl) {
+          msgEl.dataset.msgId = partial.id;
+          msgEl.insertAdjacentHTML('beforeend', this._msgFooter(partial));
+        }
+      }
+
       if (error.name === 'AbortError' && this._stopRequested) {
         // Сообщение об остановке уже показал stopAgent() — не дублируем.
       } else {
         const msg = error.name === 'AbortError'
-          ? `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с).`
+          ? `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с). ` +
+            (fullContent.trim() ? 'Полученная часть ответа сохранена. ' : '') +
+            'Лимит можно изменить в ⚙ Настройки → Ограничения.'
           : `Ошибка: ${error.message}`;
         container.insertAdjacentHTML('beforeend', `<div class="message system">❌ ${this._escHtml(msg)}</div>`);
         container.scrollTop = container.scrollHeight;
@@ -435,6 +580,12 @@ Object.assign(UI.prototype, {
     } finally {
       clearTimeout(turnTimer);
       this._abortCtl = null;
+      // Единственная точка снятия занятости для всей цепочки: срабатывает
+      // на любом пути выхода корневого кадра, включая return из середины
+      // цикла вызовов инструментов и любую необработанную ошибку.
+      // Панель статуса снимается здесь же — иначе «зависший» индикатор
+      // пережил бы ошибку или прерывание.
+      if (depth === 0) { this._setBusy(false); this._hideStatus(); }
     }
 
     // Ход завершён (цепочка вызовов инструментов раскручена) — записываем
@@ -451,7 +602,6 @@ Object.assign(UI.prototype, {
       this._turnUserMsgId = null;
     }
 
-    this._setBusy(false);
     this.updateChatToolbar();
   },
 
@@ -490,6 +640,11 @@ Object.assign(UI.prototype, {
     // её включит _setBusy(false) в конце _generateResponse.
     const stop = document.getElementById('stop-btn');
     if (stop) stop.hidden = true;
+
+    // Уже запущенный вызов инструмента прервать нельзя — он доигрывает до
+    // своего таймаута. Показываем это явно, иначе пауза после нажатия
+    // выглядит как зависание.
+    this._showStatus('Останавливаю…', 'жду завершения текущей операции');
 
     const container = document.getElementById('chat-messages');
     container.insertAdjacentHTML('beforeend',
