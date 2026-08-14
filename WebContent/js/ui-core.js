@@ -192,6 +192,50 @@ class UI {
     }
   }
 
+  // ── Замена нативных prompt/confirm ──
+  // Нативные диалоги нельзя стилизовать, они выбиваются из интерфейса,
+  // а в части окружений (встроенные webview, некоторые режимы браузера)
+  // prompt() отключён — функция молча переставала бы работать.
+  // Возвращают Promise: null при отмене у _prompt, false у _confirm.
+  _prompt(title, defaultValue = '', { multiline = false, label = '' } = {}) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const field = multiline
+        ? `<textarea id="pv_input" rows="4">${this._escHtml(defaultValue)}</textarea>`
+        : `<input id="pv_input" value="${this._escHtml(defaultValue)}">`;
+      this._showModal(title, `
+        <div class="form-group">
+          ${label ? `<label>${this._escHtml(label)}</label>` : ''}
+          ${field}
+        </div>`,
+        () => { settled = true; resolve(document.getElementById('pv_input')?.value ?? null); },
+        () => { if (!settled) resolve(null); }
+      );
+      setTimeout(() => {
+        const el = document.getElementById('pv_input');
+        el?.focus();
+        el?.select?.();
+        // Enter подтверждает однострочный ввод — как в нативном prompt.
+        if (!multiline) {
+          el?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); document.querySelector('#modals .btn-primary')?.click(); }
+          });
+        }
+      }, 50);
+    });
+  }
+
+  _confirm(message, { title = 'Подтверждение', danger = false } = {}) {
+    return new Promise((resolve) => {
+      let settled = false;
+      this._showModal(title,
+        `<p style="font-size:13px;color:var(--text-primary);line-height:1.6;">${this._escHtml(message)}</p>`,
+        () => { settled = true; resolve(true); },
+        () => { if (!settled) resolve(false); }
+      );
+    });
+  }
+
   switchTab(tab) {
     this.currentTab = tab;
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));

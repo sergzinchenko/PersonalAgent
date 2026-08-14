@@ -57,10 +57,13 @@ class FoldersEngine {
     const parentId = folder.parentId || null;
 
     const subs = (await this.db.getAll('folders')).filter(f => f.parentId === id);
-    for (const s of subs) { s.parentId = parentId; await this.db.put('folders', s); }
+    // Одной транзакцией вместо записи по одному элементу.
+    subs.forEach(x => { x.parentId = parentId; });
+    if (subs.length) await this.db.putAll('folders', subs);
 
     const items = (await this.db.getAll(itemStore)).filter(it => (it.parentId || null) === id);
-    for (const it of items) { it.parentId = parentId; await this.db.put(itemStore, it); }
+    items.forEach(it => { it.parentId = parentId; });
+    if (items.length) await this.db.putAll(itemStore, items);
 
     await this.db.delete('folders', id);
   }

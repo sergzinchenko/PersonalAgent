@@ -55,7 +55,8 @@ Object.assign(UI.prototype, {
   async deleteChat(chatId) {
     await this.agent.db.delete('chats', chatId);
     const msgs = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
-    for (const m of msgs) await this.agent.db.delete('messages', m.id);
+    // Одна транзакция вместо N: у длинного чата это тысячи сообщений.
+    await this.agent.db.deleteAll('messages', msgs.map(m => m.id));
     // Техническая статистика живёт в отдельном store — чистим и её,
     // иначе останется «сирота» с токенами удалённого чата.
     await this.agent.db.delete('chat_stats', chatId);
@@ -283,6 +284,104 @@ Object.assign(UI.prototype, {
     });
   },
 
+  // ── Обрезка истории под окно контекста ──
+  // Раньше в API уходила ВСЯ история чата: приложение предупреждало о
+  // заполнении контекста, но ничего не предпринимало, и после превышения
+  // лимита чат становился нерабочим — каждый следующий запрос снова слал
+  // переполненный контекст и получал ошибку провайдера.
+  //
+  // Стратегия: системный промпт неприкосновенен, дальше берём сообщения
+  // с конца (свежие важнее) пока укладываемся в бюджет. Бюджет — это
+  // окно контекста минус место под ответ (max_tokens) минус запас.
+  _trimHistory(allMsgs, systemPrompt) {
+    // Служебные отметки не идут в API (см. model-switch), убираем сразу.
+    const usable = allMsgs.filter(m => m.kind !== 'model-switch');
+
+    const toApi = (m) => {
+      if (m.role === 'tool') {
+        return {
+          role: 'tool',
+          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          tool_call_id: m.tool_call_id,
+          name: m.name,
+        };
+      }
+      if (m.role === 'assistant' && m.tool_calls) {
+        return { role: 'assistant', content: m.content || null, tool_calls: m.tool_calls };
+      }
+      return { role: m.role, content: m.content };
+    };
+
+    const limit = this.effectiveContextLimit();
+    // Лимит неизвестен — обрезать не по чему, оставляем как есть.
+    if (!limit) {
+      return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0 };
+    }
+
+    const reserve = Math.min(this.agent.llm.maxTokens || 4096, Math.floor(limit * 0.3));
+    const budget = Math.max(1000, limit - reserve - this._estimateTokens(systemPrompt) - 200);
+
+    const costOf = (m) => this._estimateTokens(
+      (m.content || '') + (m.tool_calls ? JSON.stringify(m.tool_calls) : '')) + 4;
+
+    let used = 0;
+    const keptIdx = [];
+    for (let i = usable.length - 1; i >= 0; i--) {
+      const c = costOf(usable[i]);
+      if (used + c > budget && keptIdx.length) break;
+      used += c;
+      keptIdx.push(i);
+    }
+    keptIdx.reverse();
+
+    if (keptIdx.length === usable.length) {
+      return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0 };
+    }
+
+    let start = keptIdx[0];
+
+    // ── Целостность пар «вызов инструмента → результат» ──
+    // Сообщение role:'tool' без предшествующего assistant с tool_calls
+    // ломает запрос: провайдеры отвечают ошибкой на «сироту». Поэтому
+    // сдвигаем границу вперёд, пока первое сообщение — осиротевший
+    // результат инструмента.
+    while (start < usable.length && usable[start].role === 'tool') start++;
+
+    const kept = usable.slice(start);
+    const dropped = usable.slice(0, start);
+    const droppedTokens = dropped.reduce((n, m) => n + costOf(m), 0);
+
+    // Вместо молчаливой потери начала переписки вставляем краткую
+    // сводку — модель хотя бы знает, что разговор начался раньше.
+    const summary = {
+      role: 'system',
+      content: `[Начало переписки свёрнуто, чтобы уместиться в контекст: ` +
+        `${dropped.length} сообщений (≈${droppedTokens} токенов) не переданы. ` +
+        `Если понадобится что-то из ранней части диалога — попроси пользователя повторить.]`,
+    };
+
+    return {
+      messages: [summary, ...kept.map(toApi)],
+      droppedCount: dropped.length,
+      droppedTokens,
+      budget,
+    };
+  },
+
+  // Уведомление показываем один раз за чат: повтор после каждого
+  // запроса засорял бы переписку.
+  _showTrimNotice(container, trim) {
+    if (this._trimNoticeShownFor === this.currentChatId) return;
+    this._trimNoticeShownFor = this.currentChatId;
+    container.insertAdjacentHTML('beforeend', `
+      <div class="message system context-alert warn">
+        ✂️ Ранняя часть переписки (${trim.droppedCount} сообщений) больше не передаётся модели —
+        контекст не вмещает весь чат. Сама история сохранена и видна здесь.
+        Для длинной новой темы лучше создать отдельный чат.
+      </div>`);
+    container.scrollTop = container.scrollHeight;
+  },
+
   _stopTurn(container, reason, depth = 0) {
     container.insertAdjacentHTML('beforeend',
       `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
@@ -368,19 +467,11 @@ Object.assign(UI.prototype, {
       } catch (_) { /* список файлов не критичен для ответа */ }
 
       const apiMessages = [{ role: 'system', content: systemPrompt }];
+      const trim = this._trimHistory(allMsgs, systemPrompt);
+      for (const m of trim.messages) apiMessages.push(m);
 
-      for (const m of allMsgs) {
-        // Служебные отметки (например, смена модели) — часть истории для
-        // пользователя, но не часть диалога: в API их слать не нужно,
-        // иначе они попадут вторым system-сообщением и собьют модель.
-        if (m.kind === 'model-switch') continue;
-        if (m.role === 'tool') {
-          apiMessages.push({ role: 'tool', content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content), tool_call_id: m.tool_call_id, name: m.name });
-        } else if (m.role === 'assistant' && m.tool_calls) {
-          apiMessages.push({ role: 'assistant', content: m.content || null, tool_calls: m.tool_calls });
-        } else {
-          apiMessages.push({ role: m.role, content: m.content });
-        }
+      if (trim.droppedCount) {
+        this._showTrimNotice(container, trim);
       }
 
       const tools = await this.agent.tools.getEnabledToolsForAPI();

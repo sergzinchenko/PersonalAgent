@@ -146,6 +146,7 @@ class LLMGateway {
       var chunkCount = 0;
       var rawChunks = [];
 
+      try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -184,6 +185,14 @@ class LLMGateway {
             }
           } catch (e) { /* skip */ }
         }
+      }
+
+      } finally {
+        // При прерывании (кнопка «⏹» или таймаут) выход из цикла идёт
+        // через исключение, и поток оставался заблокированным читателем:
+        // соединение висело до сборки мусора. Освобождаем явно.
+        try { reader.releaseLock(); } catch (_) {}
+        try { await resp.body.cancel(); } catch (_) {}
       }
 
       var totalElapsed = (performance.now() - requestTimestamp).toFixed(0);

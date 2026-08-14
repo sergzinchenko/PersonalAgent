@@ -125,7 +125,7 @@ Object.assign(UI.prototype, {
     // --- Кнопки управления папками ---
     list.querySelectorAll('[data-add-sub]').forEach(b => b.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const name = prompt('Название папки:');
+      const name = await this._prompt('Новая папка', '', { label: 'Название папки' });
       if (!name) return;
       const f = await this.agent.folders.create('chats', name, b.dataset.addSub || null);
       this.folderSelection.chats = f.id;
@@ -135,7 +135,7 @@ Object.assign(UI.prototype, {
     list.querySelectorAll('[data-ren]').forEach(b => b.addEventListener('click', async (e) => {
       e.stopPropagation();
       const f = await this.agent.db.get('folders', b.dataset.ren);
-      const name = prompt('Новое название папки:', f ? f.name : '');
+      const name = await this._prompt('Переименование папки', f ? f.name : '', { label: 'Название папки' });
       if (!name) return;
       await this.agent.folders.rename(b.dataset.ren, name);
       await this.refreshSidebar();
@@ -143,7 +143,7 @@ Object.assign(UI.prototype, {
 
     list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (!confirm('Удалить папку? Чаты и подпапки переместятся на уровень выше.')) return;
+      if (!await this._confirm('Удалить папку? Чаты и подпапки переместятся на уровень выше.', { title: 'Удаление папки' })) return;
       const fid = b.dataset.del;
       const folder = await this.agent.db.get('folders', fid);
       // Папка удаляется, содержимое поднимается — сами чаты не теряются.
@@ -292,7 +292,7 @@ Object.assign(UI.prototype, {
     // Действия с папками
     list.querySelectorAll('[data-add-sub]').forEach(b => b.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const name = prompt('Название папки:');
+      const name = await this._prompt('Новая папка', '', { label: 'Название папки' });
       if (!name) return;
       const f = await this.agent.folders.create(type, name, b.dataset.addSub || null);
       this.folderSelection[type] = f.id;
@@ -303,7 +303,7 @@ Object.assign(UI.prototype, {
     list.querySelectorAll('[data-ren]').forEach(b => b.addEventListener('click', async (e) => {
       e.stopPropagation();
       const f = await this.agent.db.get('folders', b.dataset.ren);
-      const name = prompt('Новое название папки:', f ? f.name : '');
+      const name = await this._prompt('Переименование папки', f ? f.name : '', { label: 'Название папки' });
       if (!name) return;
       await this.agent.folders.rename(b.dataset.ren, name);
       await this.refreshSidebar();
@@ -311,7 +311,7 @@ Object.assign(UI.prototype, {
 
     list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (!confirm('Удалить папку? Вложенные элементы и подпапки переместятся на уровень выше.')) return;
+      if (!await this._confirm('Удалить папку? Вложенные элементы и подпапки переместятся на уровень выше.', { title: 'Удаление папки' })) return;
       const fid = b.dataset.del;
       const folder = await this.agent.db.get('folders', fid);
       await this.agent.folders.remove(fid, type);
@@ -357,7 +357,7 @@ Object.assign(UI.prototype, {
 
 
   async _createFolder(type) {
-    const name = prompt('Название новой папки:');
+    const name = await this._prompt('Новая папка', '', { label: 'Название папки' });
     if (!name) return;
     const f = await this.agent.folders.create(type, name, this.folderSelection[type] || null);
     this.folderSelection[type] = f.id;
@@ -467,7 +467,7 @@ Object.assign(UI.prototype, {
     const renderCard = (s) => `
       <div class="tool-card" data-id="${s.id}">
         <div class="tool-header">
-          <span class="tool-name">${s.icon} ${this._escHtml(s.name)}</span>
+          <span class="tool-name">${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
           <label class="toggle-switch">
             <input type="checkbox" ${s.enabled ? 'checked' : ''} data-skill-toggle="${s.id}">
             <span class="toggle-slider"></span>
@@ -569,14 +569,14 @@ Object.assign(UI.prototype, {
       el.querySelectorAll('[data-preview]').forEach(b => b.addEventListener('click', () => this.showFilePreview(b.dataset.preview)));
       el.querySelectorAll('[data-note]').forEach(b => b.addEventListener('click', async () => {
         const f = await this.agent.files.get(b.dataset.note);
-        const note = prompt('Заметка о файле (зачем он нужен, что внутри):', f?.note || '');
+        const note = await this._prompt('Заметка о файле', f?.note || '', { multiline: true, label: 'Зачем нужен файл, что внутри' });
         if (note === null) return;
         await this.agent.files.setNote(b.dataset.note, note);
         this.renderFiles();
       }));
       el.querySelectorAll('[data-relink]').forEach(b => b.addEventListener('click', () => this.relinkFile(b.dataset.relink)));
       el.querySelectorAll('[data-unlink]').forEach(b => b.addEventListener('click', async () => {
-        if (!confirm('Убрать ссылку на файл? Сам файл на диске останется нетронутым.')) return;
+        if (!await this._confirm('Убрать ссылку на файл? Сам файл на диске останется нетронутым.', { title: 'Удаление ссылки' })) return;
         await this.agent.files.remove(b.dataset.unlink);
         this.renderFiles();
       }));

@@ -175,20 +175,36 @@ class FilesEngine {
   }
 
   // Полный путь по дереву папок: «Проект/Спецификации/spec.md».
+  // folders можно передать заранее загруженным списком, чтобы не читать
+  // базу на каждый файл. Индекс по id строится один раз и кэшируется:
+  // раньше для каждого файла шёл линейный поиск find() по всем папкам,
+  // то есть при сотне файлов — сотни обходов дерева.
   async pathOf(record, folders) {
     const all = folders || await this.db.getAll('folders');
+    const index = this._folderIndex(all);
     const names = [];
     let p = record.parentId;
     const guard = new Set();
     while (p && !guard.has(p)) {
       guard.add(p);
-      const f = all.find(x => x.id === p);
+      const f = index.get(p);
       if (!f) break;
       names.unshift(f.name);
       p = f.parentId;
     }
     names.push(record.name);
     return names.join('/');
+  }
+
+  // Кэш «массив папок → Map по id». Ключом служит сам массив, поэтому
+  // повторные вызовы с тем же списком переиспользуют индекс.
+  _folderIndex(folders) {
+    if (this._idxSource === folders && this._idxMap) return this._idxMap;
+    const map = new Map();
+    for (const f of folders) map.set(f.id, f);
+    this._idxSource = folders;
+    this._idxMap = map;
+    return map;
   }
 
   // Ищет файл по id, точному имени или части пути — так на него можно

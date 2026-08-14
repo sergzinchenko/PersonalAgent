@@ -1230,3 +1230,39 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   color: var(--text-secondary);
   font-size: 12px;
 }
+/* ===== BOOT ERROR ===== */
+.boot-error {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(15,15,20,0.94);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.boot-error-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  max-width: 560px;
+  box-shadow: var(--shadow);
+}
+.boot-error-card h2 { color: var(--danger); font-size: 18px; margin-bottom: 12px; }
+.boot-error-msg {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  margin-bottom: 14px;
+  word-break: break-word;
+}
+.boot-error-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 12px; }
+.boot-error-btn {
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius); padding: 9px 16px;
+  font-size: 13px; cursor: pointer; margin-right: 8px; margin-bottom: 10px;
+}
+.boot-error-btn:hover { background: var(--accent-dark); }
+.boot-error-btn.danger { background: var(--danger); }
+.boot-error-btn.danger:hover { filter: brightness(1.1); }

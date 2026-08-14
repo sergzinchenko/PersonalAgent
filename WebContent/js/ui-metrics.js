@@ -54,7 +54,7 @@ Object.assign(UI.prototype, {
       <div class="toolbar-row">
         ${skills.map(s => `
           <span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
-            ${s.icon} ${this._escHtml(s.name)}
+            ${this._escHtml(s.icon)} ${this._escHtml(s.name)}
           </span>
         `).join('')}
       </div>
@@ -228,11 +228,10 @@ Object.assign(UI.prototype, {
   // Сохраняем размер контекста последнего запроса — он показывается
   // в панели чата и переживает перезагрузку вместе со статистикой.
   async _recordContextSize(tokens, isEstimate) {
-    const stats = await this._getChatStats(this.currentChatId);
-    if (!stats) return;
-    stats.lastContextTokens = tokens;
-    stats.lastContextEstimated = !!isEstimate;
-    await this.agent.db.put('chat_stats', stats);
+    return this._statsUpdate(this.currentChatId, (stats) => {
+      stats.lastContextTokens = tokens;
+      stats.lastContextEstimated = !!isEstimate;
+    });
   },
 
 
@@ -251,8 +250,9 @@ Object.assign(UI.prototype, {
 
     // Достигнут максимум окна контекста
     if (percent >= 100 && stats.contextAlertLevel !== 'max') {
-      stats.contextAlertLevel = 'max';
-      await this.agent.db.put('chat_stats', stats);
+      // Через очередь: прямая запись затёрла бы счётчики, накопленные
+      // параллельными обновлениями (объект прочитан раньше).
+      await this._statsUpdate(this.currentChatId, (st) => { st.contextAlertLevel = 'max'; });
       container.insertAdjacentHTML('beforeend', `
         <div class="message system context-alert danger">
           🛑 Контекст исчерпан: ${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов (${percent}%).
@@ -268,8 +268,7 @@ Object.assign(UI.prototype, {
 
     // Достигнут рекомендуемый порог
     if (percent >= warnAt && percent < 100 && !stats.contextAlertLevel) {
-      stats.contextAlertLevel = 'warn';
-      await this.agent.db.put('chat_stats', stats);
+      await this._statsUpdate(this.currentChatId, (st) => { st.contextAlertLevel = 'warn'; });
       container.insertAdjacentHTML('beforeend', `
         <div class="message system context-alert warn">
           ⚠️ Контекст заполнен на ${percent}% (${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов).
@@ -281,6 +280,28 @@ Object.assign(UI.prototype, {
 
 
   // ── Персистентная техническая статистика чата (store 'chat_stats') ──
+  // ── Сериализация обновлений статистики ──
+  // Все три записи (_recordUsage, _recordContextSize, _recordToolCall)
+  // работают по схеме read-modify-write в отдельных транзакциях и
+  // вызываются подряд, а _recordToolCall — ещё и в цикле по вызовам.
+  // Без очереди два перекрывающихся обновления читали бы одно и то же
+  // состояние, и изменения одного терялись: счётчики занижались.
+  // Очередь гарантирует, что следующая правка видит результат предыдущей.
+  _statsUpdate(chatId, mutate) {
+    if (!chatId) return Promise.resolve(null);
+    this._statsQueue = (this._statsQueue || Promise.resolve()).then(async () => {
+      const stats = await this._getChatStats(chatId);
+      if (!stats) return null;
+      mutate(stats);
+      await this.agent.db.put('chat_stats', stats);
+      return stats;
+    }).catch((e) => {
+      console.error('Не удалось обновить статистику чата:', e);
+      return null;
+    });
+    return this._statsQueue;
+  },
+
   async _getChatStats(chatId) {
     if (!chatId) return null;
     const existing = await this.agent.db.get('chat_stats', chatId);
@@ -303,30 +324,28 @@ Object.assign(UI.prototype, {
 
 
   async _recordUsage(usage, isEstimate = false) {
-    const stats = await this._getChatStats(this.currentChatId);
-    if (!stats) return;
-    stats.promptTokens += usage.prompt_tokens || 0;
-    stats.completionTokens += usage.completion_tokens || 0;
-    stats.totalTokens += usage.total_tokens ||
-      ((usage.prompt_tokens || 0) + (usage.completion_tokens || 0));
-    stats.requests += 1;
-    if (isEstimate) stats.estimated = true;
-    await this.agent.db.put('chat_stats', stats);
+    return this._statsUpdate(this.currentChatId, (stats) => {
+      stats.promptTokens += usage.prompt_tokens || 0;
+      stats.completionTokens += usage.completion_tokens || 0;
+      stats.totalTokens += usage.total_tokens ||
+        ((usage.prompt_tokens || 0) + (usage.completion_tokens || 0));
+      stats.requests += 1;
+      if (isEstimate) stats.estimated = true;
+    });
   },
 
 
   async _recordToolCall(name, elapsedMs, isError) {
-    const stats = await this._getChatStats(this.currentChatId);
-    if (!stats) return;
-    stats.toolCalls += 1;
-    stats.toolTimeMs += elapsedMs;
-    if (isError) stats.toolErrors += 1;
-    const entry = stats.byTool[name] || { calls: 0, errors: 0, timeMs: 0 };
-    entry.calls += 1;
-    entry.timeMs += elapsedMs;
-    if (isError) entry.errors += 1;
-    stats.byTool[name] = entry;
-    await this.agent.db.put('chat_stats', stats);
+    return this._statsUpdate(this.currentChatId, (stats) => {
+      stats.toolCalls += 1;
+      stats.toolTimeMs += elapsedMs;
+      if (isError) stats.toolErrors += 1;
+      const entry = stats.byTool[name] || { calls: 0, errors: 0, timeMs: 0 };
+      entry.calls += 1;
+      entry.timeMs += elapsedMs;
+      if (isError) entry.errors += 1;
+      stats.byTool[name] = entry;
+    });
   }
 
 });
