@@ -344,7 +344,29 @@ Object.assign(UI.prototype, {
       const allMsgs = await this.agent.db.getAllByIndex('messages', 'chatId', this.currentChatId);
       allMsgs.sort((a, b) => a.timestamp - b.timestamp);
 
-      const systemPrompt = await this.agent.skills.buildSystemPrompt();
+      let systemPrompt = await this.agent.skills.buildSystemPrompt();
+
+      // Список доступных файлов добавляем в системный промпт, чтобы модель
+      // знала, на что можно сослаться, и не гадала. Само содержимое не
+      // подставляем — его модель запросит инструментом read_file, когда
+      // оно действительно понадобится (иначе контекст забивался бы
+      // файлами, которые в этом запросе не нужны).
+      try {
+        const known = await this.agent.files.all();
+        if (known.length) {
+          const folders = await this.agent.db.getAll('folders');
+          const lines = [];
+          for (const f of known.slice(0, 100)) {
+            const path = await this.agent.files.pathOf(f, folders);
+            lines.push(`- ${path}${f.note ? ' — ' + f.note : ''}${f.needsRelink ? ' (ссылка требует обновления)' : ''}`);
+          }
+          systemPrompt += '\n\n## Доступные файлы\n' +
+            'Пользователь дал ссылки на эти файлы. Читай их инструментом read_file ' +
+            '(по пути или имени), ищи по ним — search_files. Содержимое здесь не приведено.\n' +
+            lines.join('\n') + '\n';
+        }
+      } catch (_) { /* список файлов не критичен для ответа */ }
+
       const apiMessages = [{ role: 'system', content: systemPrompt }];
 
       for (const m of allMsgs) {
@@ -771,11 +793,34 @@ Object.assign(UI.prototype, {
   },
 
 
+  // Подставляет содержимое файлов в текст по плейсхолдерам {{file:путь}}.
+  // Так на файл можно сослаться из промпта или навыка, не копируя текст.
+  async _expandFileRefs(text) {
+    const re = /\{\{file:([^}]+)\}\}/g;
+    const refs = [...String(text).matchAll(re)];
+    if (!refs.length) return text;
+
+    let out = text;
+    for (const m of refs) {
+      const ref = m[1].trim();
+      const record = await this.agent.files.resolve(ref);
+      if (!record) {
+        out = out.replaceAll(m[0], `[файл «${ref}» не найден]`);
+        continue;
+      }
+      const res = await this.agent.files.read(record.id, { maxBytes: 256 * 1024 });
+      out = res.error
+        ? out.replaceAll(m[0], `[файл «${record.name}» недоступен: ${res.error}]`)
+        : out.replaceAll(m[0], "\n```\n" + res.text + "\n```\n");
+    }
+    return out;
+  },
+
   async usePrompt(promptId) {
     const prompt = await this.agent.db.get('prompts', promptId);
     if (!prompt) return;
 
-    let content = prompt.content;
+    let content = await this._expandFileRefs(prompt.content);
 
     const vars = content.match(/\{\{(\w+)\}\}/g);
     if (vars && vars.length > 0) {

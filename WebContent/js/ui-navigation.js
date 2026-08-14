@@ -13,7 +13,7 @@ Object.assign(UI.prototype, {
 
     if (this.currentTab === 'chat') {
       await this._renderChatTree();
-    } else if (['tools', 'skills', 'prompts'].includes(this.currentTab)) {
+    } else if (['tools', 'skills', 'prompts', 'files'].includes(this.currentTab)) {
       await this._renderSidebarTree(this.currentTab);
     } else {
       list.innerHTML = '';
@@ -367,6 +367,7 @@ Object.assign(UI.prototype, {
 
 
   _refreshPanel(type) {
+    if (type === 'files') return this.renderFiles();
     if (type === 'tools') return this.renderTools();
     if (type === 'skills') return this.renderSkills();
     if (type === 'prompts') return this.renderPrompts();
@@ -520,6 +521,68 @@ Object.assign(UI.prototype, {
     };
 
     await this._renderPanelItems('prompts', mount, prompts, renderCard, bind);
+  }
+
+  ,
+
+  // ── Панель файлов ──
+  // Карточка показывает метаданные и состояние ссылки: доступен ли файл,
+  // нужно ли разрешение или повторный выбор. Содержимого здесь нет —
+  // оно читается с диска только по требованию.
+  async renderFiles() {
+    const mount = document.getElementById('files-container');
+    const files = await this.agent.files.all();
+    const folders = await this.agent.db.getAll('folders');
+
+    const fmtSize = (n) => {
+      if (n == null) return '';
+      if (n < 1024) return n + ' Б';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1).replace('.', ',') + ' КБ';
+      return (n / 1024 / 1024).toFixed(1).replace('.', ',') + ' МБ';
+    };
+
+    const renderCard = (f) => {
+      const state = f.needsRelink
+        ? '<span class="file-state warn" title="Ссылка не переживает перезагрузку — укажите файл заново">⚠ требуется повторный выбор</span>'
+        : '<span class="file-state ok" title="Файл читается по сохранённому дескриптору">🔗 связан</span>';
+      return `
+        <div class="tool-card file-card" draggable="true" data-item-id="${f.id}">
+          <div class="tool-header">
+            <div class="tool-name">📎 ${this._escHtml(f.name)}</div>
+            ${state}
+          </div>
+          <div class="tool-desc">
+            ${fmtSize(f.size)}${f.mime ? ' · ' + this._escHtml(f.mime) : ''}
+            ${f.lastModified ? ' · изменён ' + new Date(f.lastModified).toLocaleDateString('ru-RU') : ''}
+          </div>
+          ${f.note ? `<div class="tool-params">${this._escHtml(f.note)}</div>` : ''}
+          <div class="tool-actions">
+            <button class="btn btn-secondary btn-sm" data-preview="${f.id}">👁 Просмотр</button>
+            <button class="btn btn-secondary btn-sm" data-note="${f.id}">✏ Заметка</button>
+            <button class="btn btn-secondary btn-sm" data-relink="${f.id}">🔄 Перевыбрать</button>
+            <button class="btn btn-danger btn-sm" data-unlink="${f.id}">✕ Убрать</button>
+          </div>
+        </div>`;
+    };
+
+    const bind = (el) => {
+      el.querySelectorAll('[data-preview]').forEach(b => b.addEventListener('click', () => this.showFilePreview(b.dataset.preview)));
+      el.querySelectorAll('[data-note]').forEach(b => b.addEventListener('click', async () => {
+        const f = await this.agent.files.get(b.dataset.note);
+        const note = prompt('Заметка о файле (зачем он нужен, что внутри):', f?.note || '');
+        if (note === null) return;
+        await this.agent.files.setNote(b.dataset.note, note);
+        this.renderFiles();
+      }));
+      el.querySelectorAll('[data-relink]').forEach(b => b.addEventListener('click', () => this.relinkFile(b.dataset.relink)));
+      el.querySelectorAll('[data-unlink]').forEach(b => b.addEventListener('click', async () => {
+        if (!confirm('Убрать ссылку на файл? Сам файл на диске останется нетронутым.')) return;
+        await this.agent.files.remove(b.dataset.unlink);
+        this.renderFiles();
+      }));
+    };
+
+    await this._renderPanelItems('files', mount, files, renderCard, bind);
   }
 
 });

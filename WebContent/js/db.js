@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 7) {   
+  constructor(name = 'ai_agent_db', version = 8) {   
     this.name = name;
     this.version = version;
     this.db = null;
@@ -43,6 +43,14 @@ class AgentDB {
         // Техническая статистика чата: израсходованные токены и агрегаты
         // по вызовам инструментов. Хранится отдельно от 'chats', чтобы
         // частые обновления счётчиков не переписывали саму запись чата.
+        // Ссылки на файлы: метаданные + FileSystemFileHandle.
+        // Содержимое файлов НЕ хранится — только дескриптор, по которому
+        // файл перечитывается с диска при обращении.
+        if (!db.objectStoreNames.contains('files')) {
+          const s = db.createObjectStore('files', { keyPath: 'id' });
+          s.createIndex('parentId', 'parentId');
+          s.createIndex('name', 'name');
+        }
         if (!db.objectStoreNames.contains('chat_stats')) {
           db.createObjectStore('chat_stats', { keyPath: 'chatId' });
         }

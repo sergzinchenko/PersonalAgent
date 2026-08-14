@@ -17,6 +17,7 @@ class ToolsEngine {
     this.db = db;
     this.ui = null;            // ← ссылка на UI устанавливается извне
     this.folders = null;       // ← ссылка на FoldersEngine устанавливается извне (см. agent.js)
+    this.files = null;         // ← ссылка на FilesEngine устанавливается извне (см. agent.js)
     this.registry = new Map();
     // Подробное логирование каждого tool-вызова (аргументы, результат) в
     // консоль. По умолчанию выключено — раньше писалось безусловно и могло
@@ -60,6 +61,135 @@ class ToolsEngine {
         return { keys };
       }
       return { error: 'Unknown action' };
+    });
+
+    // Built-in: список зарегистрированных файлов
+    this.registerHandler('builtin_list_files', async (params) => {
+      try {
+        if (!this.files) return { error: 'FilesEngine не подключён' };
+        const items = await this.files.all();
+        const folders = await this.db.getAll('folders');
+
+        let filtered = items;
+        if (params.folder) {
+          const fid = await this._resolveFolderId('files', params.folder);
+          if (!fid) return { error: 'Папка не найдена' };
+          const subtree = new Set([fid]);
+          let grew = true;
+          while (grew) {
+            grew = false;
+            for (const f of folders) {
+              if (f.type === 'files' && f.parentId && subtree.has(f.parentId) && !subtree.has(f.id)) { subtree.add(f.id); grew = true; }
+            }
+          }
+          filtered = items.filter(f => f.parentId && subtree.has(f.parentId));
+        }
+        if (params.query) {
+          const q = String(params.query).toLowerCase();
+          filtered = filtered.filter(f =>
+            (f.name || '').toLowerCase().includes(q) || (f.note || '').toLowerCase().includes(q));
+        }
+
+        const out = [];
+        for (const f of filtered) {
+          out.push({
+            id: f.id,
+            path: await this.files.pathOf(f, folders),
+            name: f.name,
+            size: f.size,
+            mime: f.mime,
+            note: f.note || undefined,
+            // Честно сообщаем модели состояние ссылки: если файл требует
+            // повторного выбора, читать его бесполезно.
+            available: !f.needsRelink,
+          });
+        }
+        return { files: out, total: out.length };
+      } catch (e) { return { error: e.message }; }
+    });
+
+    // Built-in: чтение файла по ссылке
+    this.registerHandler('builtin_read_file', async (params) => {
+      try {
+        if (!this.files) return { error: 'FilesEngine не подключён' };
+        const record = await this.files.resolve(params.file);
+        if (!record) return { error: 'Файл не найден: ' + (params.file || '') };
+
+        const maxBytes = Math.min(2 * 1024 * 1024,
+          Math.max(1024, parseInt(params.maxBytes) || 256 * 1024));
+        const res = await this.files.read(record.id, { maxBytes });
+
+        if (res.error) {
+          // Разрешение можно запросить только из жеста пользователя,
+          // поэтому подсказываем модели, что именно сказать человеку.
+          if (res.needsPermission) {
+            return {
+              error: 'Нет разрешения на чтение файла «' + record.name + '»',
+              hint: 'Попроси пользователя открыть вкладку «Файлы» и нажать «Просмотр» у этого файла — браузер спросит разрешение.',
+            };
+          }
+          if (res.needsRelink) {
+            return {
+              error: res.error,
+              hint: 'Попроси пользователя нажать «Перевыбрать» у этого файла на вкладке «Файлы».',
+            };
+          }
+          return { error: res.error };
+        }
+
+        return {
+          name: res.name,
+          size: res.size,
+          mime: res.mime,
+          truncated: res.truncated,
+          content: res.text,
+        };
+      } catch (e) { return { error: e.message }; }
+    });
+
+    // Built-in: поиск текста внутри файлов
+    this.registerHandler('builtin_search_files', async (params) => {
+      try {
+        if (!this.files) return { error: 'FilesEngine не подключён' };
+        const query = String(params.query || '').trim();
+        if (!query) return { error: 'Требуется query' };
+
+        const items = await this.files.all();
+        const folders = await this.db.getAll('folders');
+        const needle = params.caseSensitive ? query : query.toLowerCase();
+        const limit = Math.min(50, Math.max(1, parseInt(params.limit) || 20));
+
+        const results = [];
+        const skipped = [];
+        for (const f of items) {
+          if (results.length >= limit) break;
+          // Двоичные файлы пропускаем: искать текст в них бессмысленно.
+          if (f.mime && !/^text\/|json|xml|javascript|csv|markdown/.test(f.mime)) continue;
+
+          const res = await this.files.read(f.id, { maxBytes: 512 * 1024 });
+          if (res.error) { skipped.push({ name: f.name, reason: res.error }); continue; }
+
+          const raw = res.text || '';
+          const hay = params.caseSensitive ? raw : raw.toLowerCase();
+          const at = hay.indexOf(needle);
+          if (at === -1) continue;
+
+          const from = Math.max(0, at - 80);
+          const to = Math.min(raw.length, at + query.length + 80);
+          results.push({
+            file: await this.files.pathOf(f, folders),
+            id: f.id,
+            excerpt: (from > 0 ? '…' : '') + raw.slice(from, to) + (to < raw.length ? '…' : ''),
+          });
+        }
+
+        return {
+          query,
+          matches: results.length,
+          results,
+          skipped: skipped.length ? skipped : undefined,
+        };
+      } catch (e) { return { error: e.message }; }
     });
 
     // Built-in: массовый экспорт чатов (с папками и полными метаданными)
@@ -1390,6 +1520,57 @@ _isBlockedFetchHost(hostname) {
 	            value: { description: 'значение для записи (любой тип)' },
 	          },
 	          required: ['action'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_list_files',
+	        name: 'list_files',
+	        description: 'Показывает файлы, на которые пользователь дал ссылки во вкладке «Файлы»: путь в дереве папок, ' +
+	          'имя, размер, тип и заметку. Содержимое НЕ возвращает — для этого есть read_file. ' +
+	          'Поле available=false означает, что ссылка требует повторного выбора и читать файл сейчас нельзя.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            folder: { type: 'string', description: 'Ограничить папкой (id или путь «A/B»), включая вложенные' },
+	            query: { type: 'string', description: 'Фильтр по имени или заметке' },
+	          },
+	          required: [],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_read_file',
+	        name: 'read_file',
+	        description: 'Читает содержимое файла, на который пользователь дал ссылку. Файл указывается по id, имени ' +
+	          'или пути «Папка/файл.txt». Содержимое читается с диска в момент вызова — всегда актуальная версия. ' +
+	          'Большие файлы обрезаются (см. maxBytes), об этом сообщает поле truncated.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            file: { type: 'string', description: 'ID, имя или путь файла' },
+	            maxBytes: { type: 'number', description: 'Сколько байт читать максимум (по умолчанию 262144)' },
+	          },
+	          required: ['file'],
+	        },
+	        enabled: true,
+	        builtin: true,
+	      },
+	      {
+	        id: 'builtin_search_files',
+	        name: 'search_files',
+	        description: 'Ищет подстроку внутри текстовых файлов, на которые даны ссылки, и возвращает фрагменты ' +
+	          'вокруг совпадений с указанием файла. Двоичные файлы пропускаются.',
+	        parameters: {
+	          type: 'object',
+	          properties: {
+	            query: { type: 'string', description: 'Искомый текст' },
+	            limit: { type: 'number', description: 'Сколько совпадений вернуть (по умолчанию 20)' },
+	            caseSensitive: { type: 'boolean', description: 'Учитывать регистр' },
+	          },
+	          required: ['query'],
 	        },
 	        enabled: true,
 	        builtin: true,

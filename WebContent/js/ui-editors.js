@@ -217,4 +217,131 @@ Object.assign(UI.prototype, {
     loadAndShow();
   }
 
+  ,
+
+  // ── Добавление файлов как ссылок ──
+  // Через File System Access API получаем дескрипторы, которые переживают
+  // перезагрузку. Если API недоступен (Firefox, Safari), откатываемся на
+  // <input type="file"> и честно помечаем, что ссылка временная.
+  async addFiles() {
+    const parentId = this.folderSelection.files || null;
+
+    if (FilesEngine.isSupported()) {
+      let handles;
+      try {
+        handles = await window.showOpenFilePicker({ multiple: true });
+      } catch (e) {
+        return; // пользователь закрыл диалог — это не ошибка
+      }
+      let added = 0;
+      for (const handle of handles) {
+        const file = await handle.getFile();
+        await this.agent.files.register({ handle, file, parentId });
+        added++;
+      }
+      if (added) this.renderFiles();
+      return;
+    }
+
+    // Запасной режим
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.addEventListener('change', async () => {
+      for (const file of Array.from(input.files || [])) {
+        await this.agent.files.register({ handle: null, file, parentId });
+      }
+      this.renderFiles();
+      const c = document.getElementById('files-container');
+      c?.insertAdjacentHTML('afterbegin',
+        '<div class="message system" style="margin:12px;">ℹ️ Браузер не поддерживает постоянные ссылки на файлы ' +
+        '(нужен Chrome или Edge). Файлы доступны до перезагрузки страницы, после неё их нужно выбрать заново.</div>');
+    });
+    input.click();
+  },
+
+  // Повторный выбор файла: дескриптор мог устареть (файл перемещён,
+  // переименован) либо его не было вовсе (запасной режим).
+  async relinkFile(id) {
+    const record = await this.agent.files.get(id);
+    if (!record) return;
+
+    if (FilesEngine.isSupported()) {
+      let handles;
+      try {
+        handles = await window.showOpenFilePicker({ multiple: false });
+      } catch (e) { return; }
+      const handle = handles[0];
+      const file = await handle.getFile();
+      record.handle = handle;
+      record.name = file.name;
+      record.size = file.size;
+      record.mime = file.type || '';
+      record.lastModified = file.lastModified;
+      record.needsRelink = false;
+      await this.agent.db.put('files', record);
+      this.renderFiles();
+      return;
+    }
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      record.name = file.name;
+      record.size = file.size;
+      record.mime = file.type || '';
+      record.lastModified = file.lastModified;
+      await this.agent.db.put('files', record);
+      this.agent.files._transient.set(id, file);
+      this.renderFiles();
+    });
+    input.click();
+  },
+
+  // Просмотр содержимого. Кнопка — это жест пользователя, поэтому именно
+  // отсюда корректно запрашивать разрешение на чтение.
+  async showFilePreview(id) {
+    const record = await this.agent.files.get(id);
+    if (!record) return;
+
+    if (record.handle) {
+      const perm = await this.agent.files.ensurePermission(record, { request: true });
+      if (perm !== 'granted') {
+        this._showModal('📎 ' + this._escHtml(record.name), `
+          <p style="color:var(--text-secondary);font-size:13px;">
+            Браузер не дал разрешение на чтение файла. Это штатное поведение после
+            перезапуска браузера — нажмите «Просмотр» ещё раз и разрешите доступ,
+            либо выберите файл заново кнопкой «Перевыбрать».
+          </p>`, null);
+        return;
+      }
+    }
+
+    const res = await this.agent.files.read(id, { maxBytes: 200 * 1024 });
+    if (res.error) {
+      this._showModal('📎 ' + this._escHtml(record.name),
+        `<p style="color:var(--danger);font-size:13px;">${this._escHtml(res.error)}</p>` +
+        (res.needsRelink ? '<p style="font-size:12px;color:var(--text-muted);">Нажмите «Перевыбрать», чтобы указать файл заново.</p>' : ''),
+        null);
+      return;
+    }
+
+    const isImage = (res.mime || '').startsWith('image/');
+    const body = isImage
+      ? '<p style="color:var(--text-secondary);font-size:13px;">Двоичный файл — предпросмотр текста недоступен.</p>'
+      : `<pre class="tool-pre" style="max-height:50vh;">${this._escHtml(res.text || '')}</pre>`;
+
+    this._showModal('📎 ' + this._escHtml(record.name), `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
+        ${res.size} байт${res.mime ? ' · ' + this._escHtml(res.mime) : ''}
+        ${res.truncated ? ' · показано начало файла' : ''}
+      </div>
+      ${body}
+      <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+        Содержимое читается с диска при каждом обращении и нигде не сохраняется.
+      </div>`, null, null, { wide: true });
+  }
+
 });

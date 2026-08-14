@@ -139,6 +139,10 @@ class LLMGateway {
       let fullContent = '';
       let toolCalls = [];
       let streamUsage = null;
+      // finish_reason приходит в одном из последних чанков. Без него
+      // обрыв ответа по max_tokens ('length') невозможно отличить от
+      // нормального завершения — ответ просто выглядел неполным.
+      let streamFinishReason = null;
       var chunkCount = 0;
       var rawChunks = [];
 
@@ -160,6 +164,8 @@ class LLMGateway {
             chunkCount++;
             // usage приходит отдельным финальным чанком (choices пустой)
             if (json.usage) streamUsage = json.usage;
+            const fr = json.choices?.[0]?.finish_reason;
+            if (fr) streamFinishReason = fr;
             const delta = json.choices?.[0]?.delta;
             if (delta?.content) {
               fullContent += delta.content;
@@ -185,6 +191,7 @@ class LLMGateway {
         content: fullContent,
         tool_calls: toolCalls.length > 0 ? toolCalls : null,
         usage: streamUsage,
+        finish_reason: streamFinishReason,
       };
 
       if (this.debug) {
@@ -235,6 +242,7 @@ class LLMGateway {
       content: choice.message.content || '',
       tool_calls: choice.message.tool_calls || null,
       usage: data.usage || null,
+      finish_reason: choice.finish_reason || null,
     };
 
     if (this.debug) {

@@ -13,7 +13,7 @@ class UI {
     this.currentTab = 'chat';
     this.currentChatId = null;
     this.isStreaming = false;
-    this.folderSelection = { tools: null, skills: null, prompts: null, chats: null };
+    this.folderSelection = { tools: null, skills: null, prompts: null, chats: null, files: null };
 
     // ── Ограничения работы агента при использовании tools ──
     // Применяются к ОДНОМУ ходу пользователя (цепочке tool_calls подряд).
@@ -92,6 +92,8 @@ class UI {
     document.getElementById('add-tool-folder-btn').addEventListener('click', () => this._createFolder('tools'));
     document.getElementById('add-skill-folder-btn').addEventListener('click', () => this._createFolder('skills'));
     document.getElementById('add-prompt-folder-btn').addEventListener('click', () => this._createFolder('prompts'));
+    document.getElementById('add-file-folder-btn').addEventListener('click', () => this._createFolder('files'));
+    document.getElementById('add-file-btn').addEventListener('click', () => this.addFiles());
 
     // Экспорт/импорт. Из шапки панели (Tools/Skills/Промпты) открывается
     // ВЫБОРОЧНЫЙ экспорт только этого раздела — с отметкой конкретных
@@ -201,6 +203,7 @@ class UI {
     if (ioRow) ioRow.hidden = tab !== 'chat';
     const iosRow = document.getElementById('chats-io-row');
     if (iosRow) iosRow.hidden = tab !== 'chat';
+    if (tab === 'files') this.renderFiles();
     if (tab === 'tools') this.renderTools();
     if (tab === 'skills') this.renderSkills();
     if (tab === 'prompts') this.renderPrompts();

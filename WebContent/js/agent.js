@@ -8,7 +8,8 @@ class AIAgent {
     this.tools = null;
     this.skills = null;
     this.prompts = null;
-    this.folders = null; 
+    this.folders = null;
+    this.files = null;
     this.ui = null;
   }
 
@@ -21,7 +22,9 @@ class AIAgent {
     this.skills = new SkillsEngine(this.db);
     this.prompts = new PromptsLibrary(this.db);
     this.folders = new FoldersEngine(this.db);
-    this.tools.folders = this.folders; // делаем builtin_delete_folder переиспользуемым (без дублирования логики)
+    this.files = new FilesEngine(this.db);
+    this.tools.folders = this.folders;
+    this.tools.files = this.files;   // доступ к файлам из инструментов
 
     // 3. Load settings
     const settings = await this.db.get('settings', 'llm');
