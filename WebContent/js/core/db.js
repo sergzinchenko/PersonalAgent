@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 8) {   
+  constructor(name = 'ai_agent_db', version = 10) {
     this.name = name;
     this.version = version;
     this.db = null;
@@ -51,8 +51,30 @@ class AgentDB {
           s.createIndex('parentId', 'parentId');
           s.createIndex('name', 'name');
         }
+        // Набор подключений к LLM. Отдельное хранилище, а не запись в
+        // settings: подключений много, они перебираются при отказе и
+        // сортируются по приоритету — для этого нужен индекс, которого
+        // у key-value записи в settings быть не может.
+        //
+        // Секреты (apiKey, customHeaderValue) лежат здесь зашифрованными
+        // через SecretsVault. Остальные поля — открытым текстом: они
+        // нужны, чтобы построить список и выбрать подключение, а
+        // расшифровывать всю таблицу на каждый выбор бессмысленно.
+        if (!db.objectStoreNames.contains('llm_connections')) {
+          const s = db.createObjectStore('llm_connections', { keyPath: 'id' });
+          s.createIndex('priority', 'priority');
+          s.createIndex('enabled', 'enabled');
+        }
         if (!db.objectStoreNames.contains('chat_stats')) {
           db.createObjectStore('chat_stats', { keyPath: 'chatId' });
+        }
+        // MCP-серверы как отдельная сущность (раньше сервер существовал
+        // только неявно — как повторённое на каждом его tool поле mcpServer).
+        // Имя и токен здесь общие для всех tools сервера — редактируются
+        // один раз, а не на каждом инструменте по отдельности. Адрес не
+        // хранится дублем: он совпадает с mcpServer у tools этого сервера.
+        if (!db.objectStoreNames.contains('mcp_servers')) {
+          db.createObjectStore('mcp_servers', { keyPath: 'id' });
         }
       };
       req.onsuccess = (e) => {

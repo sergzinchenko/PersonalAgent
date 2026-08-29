@@ -37,6 +37,14 @@ Object.assign(UI.prototype, {
         try { params = JSON.parse(document.getElementById('t_params').value); }
         catch { params = { type: 'object', properties: {}, required: [] }; }
 
+        // Новый tool не должен попасть внутрь чужого MCP-сервера — та же
+        // граница, что охраняется при перетаскивании в _bindSidebarTree:
+        // поддерево сервера содержит только его собственные инструменты.
+        // Если сейчас выбрана папка внутри сервера, создаём в корне раздела.
+        const targetParentId = isEdit
+          ? (tool?.parentId ?? null)
+          : ((await this._mcpScopeOf('tools', this.folderSelection.tools)) ? null : (this.folderSelection.tools || null));
+
         const toolObj = {
           id,
           name: document.getElementById('t_name').value.trim(),
@@ -45,7 +53,7 @@ Object.assign(UI.prototype, {
           handlerCode: document.getElementById('t_handler').value,
           enabled: tool?.enabled ?? true,
           builtin: false,
-          parentId: isEdit ? (tool?.parentId ?? null) : (this.folderSelection.tools || null),
+          parentId: targetParentId,
         };
         await this.agent.db.put('tools', toolObj);
         this.agent.tools.unregisterHandler(id);   // ← сбрасываем stale-handler из registry       
@@ -56,12 +64,19 @@ Object.assign(UI.prototype, {
   },
 
 
+  // Подключение нового сервера: вся логика (проверка адреса, импорт
+  // tools/list, создание папки-контейнера) — в ToolsEngine.connectMcpServer,
+  // здесь только форма и реакция на результат.
   showAddMCPServerModal() {
-    this._showModal('Подключить MCP Server', `
+    this._showModal('Подключить MCP-сервер', `
       <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px;">
-        MCP (Model Context Protocol) сервер выставляет tools через HTTP.<br>
-        Укажите URL до MCP-совместимого эндпоинта.
+        MCP (Model Context Protocol) сервер выставляет tools через HTTP.
+        Инструменты сервера появятся отдельной группой в дереве раздела Tools.
       </p>
+      <div class="form-group">
+        <label>Название</label>
+        <input id="mcp_name" placeholder="Например: Локальный MCP">
+      </div>
       <div class="form-group">
         <label>MCP Server URL</label>
         <input id="mcp_url" placeholder="http://localhost:3000/mcp">
@@ -71,48 +86,48 @@ Object.assign(UI.prototype, {
         <input id="mcp_token" type="password" placeholder="Bearer token">
       </div>
     `, async () => {
+      const name = document.getElementById('mcp_name').value.trim();
       const url = document.getElementById('mcp_url').value.trim();
       const token = document.getElementById('mcp_token').value.trim();
       if (!url) return;
 
-      try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
-        });
-
-        const data = await resp.json();
-        const mcpTools = data.result?.tools || [];
-
-        for (const mt of mcpTools) {
-          const toolObj = {
-            id: 'mcp_' + uid(),
-            name: mt.name,
-            description: mt.description || '',
-            parameters: mt.inputSchema || { type: 'object', properties: {}, required: [] },
-            enabled: true,
-            builtin: false,
-            mcpServer: url,
-            // Токен шифруется перед сохранением в IndexedDB (SecretsVault,
-            // crypto-utils.js). Для регистрации handler'а ниже используем
-            // ещё не зашифрованный `token`, который уже есть в памяти.
-            mcpToken: await SecretsVault.encrypt(this.agent.db, token),
-          };
-          await this.agent.db.put('tools', toolObj);
-          // Общий метод: та же логика используется при восстановлении
-          // MCP-обработчиков на старте приложения в ToolsEngine.loadTools().
-          this.agent.tools._registerMcpHandler({ ...toolObj, mcpToken: token });
-        }
-
-        alert(`Импортировано ${mcpTools.length} tools с MCP-сервера`);
-        this.renderTools();
-      } catch (e) {
-        alert('Ошибка подключения к MCP серверу: ' + e.message);
+      const res = await this.agent.tools.connectMcpServer({ name, url, token });
+      if (res.error) {
+        await this._confirm(res.error, { title: 'Не удалось подключить сервер' });
+        return this.showAddMCPServerModal();
       }
+
+      this.folderSelection.tools = res.folder.id;
+      await this.refreshSidebar();
+      this.renderTools();
+    });
+  },
+
+  // Правка сервера: название и токен. URL показан, но недоступен для
+  // изменения — см. пояснение у ToolsEngine.updateMcpServer.
+  async showEditMCPServerModal(serverId) {
+    const server = await this.agent.db.get('mcp_servers', serverId);
+    if (!server) return;
+
+    this._showModal('✏ ' + this._escHtml(server.name), `
+      <div class="form-group">
+        <label>Название</label>
+        <input id="mcps_name" value="${this._escHtml(server.name)}">
+      </div>
+      <div class="form-group">
+        <label>MCP Server URL</label>
+        <input value="${this._escHtml(server.url)}" disabled style="opacity:.6;">
+      </div>
+      <div class="form-group">
+        <label>Auth Token</label>
+        <input id="mcps_token" type="password" placeholder="Оставьте пустым, чтобы не менять">
+      </div>
+    `, async () => {
+      const name = document.getElementById('mcps_name').value.trim();
+      const token = document.getElementById('mcps_token').value.trim();
+      await this.agent.tools.updateMcpServer(serverId, { name, token });
+      await this.refreshSidebar();
+      this.renderTools();
     });
   },
 

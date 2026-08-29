@@ -211,10 +211,20 @@ Object.assign(UI.prototype, {
 
 
   // === Дерево папок в сайдбаре ===
+  //
+  // Для раздела 'tools' узлы с f.mcpServerId — не обычные папки, а
+  // контейнеры MCP-серверов (см. ToolsEngine.connectMcpServer): у них
+  // вместо переименования/удаления папки — настройка и удаление сервера
+  // целиком, а перетаскивание отключено (сервер всегда лежит в корне).
+  // Обычные подпапки внутри такого контейнера рендерятся как всегда —
+  // изоляция от смешивания серверов обеспечивается не здесь, а проверкой
+  // области видимости в _bindSidebarTree при перетаскивании.
   async _renderSidebarTree(type) {
     const list = document.getElementById('sidebar-list');
     const search = document.getElementById('sidebar-search').value.toLowerCase();
     const folders = await this.agent.folders.all(type);
+    const mcpServers = type === 'tools' ? await this.agent.db.getAll('mcp_servers') : [];
+    const mcpById = new Map(mcpServers.map(s => [s.id, s]));
 
     const byParent = {};
     folders.forEach(f => { const k = f.parentId || 'root'; (byParent[k] = byParent[k] || []).push(f); });
@@ -231,15 +241,20 @@ Object.assign(UI.prototype, {
       for (const f of children) {
         const sel = f.id === selected ? 'selected' : '';
         const hasKids = (byParent[f.id] || []).length > 0;
+        const server = f.mcpServerId ? mcpById.get(f.mcpServerId) : null;
+        const label = server ? server.name : f.name;
         html += `
           <div class="tree-node">
-            <div class="tree-node-row ${sel}" data-folder-id="${f.id}">
+            <div class="tree-node-row ${sel}" data-folder-id="${f.id}" ${server ? `data-mcp-server="${server.id}"` : ''}>
               <span class="tw-toggle">${hasKids ? '▾' : '•'}</span>
-              <span class="tw-name">📁 ${this._escHtml(f.name)}</span>
+              <span class="tw-name">${server ? '🧩' : '📁'} ${this._escHtml(label)}</span>
               <span class="tw-actions">
                 <button data-add-sub="${f.id}" title="Подпапка">＋</button>
-                <button data-ren="${f.id}" title="Переименовать">✏</button>
-                <button data-del="${f.id}" title="Удалить">✕</button>
+                ${server
+                  ? `<button data-mcp-edit="${server.id}" title="Настроить сервер">✏</button>
+                     <button data-mcp-del="${server.id}" title="Удалить сервер">✕</button>`
+                  : `<button data-ren="${f.id}" title="Переименовать">✏</button>
+                     <button data-del="${f.id}" title="Удалить">✕</button>`}
               </span>
             </div>
             ${build(f.id)}
@@ -320,11 +335,40 @@ Object.assign(UI.prototype, {
       this._refreshPanel(type);
     }));
 
+    // Действия с MCP-серверами (узлы с data-mcp-server вместо обычных папок)
+    list.querySelectorAll('[data-mcp-edit]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await this.showEditMCPServerModal(b.dataset.mcpEdit);
+    }));
+
+    list.querySelectorAll('[data-mcp-del]').forEach(b => b.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const serverId = b.dataset.mcpDel;
+      const server = await this.agent.db.get('mcp_servers', serverId);
+      const yes = await this._confirm(
+        `Удалить сервер «${server ? server.name : serverId}»? ` +
+        'Все его инструменты и организующие их папки будут удалены безвозвратно.',
+        { title: 'Удаление MCP-сервера', danger: true });
+      if (!yes) return;
+
+      // Выбранная папка могла лежать внутри удаляемого сервера — тогда
+      // панель справа осталась бы показывать несуществующую папку.
+      const scope = await this._mcpScopeOf(type, this.folderSelection[type]);
+      if (scope === serverId) this.folderSelection[type] = null;
+
+      await this.agent.tools.removeMcpServer(serverId);
+      await this.refreshSidebar();
+      this._refreshPanel(type);
+    }));
+
     // Drag & Drop
     list.querySelectorAll('.tree-node-row').forEach(row => {
       const fid = row.dataset.folderId; // '' для корня
 
-      if (fid) {
+      // Контейнер MCP-сервера не перетаскивается: он всегда лежит в корне
+      // раздела Tools, а перемещение внутрь другой папки или другого
+      // сервера не имеет смысла — сервер целиком, а не его часть.
+      if (fid && !row.hasAttribute('data-mcp-server')) {
         row.setAttribute('draggable', 'true');
         row.addEventListener('dragstart', (e) => {
           e.stopPropagation();
@@ -342,17 +386,44 @@ Object.assign(UI.prototype, {
         let data;
         try { data = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
         const target = fid || null;
+        // Область видимости — id MCP-сервера, если целевая (или исходная)
+        // папка лежит в его поддереве, иначе null. Перемещение разрешено
+        // только внутри одной области: нельзя утащить чужой tool в сервер,
+        // тот его — в другой сервер или в общие папки, и наоборот —
+        // см. постановку в connectMcpServer.
+        const targetScope = await this._mcpScopeOf(type, target);
 
         if (data.kind === 'item') {
           const rec = await this.agent.db.get(type, data.id);
-          if (rec) { rec.parentId = target; await this.agent.db.put(type, rec); }
+          if (!rec) return;
+          const sourceScope = await this._mcpScopeOf(type, rec.parentId || null);
+          if (sourceScope !== targetScope) return;
+          rec.parentId = target; await this.agent.db.put(type, rec);
         } else if (data.kind === 'folder') {
+          const sourceScope = await this._mcpScopeOf(type, data.id);
+          if (sourceScope !== targetScope) return;
           await this.agent.folders.move(data.id, target);
         }
         await this.refreshSidebar();
         this._refreshPanel(type);
       });
     });
+  },
+
+
+  // Id MCP-сервера, если папка folderId (или кто-то из её предков) —
+  // его контейнер, иначе null. Для разделов без MCP (skills/prompts/files)
+  // всегда null — там ни у одной папки не бывает mcpServerId.
+  async _mcpScopeOf(type, folderId) {
+    if (!folderId) return null;
+    const folders = await this.agent.folders.all(type);
+    const byId = new Map(folders.map(f => [f.id, f]));
+    let cur = byId.get(folderId);
+    while (cur) {
+      if (cur.mcpServerId) return cur.mcpServerId;
+      cur = cur.parentId ? byId.get(cur.parentId) : null;
+    }
+    return null;
   },
 
 
@@ -431,7 +502,7 @@ Object.assign(UI.prototype, {
     const renderCard = (t) => `
       <div class="tool-card" data-id="${t.id}">
         <div class="tool-header">
-          <span class="tool-name">${this._escHtml(t.name)}</span>
+          <span class="tool-name">${t.mcpServerId ? '🧩 ' : ''}${this._escHtml(t.name)}</span>
           <label class="toggle-switch">
             <input type="checkbox" ${t.enabled ? 'checked' : ''} data-toggle="${t.id}">
             <span class="toggle-slider"></span>
@@ -440,7 +511,7 @@ Object.assign(UI.prototype, {
         <div class="tool-desc">${this._escHtml(t.description)}</div>
         <div class="tool-params">${this._escHtml(JSON.stringify(t.parameters, null, 2))}</div>
         ${!t.builtin ? `<div style="margin-top:12px; display:flex; gap:8px;">
-          <button class="btn btn-secondary btn-sm" data-edit-tool="${t.id}">✏ Редактировать</button>
+          ${t.mcpServerId ? '' : `<button class="btn btn-secondary btn-sm" data-edit-tool="${t.id}">✏ Редактировать</button>`}
           <button class="btn btn-danger btn-sm" data-del-tool="${t.id}">Удалить</button>
         </div>` : ''}
       </div>`;
@@ -541,10 +612,20 @@ Object.assign(UI.prototype, {
       return (n / 1024 / 1024).toFixed(1).replace('.', ',') + ' МБ';
     };
 
+    // Реальное состояние каждой ссылки: после перезагрузки браузер обычно
+    // сбрасывает разрешение, и файл «связан», но не читается. Раньше
+    // панель показывала только флаг из базы и вводила в заблуждение.
+    const states = new Map();
+    for (const f of files) states.set(f.id, await this.agent.files.statusOf(f));
+    const needPermission = files.filter(f => states.get(f.id) === 'needs-permission');
+
     const renderCard = (f) => {
-      const state = f.needsRelink
-        ? '<span class="file-state warn" title="Ссылка не переживает перезагрузку — укажите файл заново">⚠ требуется повторный выбор</span>'
-        : '<span class="file-state ok" title="Файл читается по сохранённому дескриптору">🔗 связан</span>';
+      const st = states.get(f.id);
+      const state = st === 'ready'
+        ? '<span class="file-state ok" title="Файл читается по сохранённому дескриптору">🔗 связан</span>'
+        : st === 'needs-permission'
+        ? '<span class="file-state warn" title="Дескриптор сохранён, но браузер требует подтвердить доступ">🔒 нужно разрешение</span>'
+        : '<span class="file-state warn" title="Файл недоступен — укажите его заново">⚠ требуется повторный выбор</span>';
       return `
         <div class="tool-card file-card" draggable="true" data-item-id="${f.id}">
           <div class="tool-header">
@@ -583,6 +664,33 @@ Object.assign(UI.prototype, {
     };
 
     await this._renderPanelItems('files', mount, files, renderCard, bind);
+
+    // Одна кнопка на все файлы: запрашивать разрешение по одному —
+    // худший вариант из возможных, а браузер позволяет серию запросов
+    // в рамках одного нажатия.
+    if (needPermission.length) {
+      mount.insertAdjacentHTML('afterbegin', `
+        <div class="files-restore" id="files-restore-bar">
+          🔒 ${needPermission.length} ${needPermission.length === 1 ? 'файл ждёт' : 'файлов ждут'} подтверждения доступа —
+          браузер сбрасывает разрешения при перезапуске.
+          <button class="btn btn-primary btn-sm" id="files-restore-btn">Восстановить доступ</button>
+        </div>`);
+      document.getElementById('files-restore-btn')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Подтвердите в диалогах браузера…';
+        const res = await this.agent.files.restoreAccess(needPermission);
+        const bar = document.getElementById('files-restore-bar');
+        if (res.failed.length) {
+          bar.innerHTML = `Доступ восстановлен: ${res.granted.length}. ` +
+            `Осталось: ${res.failed.length} — нажмите ещё раз или используйте «Перевыбрать» у конкретного файла. ` +
+            `<button class="btn btn-primary btn-sm" id="files-restore-btn2">Повторить</button>`;
+          document.getElementById('files-restore-btn2')?.addEventListener('click', () => this.renderFiles());
+        } else {
+          this.renderFiles();
+        }
+      });
+    }
   }
 
 });

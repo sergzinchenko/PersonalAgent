@@ -7,6 +7,157 @@
 Object.assign(UI.prototype, {
 
 
+
+  // ── Набор моделей чата ──
+  //
+  // Хранится в записи чата: modelRefs — короткий список, modelRef —
+  // выбранная. Ссылки на удалённые модели отфильтровываются на чтении,
+  // а не чистятся при удалении: чатов могут быть сотни, и переписывать
+  // их все ради одной убранной модели неоправданно.
+
+  _chatModelRefs(chat, reg) {
+    const refs = (chat && Array.isArray(chat.modelRefs) ? chat.modelRefs : [])
+      .filter(r => reg.resolve(r));
+    // Пока пользователь ничего не добавил, показываем модель по
+    // умолчанию — иначе панель выглядела бы пустой и непонятной.
+    if (!refs.length && reg.resolve(reg.defaultRef)) return [reg.defaultRef];
+    return refs;
+  },
+
+  _chatActiveRef(chat, reg) {
+    if (chat && chat.modelRef && reg.resolve(chat.modelRef)) return chat.modelRef;
+    const list = this._chatModelRefs(chat, reg);
+    return list[0] || null;
+  },
+
+  // Применяет модель чата к шлюзу. Вызывается и при переключении чата, и
+  // перед отправкой запроса: чат мог быть открыт давно, а шлюз с тех пор
+  // настроен под другой чат.
+  async applyChatModel(chatId) {
+    const reg = this.agent.models;
+    if (!reg) return null;
+    const chat = chatId ? await this.agent.db.get('chats', chatId) : null;
+    const ref = this._chatActiveRef(chat, reg) || reg.defaultRef;
+    if (ref) reg.applyRef(ref);
+    return ref;
+  },
+
+  async setChatModel(ref) {
+    const reg = this.agent.models;
+    if (!reg.resolve(ref) || !this.currentChatId) return;
+
+    const chat = await this.agent.db.get('chats', this.currentChatId);
+    if (!chat) return;
+
+    chat.modelRefs = Array.from(new Set([...(chat.modelRefs || []), ref]));
+    chat.modelRef = ref;
+    // Дублируем имя модели в chat.model: оно используется в списке чатов
+    // и в экспорте, где разбирать ссылку неудобно.
+    const d = reg.describe(ref);
+    chat.model = d ? d.model : chat.model;
+    await this.agent.db.put('chats', chat);
+
+    reg.applyRef(ref);
+    this.updateModelDisplay?.();
+    await this.updateChatToolbar();
+  },
+
+  async removeChatModel(ref) {
+    if (!this.currentChatId) return;
+    const chat = await this.agent.db.get('chats', this.currentChatId);
+    if (!chat || !Array.isArray(chat.modelRefs)) return;
+
+    chat.modelRefs = chat.modelRefs.filter(r => r !== ref);
+    // Убрали выбранную — выбираем первую из оставшихся, чтобы чат не
+    // остался без модели.
+    if (chat.modelRef === ref) chat.modelRef = chat.modelRefs[0] || null;
+    await this.agent.db.put('chats', chat);
+
+    await this.applyChatModel(this.currentChatId);
+    this.updateModelDisplay?.();
+    await this.updateChatToolbar();
+  },
+
+  // Выбор модели для добавления в чат — из всех, что заведены в реестре.
+  // Окно остаётся открытым после добавления: за один заход в чат обычно
+  // добавляют не одну модель, а две-три для сравнения, и закрывать диалог
+  // после первой же было бы неудобно — пришлось бы открывать его заново.
+  async showChatModelPicker() {
+    // На случай, если чат ещё не открыт (например, самый первый запуск
+    // без единого чата) — иначе набор моделей нечему было бы применить.
+    if (!this.currentChatId) await this.newChat();
+
+    const reg = this.agent.models;
+    const all = reg.allModels();
+
+    if (!all.length) {
+      return this._confirm('Моделей пока нет. Добавьте провайдера и его модели в ⚙ Настройки.',
+        { title: 'Нет моделей' });
+    }
+
+    const renderGroups = async () => {
+      const chat = this.currentChatId ? await this.agent.db.get('chats', this.currentChatId) : null;
+      const inChat = new Set(this._chatModelRefs(chat, reg));
+
+      // Группируем по провайдеру: одно и то же имя модели встречается у
+      // нескольких провайдеров, и без группировки их не различить.
+      const byProvider = new Map();
+      for (const m of all) {
+        if (!byProvider.has(m.connName)) byProvider.set(m.connName, []);
+        byProvider.get(m.connName).push(m);
+      }
+
+      return Array.from(byProvider.entries()).map(([prov, models]) => `
+        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin:10px 0 4px;">
+          ${this._escHtml(prov)}
+        </div>
+        ${models.map(m => `
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;
+                      border:1px solid var(--border);border-radius:6px;margin-bottom:4px;">
+            <span title="${this._escHtml(m.tierInfo.hint)}">${m.tierInfo.icon}</span>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;">${this._escHtml(m.label || m.name)}</div>
+              <div style="font-size:11px;color:var(--text-muted);">
+                ${this._escHtml(m.tierInfo.label)}${m.contextWindow ? ' · окно ' + this._fmtLimit(m.contextWindow) : ''}
+                ${m.notes ? ' · ' + this._escHtml(m.notes) : ''}
+              </div>
+            </div>
+            <button class="btn ${inChat.has(m.ref) ? 'btn-secondary' : 'btn-success'}"
+                    data-add-ref="${this._escHtml(m.ref)}" style="padding:4px 10px;font-size:11px;"
+                    ${inChat.has(m.ref) ? 'disabled' : ''}>
+              ${inChat.has(m.ref) ? 'уже в чате' : '+ В чат'}
+            </button>
+          </div>`).join('')}
+      `).join('');
+    };
+
+    this._showModal('🧠 Модели для этого чата', `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">
+        Добавленные модели появятся в панели чата — переключаться между ними можно одним кликом.
+        Можно добавить сразу несколько. Правая кнопка по значку в чате убирает модель из набора.
+      </div>
+      <div id="cmp_list" style="max-height:50vh;overflow-y:auto;">${await renderGroups()}</div>
+    `, null, null, { wide: true, modal: true });
+
+    // Делегирование на контейнер, а не на кнопки: после добавления модели
+    // список перерисовывается целиком (новые кнопки — новые DOM-узлы), и
+    // слушатель на самом контейнере переживает эту перерисовку без
+    // необходимости перевешивать его на каждый новый набор кнопок.
+    const list = document.getElementById('cmp_list');
+    if (list) {
+      list.onclick = async (e) => {
+        const btn = e.target.closest('button[data-add-ref]');
+        if (!btn) return;
+        try {
+          await this.setChatModel(btn.dataset.addRef);
+          list.innerHTML = await renderGroups();
+        } catch (err) {
+          console.error('Не удалось добавить модель в чат:', err);
+        }
+      };
+    }
+  },
+
   async updateChatToolbar() {
     const toolbar = document.getElementById('chat-toolbar');
     const skills = await this.agent.skills.loadSkills();
@@ -15,13 +166,31 @@ Object.assign(UI.prototype, {
     const stats = this.currentChatId ? await this.agent.db.get('chat_stats', this.currentChatId) : null;
     const fmt = (n) => (n || 0).toLocaleString('ru-RU');
 
-    // Быстрый выбор модели: список из ранее загруженных моделей;
-    // если их ещё не запрашивали — показываем только текущую.
-    const models = llm.availableModels.length ? llm.availableModels
-                 : (llm.model ? [llm.model] : []);
-    const modelOptions = models.map(m =>
-      `<option value="${this._escHtml(m)}" ${m === llm.model ? 'selected' : ''}>${this._escHtml(m)}</option>`
-    ).join('');
+    // ── Быстрый выбор модели ──
+    // Устроено как навыки: у чата свой короткий набор моделей, из которого
+    // одна выбрана. Плоский список всех моделей провайдера здесь не годится:
+    // их бывают десятки, а в конкретном чате нужны две-три.
+    const reg = this.agent.models;
+    const chat = this.currentChatId ? await this.agent.db.get('chats', this.currentChatId) : null;
+    const chatModels = this._chatModelRefs(chat, reg);
+    const activeRef = this._chatActiveRef(chat, reg);
+
+    const modelChips = chatModels.map(ref => {
+      const d = reg.describe(ref);
+      if (!d) return '';
+      const on = ref === activeRef;
+      const title = `${d.provider} · ${d.model} · ${d.tierLabel}` +
+        (d.contextWindow ? ` · окно ${this._fmtLimit(d.contextWindow)}` : '') +
+        (d.notes ? `\n${d.notes}` : '');
+      return `<span class="chip model-chip ${on ? 'active' : ''}" data-model-ref="${this._escHtml(ref)}"
+                    title="${this._escHtml(title)}">${d.tierIcon} ${this._escHtml(d.label)}</span>`;
+    }).join('');
+
+    const modelRow = reg.allModels().length
+      ? `${modelChips || '<span class="skills-empty">модель не выбрана</span>'}
+         <button type="button" class="skills-toggle" id="model-add-btn"
+                 title="Добавить модель в этот чат">+ модель</button>`
+      : `<span class="skills-empty">моделей нет — добавьте в ⚙ Настройки</span>`;
 
     const approx = stats && stats.estimated ? '≈' : '';
     const tokensChip = stats && stats.totalTokens
@@ -38,9 +207,9 @@ Object.assign(UI.prototype, {
       if (ctxLimit) {
         const pct = Math.round((ctxUsed / ctxLimit) * 100);
         const cls = pct >= 100 ? ' ctx-danger' : (pct >= this.contextWarnPercent ? ' ctx-warn' : '');
-        contextChip = `<span class="chip stat-chip${cls}" title="Контекст последнего запроса: ${ctxApprox}${fmt(ctxUsed)} из ${fmt(ctxLimit)} токенов${this.contextLimit ? ' (лимит задан вручную)' : ' (лимит определён по названию модели)'}">📐 ${ctxApprox}${fmt(ctxUsed)} / ${this._fmtLimit(ctxLimit)} · ${pct}%</span>`;
+        contextChip = `<span class="chip stat-chip${cls}" title="Контекст последнего запроса: ${ctxApprox}${fmt(ctxUsed)} из ${fmt(ctxLimit)} токенов${' (окно задано в карточке модели)'}">📐 ${ctxApprox}${fmt(ctxUsed)} / ${this._fmtLimit(ctxLimit)} · ${pct}%</span>`;
       } else {
-        contextChip = `<span class="chip stat-chip" title="Окно контекста для этой модели неизвестно — задайте его в ⚙ Настройки → Модель">📐 ${ctxApprox}${fmt(ctxUsed)} / ?</span>`;
+        contextChip = `<span class="chip stat-chip" title="Окно контекста неизвестно — задайте его в карточке модели: ⚙ Настройки → Провайдеры и модели">📐 ${ctxApprox}${fmt(ctxUsed)} / ?</span>`;
       }
     } else if (ctxLimit) {
       contextChip = `<span class="chip stat-chip muted" title="Окно контекста выбранной модели">📐 окно ${this._fmtLimit(ctxLimit)}</span>`;
@@ -50,47 +219,92 @@ Object.assign(UI.prototype, {
       ? `<span class="chip stat-chip" id="tool-stats-chip" title="Нажмите для подробной статистики">🔧 ${fmt(stats.toolCalls)} вызовов${stats.toolErrors ? ` · ${fmt(stats.toolErrors)} ошибок` : ''}</span>`
       : `<span class="chip stat-chip muted">🔧 нет вызовов</span>`;
 
+    // ── Режим отображения навыков ──
+    // 'active' — только включённые (при отключении навык исчезает из
+    // панели), 'all' — все. При десятке навыков полный список занимал
+    // заметную часть экрана в каждом чате, поэтому по умолчанию —
+    // компактный режим.
+    const skillsMode = this.skillsPanelMode || 'active';
+    const enabled = skills.filter(s => s.enabled);
+    const shown = skillsMode === 'all' ? skills : enabled;
+    const hiddenCount = skills.length - shown.length;
+
+    const skillChips = shown.map(s => `
+      <span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
+        ${this._escHtml(s.icon)} ${this._escHtml(s.name)}
+      </span>`).join('');
+
+    // В компактном режиме без включённых навыков панель была бы пустой и
+    // непонятной — поясняем, что навыки есть и как их показать.
+    const emptyNote = (skillsMode === 'active' && !enabled.length && skills.length)
+      ? '<span class="skills-empty">навыки не включены</span>'
+      : '';
+
+    const toggleLabel = skillsMode === 'all'
+      ? `▴ только включённые`
+      : `▾ все навыки${hiddenCount ? ' (' + hiddenCount + ')' : ''}`;
+
     toolbar.innerHTML = `
-      <div class="toolbar-row">
-        ${skills.map(s => `
-          <span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
-            ${this._escHtml(s.icon)} ${this._escHtml(s.name)}
-          </span>
-        `).join('')}
+      <div class="toolbar-row skills-row">
+        ${skillChips}${emptyNote}
+        ${skills.length ? `<button type="button" class="skills-toggle" id="skills-mode-toggle"
+          title="Переключить отображение навыков">${toggleLabel}</button>` : ''}
       </div>
       <div class="toolbar-row toolbar-meta">
-        <select id="quick-model-select" class="quick-model" title="Быстрый выбор модели">
-          ${modelOptions || '<option value="">модель не выбрана</option>'}
-        </select>
+        <span class="model-row">${modelRow}</span>
         ${tokensChip}
         ${contextChip}
         ${toolsChip}
       </div>
     `;
 
+    // Переключатель режима: значение сохраняем, чтобы выбор не сбрасывался
+    // при каждом обновлении панели и после перезагрузки.
+    document.getElementById('skills-mode-toggle')?.addEventListener('click', async () => {
+      this.skillsPanelMode = (this.skillsPanelMode || 'active') === 'all' ? 'active' : 'all';
+      const cur = (await this.agent.db.get('settings', 'display')) || { key: 'display' };
+      await this.agent.db.put('settings', { ...cur, key: 'display', skillsPanelMode: this.skillsPanelMode });
+      this.updateChatToolbar();
+    });
+
     toolbar.querySelectorAll('.chip[data-skill]').forEach(chip => {
       chip.addEventListener('click', async () => {
         const skill = await this.agent.db.get('skills', chip.dataset.skill);
         skill.enabled = !skill.enabled;
         await this.agent.db.put('skills', skill);
+        // В компактном режиме отключённый навык исчезает из панели —
+        // это ожидаемо, но при первом разе выглядит как пропажа.
+        // Показываем короткую подсказку, где его найти.
+        if (!skill.enabled && (this.skillsPanelMode || 'active') === 'active' && !this._skillHideHintShown) {
+          this._skillHideHintShown = true;
+          const c = document.getElementById('chat-messages');
+          c?.insertAdjacentHTML('beforeend',
+            `<div class="message system">ℹ️ Навык «${this._escHtml(skill.name)}» отключён и скрыт из панели. ` +
+            `Вернуть его можно кнопкой «все навыки».</div>`);
+          c.scrollTop = c.scrollHeight;
+        }
         this.updateChatToolbar();
       });
     });
 
     // Быстрая смена модели — меняет её и в памяти, и в сохранённых настройках,
     // чтобы выбор пережил перезагрузку (секреты при этом не трогаем).
-    const modelSel = document.getElementById('quick-model-select');
-    modelSel?.addEventListener('change', async () => {
-      const chosen = modelSel.value;
-      if (!chosen) return;
-      llm.configure({ model: chosen });
-      const saved = await this.agent.db.get('settings', 'llm');
-      if (saved) {
-        saved.model = chosen;
-        await this.agent.db.put('settings', saved);
-      }
-      this.updateModelDisplay();
+    // Клик по чипу — выбор рабочей модели чата. Выбранной может быть
+    // только одна: набор в чате нужен для быстрого переключения, а не
+    // для одновременного использования.
+    toolbar.querySelectorAll('.chip[data-model-ref]').forEach(chip => {
+      chip.addEventListener('click', async () => {
+        await this.setChatModel(chip.dataset.modelRef);
+      });
+      // Правая кнопка убирает модель из набора чата. Отдельного крестика
+      // на чипе нет — он занимал бы место в и без того плотной панели.
+      chip.addEventListener('contextmenu', async (e) => {
+        e.preventDefault();
+        await this.removeChatModel(chip.dataset.modelRef);
+      });
     });
+
+    document.getElementById('model-add-btn')?.addEventListener('click', () => this.showChatModelPicker());
 
     document.getElementById('tool-stats-chip')?.addEventListener('click', () => this.showChatStatsModal());
   },
@@ -192,11 +406,19 @@ Object.assign(UI.prototype, {
   },
 
 
-  // Эффективный лимит: ручная настройка > таблица > 0 (неизвестно)
+  // Эффективный лимит окна контекста, по убыванию достоверности:
+  //   1. окно, заданное у выбранной модели (пользователь указал его сам);
+  //   2. подсказка по имени модели;
+  //   3. 0 — неизвестно, индикатор заполнения не показывается.
+  //
+  // Ручной общий лимит убран: он был один на всё приложение и врал, как
+  // только в чатах оказывались разные модели. Теперь окно — свойство
+  // модели, а не приложения.
   effectiveContextLimit() {
-    return this.contextLimit > 0
-      ? this.contextLimit
-      : this._knownContextLimit(this.agent.llm.model);
+    const reg = this.agent.models;
+    const d = reg && reg.describe();
+    if (d && d.contextWindow > 0) return d.contextWindow;
+    return this._knownContextLimit(this.agent.llm.model);
   },
 
 

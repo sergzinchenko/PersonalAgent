@@ -121,7 +121,11 @@ class LLMGateway {
         console.log('%cElapsed:', 'color:#888;', elapsed + 'ms');
         console.groupEnd();
         }
-        throw new Error('API Error ' + resp.status + ': ' + err);
+        {
+          const e = new Error('API Error ' + resp.status + ': ' + err);
+          e.status = resp.status;   // используется при разборе ошибки в UI
+          throw e;
+        }
       }
 
       if (this.debug) {
@@ -242,7 +246,11 @@ class LLMGateway {
       console.log('%cElapsed:', 'color:#888;', elapsed2 + 'ms');
       console.groupEnd();
       }
-      throw new Error('API Error ' + resp.status + ': ' + err);
+      {
+        const e = new Error('API Error ' + resp.status + ': ' + err);
+        e.status = resp.status;   // используется при разборе ошибки в UI
+        throw e;
+      }
     }
 
     const data = await resp.json();

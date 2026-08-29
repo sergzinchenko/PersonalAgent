@@ -22,6 +22,10 @@ Object.assign(UI.prototype, {
       // Новый чат создаётся в папке, выбранной сейчас в дереве сайдбара.
       parentId: this.folderSelection.chats || null,
       skillIds: [],
+      // Набор моделей чата и выбранная из них. Новый чат начинает с
+      // модели по умолчанию, отмеченной звёздочкой в настройках.
+      modelRefs: this.agent.models?.defaultRef ? [this.agent.models.defaultRef] : [],
+      modelRef: this.agent.models?.defaultRef || null,
       model: this.agent.llm.model,
     };
     await this.agent.db.put('chats', chat);
@@ -45,6 +49,11 @@ Object.assign(UI.prototype, {
       container.innerHTML = messages.map(m => this._renderMessage(m)).join('');
       container.scrollTop = container.scrollHeight;
     }
+
+    // Модель — свойство чата, поэтому при переключении чата она сразу
+    // применяется к шлюзу: иначе индикатор в шапке показывал бы модель
+    // предыдущего чата.
+    await this.applyChatModel(chatId);
 
     this.updateChatToolbar();
     this.refreshSidebar();
@@ -195,10 +204,18 @@ Object.assign(UI.prototype, {
     this._turnStartedAt = Date.now();
     this._turnToolCalls = 0;
     this._stopRequested = false;
+    // Счётчики политики безопасности считаются на ход, а не на сессию:
+    // «за один ответ уже 20 изменений» — сигнал, «за день» — нет.
+    this.agent.security?.resetTurn();
     // Сообщение пользователя, к которому будет привязано общее время хода
     // (пункт «тайминг запроса пользователя»): полный цикл от отправки до
     // финального ответа, включая все вызовы инструментов.
     this._turnUserMsgId = userMsg.id;
+
+    // Шлюз глобален, а модель выбирается у чата. Открытый ранее другой
+    // чат мог оставить в шлюзе свою модель — применяем нужную перед
+    // каждым ходом, а не только при переключении чата.
+    await this.applyChatModel(this.currentChatId);
 
     await this._generateResponse();
   },
@@ -382,6 +399,62 @@ Object.assign(UI.prototype, {
     container.scrollTop = container.scrollHeight;
   },
 
+  // ── Подтверждение операции агента ──
+  // Диалог должен давать основание для решения, а не просто спрашивать
+  // «разрешить?». Поэтому показываем: что за операция, чем именно она
+  // рискованна и с какими аргументами вызывается.
+  confirmSecurityAction(req) {
+    return new Promise((resolve) => {
+      let settled = false;
+
+      const catLabels = {
+        read: 'Чтение', write: 'Изменение данных',
+        destroy: 'Удаление или перезапись', network: 'Обращение в интернет',
+        execute: 'Исполнение кода или подмена поведения',
+      };
+
+      let argsText = '';
+      try {
+        argsText = JSON.stringify(req.args, null, 2) || '';
+      } catch (_) { argsText = String(req.args); }
+      if (argsText.length > 2000) argsText = argsText.slice(0, 2000) + '\n… (сокращено)';
+
+      const risks = (req.risks || []).map(r =>
+        `<li>${this._escHtml(r)}</li>`).join('');
+
+      this._showModal('🛡 Подтвердите операцию', `
+        <div class="sec-summary">
+          <div class="sec-tool">${this._escHtml(req.toolName)}</div>
+          <div class="sec-cat">${this._escHtml(catLabels[req.category] || req.category)}</div>
+        </div>
+        ${risks ? `<div class="form-group">
+          <label>На что обратить внимание</label>
+          <ul class="sec-risks">${risks}</ul>
+        </div>` : ''}
+        <div class="form-group">
+          <label>Что именно будет выполнено</label>
+          <pre class="tool-pre" style="max-height:30vh;">${this._escHtml(argsText)}</pre>
+        </div>
+        ${req.host ? `<label class="check-row">
+          <input type="checkbox" id="sec_remember_host"> Больше не спрашивать про ${this._escHtml(req.host)} в этой сессии
+        </label>` : ''}
+        <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+          Отказ не прерывает работу агента — он получит сообщение, что операция не разрешена.
+        </div>
+      `,
+        () => {
+          settled = true;
+          resolve({
+            approved: true,
+            rememberHost: document.getElementById('sec_remember_host')?.checked || false,
+          });
+        },
+        () => { if (!settled) resolve({ approved: false }); },
+        { modal: true, wide: true }
+      );
+    });
+  },
+
   _stopTurn(container, reason, depth = 0) {
     container.insertAdjacentHTML('beforeend',
       `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
@@ -445,24 +518,35 @@ Object.assign(UI.prototype, {
 
       let systemPrompt = await this.agent.skills.buildSystemPrompt();
 
-      // Список доступных файлов добавляем в системный промпт, чтобы модель
-      // знала, на что можно сослаться, и не гадала. Само содержимое не
-      // подставляем — его модель запросит инструментом read_file, когда
-      // оно действительно понадобится (иначе контекст забивался бы
-      // файлами, которые в этом запросе не нужны).
+      // ── Упоминание файлов в системном промпте ──
+      // Раньше сюда безусловно вставлялся ПЕРЕЧЕНЬ всех файлов. Само его
+      // присутствие работало как приглашение: агент начинал анализировать
+      // файлы даже на вопрос «с чего начать». Теперь по умолчанию модель
+      // знает лишь, что файлы есть, а перечень получает инструментом
+      // list_files — то есть только когда пользователь о них заговорил.
       try {
-        const known = await this.agent.files.all();
-        if (known.length) {
-          const folders = await this.agent.db.getAll('folders');
-          const lines = [];
-          for (const f of known.slice(0, 100)) {
-            const path = await this.agent.files.pathOf(f, folders);
-            lines.push(`- ${path}${f.note ? ' — ' + f.note : ''}${f.needsRelink ? ' (ссылка требует обновления)' : ''}`);
+        const mode = this.filesContextMode || 'brief';
+        if (mode !== 'off') {
+          const known = await this.agent.files.all();
+          if (known.length) {
+            let block = '\n\n## Файлы пользователя\n' +
+              `У пользователя есть ссылки на файлы (${known.length} шт.). ` +
+              'НЕ читай и НЕ анализируй их по своей инициативе. ' +
+              'Если пользователь спросит про свои файлы или про конкретный файл — ' +
+              'получи перечень инструментом list_files, затем читай нужное через read_file. ' +
+              'Если файл кажется нужным, но о нём не просили — сначала спроси.\n';
+
+            if (mode === 'full') {
+              const folders = await this.agent.db.getAll('folders');
+              const lines = [];
+              for (const f of known.slice(0, 100)) {
+                const path = await this.agent.files.pathOf(f, folders);
+                lines.push(`- ${path}${f.note ? ' — ' + f.note : ''}`);
+              }
+              block += lines.join('\n') + '\n';
+            }
+            systemPrompt += block;
           }
-          systemPrompt += '\n\n## Доступные файлы\n' +
-            'Пользователь дал ссылки на эти файлы. Читай их инструментом read_file ' +
-            '(по пути или имени), ищи по ним — search_files. Содержимое здесь не приведено.\n' +
-            lines.join('\n') + '\n';
         }
       } catch (_) { /* список файлов не критичен для ответа */ }
 

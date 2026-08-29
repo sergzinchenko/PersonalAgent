@@ -125,8 +125,10 @@ Object.assign(UI.prototype, {
         status.style.color = 'var(--warning)';
 
         // Работу делает встроенный инструмент — тот же, что доступен агенту.
+        // Действие инициировал пользователь кнопкой — политика безопасности
+        // не переспрашивает о том, что человек только что нажал сам.
         const res = await this.agent.tools.executeTool('export_chats',
-          password ? { chatIds: ids, password } : { chatIds: ids });
+          password ? { chatIds: ids, password } : { chatIds: ids }, { bypassSecurity: true });
         if (res && res.error) {
           status.textContent = '❌ ' + res.error;
           status.style.color = 'var(--danger)';
@@ -181,7 +183,7 @@ Object.assign(UI.prototype, {
         const password = document.getElementById('chats_imp_pass').value;
 
         const res = await this.agent.tools.executeTool('import_chats',
-          { content, mode, open: false, ...(password ? { password } : {}) });
+          { content, mode, open: false, ...(password ? { password } : {}) }, { bypassSecurity: true });
         if (res && res.error) {
           // Инструмент сам распознаёт зашифрованный архив и просит пароль —
           // подсказываем это явно, а не показываем сухую ошибку.
@@ -241,7 +243,7 @@ Object.assign(UI.prototype, {
           format: document.getElementById('chat_exp_format').value,
           chatId: this.currentChatId,
           includeToolCalls: document.getElementById('chat_exp_tools').checked,
-        });
+        }, { bypassSecurity: true });
 
         if (res && res.error) {
           status.textContent = '❌ ' + res.error;
@@ -298,7 +300,7 @@ Object.assign(UI.prototype, {
         const res = await this.agent.tools.executeTool('import_chat', {
           content,
           title: title || undefined,
-        });
+        }, { bypassSecurity: true });
 
         if (res && res.error) {
           status.textContent = '❌ ' + res.error;

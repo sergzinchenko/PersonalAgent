@@ -114,6 +114,55 @@ class FilesEngine {
     return state;
   }
 
+  // Состояние каждой ссылки без запроса разрешений: нужно, чтобы панель
+  // показывала реальную картину, а не только флаг из базы.
+  // 'ready' — читается сразу; 'needs-permission' — дескриптор есть, но
+  // браузер требует подтверждения; 'needs-relink' — дескриптора нет
+  // или файл недоступен.
+  async statusOf(record) {
+    if (!record) return 'needs-relink';
+    if (!record.handle) {
+      return this._transient.has(record.id) ? 'ready' : 'needs-relink';
+    }
+    if (typeof record.handle.queryPermission !== 'function') return 'ready';
+    try {
+      const state = await record.handle.queryPermission({ mode: 'read' });
+      return state === 'granted' ? 'ready' : 'needs-permission';
+    } catch (_) {
+      return 'needs-relink';
+    }
+  }
+
+  // Пакетное восстановление доступа.
+  // ВАЖНО: requestPermission() обязан вызываться из обработчика жеста
+  // пользователя. Браузер учитывает «активацию» — один клик позволяет
+  // запросить разрешение, поэтому проходим файлы последовательно в рамках
+  // одного нажатия. Часть браузеров прерывает серию после первого диалога;
+  // тогда оставшиеся файлы просто вернутся в списке failed, и пользователь
+  // повторит нажатие. Это лучше, чем спрашивать по одному файлу вручную.
+  async restoreAccess(records) {
+    const granted = [];
+    const failed = [];
+    for (const record of records) {
+      if (!record.handle) { failed.push({ record, reason: 'нет дескриптора — нужен повторный выбор' }); continue; }
+      try {
+        const state = await record.handle.requestPermission({ mode: 'read' });
+        if (state === 'granted') {
+          if (record.needsRelink) {
+            record.needsRelink = false;
+            await this.db.put('files', record);
+          }
+          granted.push(record);
+        } else {
+          failed.push({ record, reason: 'разрешение не выдано' });
+        }
+      } catch (e) {
+        failed.push({ record, reason: e.message });
+      }
+    }
+    return { granted, failed };
+  }
+
   // Читает файл. Возвращает { name, size, mime, text } либо { error }.
   // Содержимое НЕ кэшируется: каждый раз берётся актуальная версия с диска.
   async read(id, { maxBytes = 512 * 1024, asText = true } = {}) {

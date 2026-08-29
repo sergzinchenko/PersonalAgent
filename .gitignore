@@ -4,3 +4,6 @@
 .tssapinfo 
 .classpath 
 /.settings/
+/.vscode/
+WebContent/.vscode/launch.json
+WebContent/.env

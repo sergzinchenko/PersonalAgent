@@ -10,6 +10,8 @@ class AIAgent {
     this.prompts = null;
     this.folders = null;
     this.files = null;
+    this.security = null;
+    this.models = null;
     this.ui = null;
   }
 
@@ -23,8 +25,15 @@ class AIAgent {
     this.prompts = new PromptsLibrary(this.db);
     this.folders = new FoldersEngine(this.db);
     this.files = new FilesEngine(this.db);
+    this.security = new SecurityEngine();
     this.tools.folders = this.folders;
     this.tools.files = this.files;   // доступ к файлам из инструментов
+    this.tools.security = this.security; // единая точка проверки операций
+
+    // Реестр провайдеров и моделей. Автоматического переключения нет:
+    // модель меняется только явным действием пользователя или агента.
+    this.models = new LLMRegistry(this.db, this.llm);
+    this.tools.llmRegistry = this.models;
 
     // 3. Load settings
     const settings = await this.db.get('settings', 'llm');
@@ -41,12 +50,30 @@ class AIAgent {
       this.llm.configure(decrypted);
     }
 
+    // Политики безопасности: режим, белые списки, лимиты MCP.
+    // Не секрет — храним как есть.
+    const securitySettings = await this.db.get('settings', 'security');
+    if (securitySettings) {
+      const { key, ...values } = securitySettings;
+      this.security.configure(values);
+    }
+
     // Настройки журналирования (не секрет — храним как есть, без шифрования).
     // Управляются через ⚙ Настройки → вкладка «Журналирование».
     const loggingSettings = await this.db.get('settings', 'logging');
     if (loggingSettings) {
       this.llm.debug = !!loggingSettings.llmDebug;
       this.tools.debug = !!loggingSettings.toolsDebug;
+    }
+
+    // Реестр поднимаем ПОСЛЕ settings/llm: если провайдеров ещё нет, он
+    // перенесёт оттуда параметры в первого провайдера с одной моделью.
+    // Если провайдеры есть — модель по умолчанию перекроет настройки
+    // выше, потому что источник правды теперь реестр.
+    try {
+      await this.models.init();
+    } catch (e) {
+      console.error('LLMRegistry: не удалось загрузить провайдеров и модели', e);
     }
 
     // 4. Load tools (seed defaults if needed)
@@ -58,6 +85,7 @@ class AIAgent {
     this.ui = new UI(this);
     this.tools.ui = this.ui;
 
+
     // Пользовательские ограничения работы с tools и настройки отображения.
     // Применяем ПОСЛЕ создания UI (значения живут в нём), перекрывая дефолты
     // из конструктора только теми полями, что реально сохранены.
@@ -67,8 +95,10 @@ class AIAgent {
       this.ui.limits = { ...this.ui.limits, ...values };
     }
     const display = await this.db.get('settings', 'display');
-    if (display && display.toolVerbosity) {
-      this.ui.toolVerbosity = display.toolVerbosity;
+    if (display) {
+      if (display.toolVerbosity) this.ui.toolVerbosity = display.toolVerbosity;
+      if (display.filesContextMode) this.ui.filesContextMode = display.filesContextMode;
+      if (display.skillsPanelMode) this.ui.skillsPanelMode = display.skillsPanelMode;
     }
     const context = await this.db.get('settings', 'context');
     if (context) {
@@ -81,9 +111,20 @@ class AIAgent {
     this.ui.applyLayout(layout);
 
     this.ui.updateConnectionStatus();
-    this.ui.updateModelDisplay();
-    this.ui.refreshSidebar();
-    this.ui.updateChatToolbar();
+
+    // Открываем последний использованный чат, а не пустое состояние: без
+    // этого currentChatId остаётся null до первого клика по чату или
+    // отправки сообщения, а панель чата (быстрый выбор модели, статистика)
+    // уже отрисована и выглядит рабочей — действия в ней тихо ничего не делают.
+    const chats = await this.db.getAll('chats');
+    if (chats.length) {
+      const last = chats.reduce((a, b) => (b.updatedAt || 0) > (a.updatedAt || 0) ? b : a);
+      await this.ui.loadChat(last.id);
+    } else {
+      this.ui.updateModelDisplay();
+      this.ui.refreshSidebar();
+      this.ui.updateChatToolbar();
+    }
 
     console.log('🚀 AI Agent initialized');
   }

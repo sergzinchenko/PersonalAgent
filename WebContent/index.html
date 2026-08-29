@@ -117,26 +117,41 @@
 <!-- MODALS CONTAINER -->
 <div id="modals"></div>
 
-<script src="js/db.js"></script>
-<script src="js/crypto-utils.js"></script>
-<script src="js/llm-gateway.js"></script>
-<script src="js/tools-engine.js"></script>
-<script src="js/skills-engine.js"></script>
-<script src="js/prompts-library.js"></script>
-<script src="js/folders-engine.js"></script>
-<script src="js/files-engine.js"></script>
-<script src="js/markdown.js"></script>
+<!-- js/ разложен по подпапкам по роли кода: core (БД, оркестратор, крипто,
+     markdown), engines (независимые движки без общего префикса файлов),
+     llm, tools, ui, tests. Порядок между подпапками и внутри них остаётся
+     прежним — только пути сменились, ни один файл не переименован. -->
+<script src="js/core/db.js"></script>
+<script src="js/core/crypto-utils.js"></script>
+<script src="js/llm/llm-gateway.js"></script>
+<script src="js/llm/llm-registry.js"></script>
+<!-- tools-engine.js объявляет класс и обязан идти первым: остальные
+     tools-*.js дополняют ToolsEngine.prototype примесями. -->
+<script src="js/tools/tools-engine.js"></script>
+<script src="js/tools/tools-registry.js"></script>
+<script src="js/tools/tools-executor.js"></script>
+<script src="js/tools/tools-builtin.js"></script>
+<script src="js/tools/tools-defs.js"></script>
+<script src="js/tools/tools-mcp.js"></script>
+<script src="js/tools/tools-llm-router.js"></script>
+<script src="js/engines/skills-engine.js"></script>
+<script src="js/engines/prompts-library.js"></script>
+<script src="js/engines/folders-engine.js"></script>
+<script src="js/engines/files-engine.js"></script>
+<script src="js/engines/security-engine.js"></script>
+<script src="js/core/markdown.js"></script>
 <!-- UI разбит на функциональные модули. ui-core.js объявляет класс UI,
      остальные дополняют UI.prototype примесями — порядок важен:
      ui-core.js должен идти первым. -->
-<script src="js/ui-core.js"></script>
-<script src="js/ui-navigation.js"></script>
-<script src="js/ui-chat.js"></script>
-<script src="js/ui-metrics.js"></script>
-<script src="js/ui-settings.js"></script>
-<script src="js/ui-editors.js"></script>
-<script src="js/ui-transfer.js"></script>
-<script src="js/agent.js"></script>
+<script src="js/ui/ui-core.js"></script>
+<script src="js/ui/ui-navigation.js"></script>
+<script src="js/ui/ui-chat.js"></script>
+<script src="js/ui/ui-metrics.js"></script>
+<script src="js/ui/ui-settings.js"></script>
+<script src="js/ui/ui-connections.js"></script>
+<script src="js/ui/ui-editors.js"></script>
+<script src="js/ui/ui-transfer.js"></script>
+<script src="js/core/agent.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
