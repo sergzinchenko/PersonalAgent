@@ -1,0 +1,13 @@
+{
+  "name": "ai-agent-personal-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Продакшен-сборка (обфускация одного бандла в dist/) для статического AI-агента. Сам продукт сборки не требует — см. readme.md.",
+  "scripts": {
+    "build": "node scripts/build-prod.js",
+    "test": "node js/tests/test-tools.js && node js/tests/test-registry.js && node js/tests/test-integration.js"
+  },
+  "devDependencies": {
+    "javascript-obfuscator": "^5.6.0"
+  }
+}

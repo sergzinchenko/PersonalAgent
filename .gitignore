@@ -7,3 +7,4 @@
 /.vscode/
 WebContent/.vscode/launch.json
 WebContent/.env
+node_modules/
