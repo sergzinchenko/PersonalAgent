@@ -48,13 +48,20 @@ Object.assign(UI.prototype, {
       const items = (chatsByParent[parentKey] || [])
         .filter(matches)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      return items.map(c => `
-        <div class="sidebar-item chat-item ${c.id === this.currentChatId ? 'active' : ''}"
-             data-id="${c.id}" draggable="true" title="${this._escHtml(c.title)}">
+      return items.map(c => {
+        // Чат может генерировать ответ, даже когда сейчас открыт другой —
+        // без этого индикатора это никак не было видно (см. this._chatRuns
+        // в ui-core.js/ui-chat.js).
+        const busy = this._chatRuns.has(c.id);
+        return `
+        <div class="sidebar-item chat-item ${c.id === this.currentChatId ? 'active' : ''} ${busy ? 'chat-busy' : ''}"
+             data-id="${c.id}" draggable="true" title="${this._escHtml(c.title)}${busy ? ' — генерирует ответ' : ''}">
+          ${busy ? '<span class="chat-busy-spinner" title="Генерирует ответ…"></span>' : ''}
           <span class="title">${this._escHtml(c.title)}</span>
           <span class="chat-time">${fmtTime(c.updatedAt || c.createdAt)}</span>
           <button class="delete-btn" data-delete="${c.id}" title="Удалить">✕</button>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     };
 
     const build = (parentId) => {

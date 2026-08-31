@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent — Personal Assistant</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<div id="app">
+  <!-- HEADER -->
+  <header id="header">
+    <div class="logo">⚡ AI Agent</div>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="chat">💬 Чаты</button>
+      <button class="tab-btn" data-tab="tools">🔧 Tools</button>
+      <button class="tab-btn" data-tab="skills">🧩 Skills</button>
+      <button class="tab-btn" data-tab="prompts">📋 Промпты</button>
+      <button class="tab-btn" data-tab="files">📎 Файлы</button>
+    </div>
+    <button id="sidebar-toggle" title="Свернуть/развернуть панель">◧</button>
+    <span id="connection-status"><span class="status-dot offline"></span></span>
+    <button id="settings-btn" title="Настройки">⚙</button>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside id="sidebar">
+    <div id="sidebar-resizer" title="Потяните, чтобы изменить ширину"></div>
+    <div class="sidebar-header">
+      <input type="text" id="sidebar-search" placeholder="Поиск...">
+    </div>
+    <div class="sidebar-list" id="sidebar-list"></div>
+    <div class="sidebar-footer">
+      <button class="btn btn-primary btn-block" id="sidebar-new-btn">+ Создать</button>
+      <div class="sidebar-footer-row" id="chat-io-row">
+        <button class="btn btn-secondary btn-sm" id="chat-export-btn" title="Выгрузить текущий чат в файл">⬆ Экспорт чата</button>
+        <button class="btn btn-secondary btn-sm" id="chat-import-btn" title="Загрузить чат из файла">⬇ Импорт чата</button>
+      </div>
+      <div class="sidebar-footer-row" id="chats-io-row">
+        <button class="btn btn-secondary btn-sm" id="chats-export-btn" title="Выгрузить несколько чатов с выбором">📦 Экспорт чатов</button>
+        <button class="btn btn-secondary btn-sm" id="chats-import-btn" title="Загрузить несколько чатов из архива">📥 Импорт чатов</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main id="main">
+    <!-- CHAT PANEL -->
+    <div class="panel active" id="panel-chat">
+      <div id="chat-messages">
+        <div class="empty-state">
+          <div class="icon">💬</div>
+          <div class="text">Начните новый чат или выберите существующий</div>
+        </div>
+      </div>
+      <div id="chat-input-area">
+        <div class="chat-toolbar" id="chat-toolbar"></div>
+        <div id="chat-input-row">
+          <textarea id="chat-input" placeholder="Введите сообщение... (Shift+Enter — новая строка)" rows="1"></textarea>
+          <button id="voice-btn" title="Голосовой ввод">🎙</button>
+          <button id="stop-btn" title="Прервать работу агента" hidden>⏹</button>
+          <button id="send-btn" title="Отправить">▶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TOOLS PANEL -->
+    <div class="panel" id="panel-tools">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">MCP Tools</h3>
+        <button class="btn btn-secondary btn-sm" id="add-tool-folder-btn">📁 Папка</button>
+        <button class="btn btn-primary btn-sm" id="add-tool-btn">+ Добавить Tool</button>
+        <button class="btn btn-secondary btn-sm" id="add-mcp-server-btn">+ MCP Server</button>
+        <button class="btn btn-secondary btn-sm export-import-btn" data-section="tools" title="Выборочный экспорт инструментов">📦 Экспорт</button>
+        <button class="btn btn-secondary btn-sm import-btn" data-section="tools" title="Импорт из зашифрованного архива">📥 Импорт</button>
+      </div>
+      <div class="tools-grid" id="tools-grid"></div>   
+    </div>
+
+    <!-- SKILLS PANEL -->
+    <div class="panel" id="panel-skills">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">Skills</h3>
+        <button class="btn btn-secondary btn-sm" id="add-skill-folder-btn">📁 Папка</button>
+        <button class="btn btn-primary btn-sm" id="add-skill-btn">+ Новый Skill</button>
+        <button class="btn btn-secondary btn-sm export-import-btn" data-section="skills" title="Выборочный экспорт навыков">📦 Экспорт</button>
+        <button class="btn btn-secondary btn-sm import-btn" data-section="skills" title="Импорт из зашифрованного архива">📥 Импорт</button>
+      </div>
+      <div class="skills-container" id="skills-container"></div>  
+    </div>
+
+    <!-- PROMPTS PANEL -->
+    <div class="panel" id="panel-prompts">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">Библиотека промптов</h3>
+        <button class="btn btn-secondary btn-sm" id="add-prompt-folder-btn">📁 Папка</button>
+        <button class="btn btn-primary btn-sm" id="add-prompt-btn">+ Новый промпт</button>
+        <button class="btn btn-secondary btn-sm export-import-btn" data-section="prompts" title="Выборочный экспорт промптов">📦 Экспорт</button>
+        <button class="btn btn-secondary btn-sm import-btn" data-section="prompts" title="Импорт из зашифрованного архива">📥 Импорт</button>
+      </div>
+      <div class="prompts-container" id="prompts-container"></div>   
+    </div>
+
+    <!-- FILES PANEL -->
+    <div class="panel" id="panel-files">
+      <div style="padding:16px 20px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <h3 style="flex:1;">Файлы</h3>
+        <button class="btn btn-secondary btn-sm" id="add-file-folder-btn">📁 Папка</button>
+        <button class="btn btn-primary btn-sm" id="add-file-btn">+ Добавить файлы</button>
+      </div>
+      <div class="files-container" id="files-container"></div>
+    </div>
+  </main>
+</div>
+
+<!-- MODALS CONTAINER -->
+<div id="modals"></div>
+
+<!-- js/ разложен по подпапкам по роли кода: core (БД, оркестратор, крипто,
+     markdown), engines (независимые движки без общего префикса файлов),
+     llm, tools, ui, tests. Порядок между подпапками и внутри них остаётся
+     прежним — только пути сменились, ни один файл не переименован. -->
+<script src="js/core/db.js"></script>
+<script src="js/core/crypto-utils.js"></script>
+<script src="js/llm/llm-gateway.js"></script>
+<script src="js/llm/llm-registry.js"></script>
+<!-- tools-engine.js объявляет класс и обязан идти первым: остальные
+     tools-*.js дополняют ToolsEngine.prototype примесями. -->
+<script src="js/tools/tools-engine.js"></script>
+<script src="js/tools/tools-registry.js"></script>
+<script src="js/tools/tools-executor.js"></script>
+<script src="js/tools/tools-builtin.js"></script>
+<script src="js/tools/tools-defs.js"></script>
+<script src="js/tools/tools-mcp.js"></script>
+<script src="js/tools/tools-llm-router.js"></script>
+<script src="js/engines/skills-engine.js"></script>
+<script src="js/engines/prompts-library.js"></script>
+<script src="js/engines/folders-engine.js"></script>
+<script src="js/engines/files-engine.js"></script>
+<script src="js/engines/security-engine.js"></script>
+<script src="js/core/markdown.js"></script>
+<!-- UI разбит на функциональные модули. ui-core.js объявляет класс UI,
+     остальные дополняют UI.prototype примесями — порядок важен:
+     ui-core.js должен идти первым. -->
+<script src="js/ui/ui-core.js"></script>
+<script src="js/ui/ui-navigation.js"></script>
+<script src="js/ui/ui-chat.js"></script>
+<script src="js/ui/ui-metrics.js"></script>
+<script src="js/ui/ui-settings.js"></script>
+<script src="js/ui/ui-connections.js"></script>
+<script src="js/ui/ui-editors.js"></script>
+<script src="js/ui/ui-transfer.js"></script>
+<script src="js/core/agent.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

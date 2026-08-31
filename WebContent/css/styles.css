@@ -466,6 +466,19 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 @keyframes statusSpin { to { transform: rotate(360deg); } }
 
+/* Индикатор «этот чат сейчас генерирует ответ» в списке чатов —
+   виден и тогда, когда открыт другой чат (см. this._chatRuns в ui.js). */
+.chat-busy-spinner {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: statusSpin 0.8s linear infinite;
+}
+.sidebar-item.chat-item.chat-busy .title { color: var(--accent-light); }
+
 .typing-indicator {
   display: flex;
   gap: 4px;

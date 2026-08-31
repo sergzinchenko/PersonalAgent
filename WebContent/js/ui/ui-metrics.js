@@ -414,11 +414,18 @@ Object.assign(UI.prototype, {
   // Ручной общий лимит убран: он был один на всё приложение и врал, как
   // только в чатах оказывались разные модели. Теперь окно — свойство
   // модели, а не приложения.
-  effectiveContextLimit() {
+  // ref — необязательная явная ссылка на модель (id_провайдера::id_модели).
+  // Без неё берётся то, что сейчас применено к общему шлюзу — подходит
+  // для отображения (например, чипа в панели чата). С ref — описывает
+  // конкретную модель конкретного чата независимо от того, что сейчас
+  // может быть применено к шлюзу параллельным переключением на другой
+  // чат (см. _trimHistory в ui-chat.js).
+  effectiveContextLimit(ref) {
     const reg = this.agent.models;
-    const d = reg && reg.describe();
+    const d = reg && reg.describe(ref);
     if (d && d.contextWindow > 0) return d.contextWindow;
-    return this._knownContextLimit(this.agent.llm.model);
+    const modelName = ref ? reg?.resolve(ref)?.model?.name : this.agent.llm.model;
+    return this._knownContextLimit(modelName);
   },
 
 
@@ -449,8 +456,8 @@ Object.assign(UI.prototype, {
 
   // Сохраняем размер контекста последнего запроса — он показывается
   // в панели чата и переживает перезагрузку вместе со статистикой.
-  async _recordContextSize(tokens, isEstimate) {
-    return this._statsUpdate(this.currentChatId, (stats) => {
+  async _recordContextSize(chatId, tokens, isEstimate) {
+    return this._statsUpdate(chatId, (stats) => {
       stats.lastContextTokens = tokens;
       stats.lastContextEstimated = !!isEstimate;
     });
@@ -460,43 +467,50 @@ Object.assign(UI.prototype, {
   // Предупреждения о приближении к границе окна контекста.
   // Каждый уровень показывается один раз за чат, иначе сообщение
   // повторялось бы после каждого запроса и засоряло переписку.
-  async _checkContextThresholds(container, contextTokens) {
+  // chatId — чат, которому принадлежит этот ответ (не обязательно тот,
+  // что сейчас на экране): DOM трогаем, только если это совпадает.
+  async _checkContextThresholds(chatId, contextTokens) {
     const limit = this.effectiveContextLimit();
     if (!limit || !contextTokens) return;
 
-    const stats = await this._getChatStats(this.currentChatId);
+    const stats = await this._getChatStats(chatId);
     if (!stats) return;
 
     const percent = Math.round((contextTokens / limit) * 100);
     const warnAt = this.contextWarnPercent;
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
 
     // Достигнут максимум окна контекста
     if (percent >= 100 && stats.contextAlertLevel !== 'max') {
       // Через очередь: прямая запись затёрла бы счётчики, накопленные
       // параллельными обновлениями (объект прочитан раньше).
-      await this._statsUpdate(this.currentChatId, (st) => { st.contextAlertLevel = 'max'; });
-      container.insertAdjacentHTML('beforeend', `
-        <div class="message system context-alert danger">
-          🛑 Контекст исчерпан: ${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов (${percent}%).
-          Модель начнёт терять начало переписки или возвращать ошибку.
-          <div style="margin-top:8px;">
-            <button class="btn btn-primary btn-sm" id="ctx-new-chat-btn">➕ Создать новый чат</button>
-          </div>
-        </div>`);
-      document.getElementById('ctx-new-chat-btn')?.addEventListener('click', () => this.newChat());
-      container.scrollTop = container.scrollHeight;
+      await this._statsUpdate(chatId, (st) => { st.contextAlertLevel = 'max'; });
+      if (container) {
+        container.insertAdjacentHTML('beforeend', `
+          <div class="message system context-alert danger">
+            🛑 Контекст исчерпан: ${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов (${percent}%).
+            Модель начнёт терять начало переписки или возвращать ошибку.
+            <div style="margin-top:8px;">
+              <button class="btn btn-primary btn-sm" id="ctx-new-chat-btn">➕ Создать новый чат</button>
+            </div>
+          </div>`);
+        document.getElementById('ctx-new-chat-btn')?.addEventListener('click', () => this.newChat());
+        container.scrollTop = container.scrollHeight;
+      }
       return;
     }
 
     // Достигнут рекомендуемый порог
     if (percent >= warnAt && percent < 100 && !stats.contextAlertLevel) {
-      await this._statsUpdate(this.currentChatId, (st) => { st.contextAlertLevel = 'warn'; });
-      container.insertAdjacentHTML('beforeend', `
-        <div class="message system context-alert warn">
-          ⚠️ Контекст заполнен на ${percent}% (${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов).
-          Дальше расходы растут, а качество ответов может падать — стоит завершить тему или начать новый чат.
-        </div>`);
-      container.scrollTop = container.scrollHeight;
+      await this._statsUpdate(chatId, (st) => { st.contextAlertLevel = 'warn'; });
+      if (container) {
+        container.insertAdjacentHTML('beforeend', `
+          <div class="message system context-alert warn">
+            ⚠️ Контекст заполнен на ${percent}% (${contextTokens.toLocaleString('ru-RU')} из ${limit.toLocaleString('ru-RU')} токенов).
+            Дальше расходы растут, а качество ответов может падать — стоит завершить тему или начать новый чат.
+          </div>`);
+        container.scrollTop = container.scrollHeight;
+      }
     }
   },
 
@@ -545,8 +559,8 @@ Object.assign(UI.prototype, {
   },
 
 
-  async _recordUsage(usage, isEstimate = false) {
-    return this._statsUpdate(this.currentChatId, (stats) => {
+  async _recordUsage(chatId, usage, isEstimate = false) {
+    return this._statsUpdate(chatId, (stats) => {
       stats.promptTokens += usage.prompt_tokens || 0;
       stats.completionTokens += usage.completion_tokens || 0;
       stats.totalTokens += usage.total_tokens ||
@@ -557,8 +571,8 @@ Object.assign(UI.prototype, {
   },
 
 
-  async _recordToolCall(name, elapsedMs, isError) {
-    return this._statsUpdate(this.currentChatId, (stats) => {
+  async _recordToolCall(chatId, name, elapsedMs, isError) {
+    return this._statsUpdate(chatId, (stats) => {
       stats.toolCalls += 1;
       stats.toolTimeMs += elapsedMs;
       if (isError) stats.toolErrors += 1;

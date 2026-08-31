@@ -412,7 +412,7 @@ Object.assign(UI.prototype, {
         </div>
         <div class="form-group" style="flex:1;">
           <label>max_tokens</label>
-          <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : 4096}">
+          <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : (ctx || 4096)}">
         </div>
         <div class="form-group" style="flex:1;">
           <label>Температура</label>
@@ -425,7 +425,9 @@ Object.assign(UI.prototype, {
       </div>
       <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
         Окно контекста API не сообщает, поэтому оно задаётся здесь: по нему считается
-        индикатор заполнения и подрезается история длинных чатов.
+        индикатор заполнения и подрезается история длинных чатов. max_tokens по умолчанию
+        равен окну контекста и следует за ним при правке — уменьшите вручную, если нужен
+        меньший потолок длины ответа.
       </div>
     `, async () => {
       const nm = document.getElementById('me_name').value.trim();
@@ -452,6 +454,17 @@ Object.assign(UI.prototype, {
       this.updateChatToolbar?.();
       await this._backToProviders();
     }, () => this._backToProviders(), { modal: true });
+
+    // max_tokens следует за окном контекста, пока пользователь не тронул
+    // его вручную, — иначе выставленное здесь-же значение по умолчанию
+    // застыло бы, даже когда пользователь исправляет угаданное окно.
+    let tokensTouched = false;
+    document.getElementById('me_tokens')?.addEventListener('input', () => { tokensTouched = true; });
+    document.getElementById('me_ctx')?.addEventListener('input', (e) => {
+      if (tokensTouched) return;
+      const tokensInput = document.getElementById('me_tokens');
+      if (tokensInput) tokensInput.value = e.target.value || 4096;
+    });
   },
 
   // Возврат из вложенного окна: пользователь должен оказаться там, откуда

@@ -50,9 +50,35 @@ Object.assign(UI.prototype, {
       container.scrollTop = container.scrollHeight;
     }
 
-    // Модель — свойство чата, поэтому при переключении чата она сразу
-    // применяется к шлюзу: иначе индикатор в шапке показывал бы модель
-    // предыдущего чата.
+    // ── Восстановление визуализации, если чат всё ещё генерирует ответ ──
+    // Пока мы смотрели на другой чат, этот мог продолжать работать в
+    // фоне: сообщения, уже завершённые к этому моменту, только что
+    // пришли из БД выше, а вот текущий незаконченный ответ и индикатор
+    // хода нигде, кроме run-объекта, не хранятся — достаём их оттуда.
+    const run = this._chatRuns.get(chatId);
+    if (run) {
+      if (run.partialContent) {
+        const el = document.createElement('div');
+        el.className = 'message assistant';
+        el.innerHTML = renderMarkdown(run.partialContent);
+        container.appendChild(el);
+        // Тот же узел подхватит и допишет активный _generateResponse —
+        // общее состояние живёт в run, а не в замыкании функции.
+        run.streamEl = el;
+      }
+      if (run.stage) this._renderStatusBar(run.stage.text, run.stage.detail, run);
+      container.scrollTop = container.scrollHeight;
+    }
+    // Кнопки «Отправить»/«⏹» отражают состояние именно этого, просматриваемого
+    // сейчас чата — а не то, что где-то на фоне работает другой.
+    this._setBusy(!!run);
+
+    // Модель — свойство чата. Применяем её к общему шлюзу и здесь: если
+    // этот чат сам сейчас не генерирует ответ, иначе индикатор в шапке
+    // показывал бы модель предыдущего просмотренного чата. Если же он
+    // генерирует — _generateResponse всё равно переприменит свою модель
+    // непосредственно перед обращением к API, так что гонки с чужим
+    // выбором модели в списке это не создаёт.
     await this.applyChatModel(chatId);
 
     this.updateChatToolbar();
@@ -62,6 +88,16 @@ Object.assign(UI.prototype, {
 
 
   async deleteChat(chatId) {
+    // Чат мог в этот момент генерировать ответ — останавливаем ход,
+    // иначе он продолжит писать сообщения в уже удалённый чат.
+    const run = this._chatRuns.get(chatId);
+    if (run) {
+      run.stopRequested = true;
+      try { run.abortCtl?.abort(); } catch (_) {}
+      clearInterval(run.statusTimer);
+      this._chatRuns.delete(chatId);
+    }
+
     await this.agent.db.delete('chats', chatId);
     const msgs = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
     // Одна транзакция вместо N: у длинного чата это тысячи сообщений.
@@ -73,6 +109,7 @@ Object.assign(UI.prototype, {
     if (this.currentChatId === chatId) {
       this.currentChatId = null;
       document.getElementById('chat-messages').innerHTML = '<div class="empty-state"><div class="icon">💬</div><div class="text">Выберите чат</div></div>';
+      this._setBusy(false);
     }
     this.refreshSidebar();
   },
@@ -137,7 +174,6 @@ Object.assign(UI.prototype, {
 
 
   async sendMessage() {
-    if (this.isStreaming) return;
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
@@ -148,13 +184,39 @@ Object.assign(UI.prototype, {
     }
 
     if (!this.currentChatId) await this.newChat();
+    // Захватываем id один раз и дальше используем только его: если во
+    // время всей этой async-функции пользователь переключится на другой
+    // чат, this.currentChatId изменится, а chatId — нет. Раньше запись
+    // сообщений шла по this.currentChatId напрямую, и переключение чата
+    // посреди отправки могло приписать их не тому чату.
+    const chatId = this.currentChatId;
+
+    if (this._chatRuns.has(chatId)) return; // этот чат уже отвечает
+
+    // Общий шлюз LLM обслуживает один запрос за раз (см. пояснение в
+    // конструкторе UI) — если где-то уже идёт генерация, второй чат
+    // придётся подождать. Раньше это блокировало отправку молча и во
+    // ВСЕХ чатах сразу; теперь ограничение понятно и относится только
+    // к попытке начать новый ход, пока другой ещё выполняется.
+    if (this._chatRuns.size > 0) {
+      const busyId = this._chatRuns.keys().next().value;
+      const busyChat = await this.agent.db.get('chats', busyId);
+      const c = document.getElementById('chat-messages');
+      c.insertAdjacentHTML('beforeend',
+        `<div class="message system">⏳ Дождитесь ответа в чате «${this._escHtml(busyChat?.title || 'без названия')}» — одновременно обрабатывается только один запрос.</div>`);
+      c.scrollTop = c.scrollHeight;
+      return;
+    }
 
     input.value = '';
     input.style.height = 'auto';
 
-    const chat = await this.agent.db.get('chats', this.currentChatId);
-    const container = document.getElementById('chat-messages');
-    const emptyState = container.querySelector('.empty-state');
+    const chat = await this.agent.db.get('chats', chatId);
+    // Пока идут await ниже, пользователь мог уйти в другой чат — каждое
+    // обращение к DOM берёт контейнер заново и только если chatId всё ещё
+    // тот, что сейчас на экране.
+    const dom = () => (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    const emptyState = dom()?.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
     // ── Смена модели фиксируется в истории ──
@@ -164,7 +226,7 @@ Object.assign(UI.prototype, {
     if (currentModel && chat.model && chat.model !== currentModel) {
       const switchMsg = {
         id: uid(),
-        chatId: this.currentChatId,
+        chatId,
         role: 'system',
         kind: 'model-switch',
         content: `Модель изменена: ${chat.model} → ${currentModel}`,
@@ -173,13 +235,13 @@ Object.assign(UI.prototype, {
         timestamp: Date.now(),
       };
       await this.agent.db.put('messages', switchMsg);
-      container.insertAdjacentHTML('beforeend', this._renderMessage(switchMsg));
+      dom()?.insertAdjacentHTML('beforeend', this._renderMessage(switchMsg));
     }
     chat.model = currentModel;
 
     const userMsg = {
       id: uid(),
-      chatId: this.currentChatId,
+      chatId,
       role: 'user',
       content: text,
       timestamp: Date.now(),
@@ -196,28 +258,42 @@ Object.assign(UI.prototype, {
     await this.agent.db.put('chats', chat);
     this.refreshSidebar();
 
-    container.insertAdjacentHTML('beforeend', this._renderMessage(userMsg));
-    container.scrollTop = container.scrollHeight;
+    const container = dom();
+    if (container) {
+      container.insertAdjacentHTML('beforeend', this._renderMessage(userMsg));
+      container.scrollTop = container.scrollHeight;
+    }
 
-    // Новый ход пользователя — обнуляем бюджет времени и счётчик вызовов,
-    // которые действуют на всю цепочку tool_calls этого хода.
-    this._turnStartedAt = Date.now();
-    this._turnToolCalls = 0;
-    this._stopRequested = false;
+    // Новый ход — заводим состояние генерации именно этого чата (см.
+    // пояснение к this._chatRuns в конструкторе UI).
+    const run = {
+      startedAt: Date.now(),
+      stage: null,            // { text, detail } последнего _showStatus — для восстановления при возврате в чат
+      partialContent: '',     // накопленный за текущий шаг стриминга текст, ещё не сохранённый в БД
+      streamEl: null,         // DOM-узел этого текста, если чат сейчас виден
+      turnToolCalls: 0,
+      turnUserMsgId: userMsg.id,
+      stopRequested: false,
+      abortCtl: null,
+      statusTimer: null,
+    };
+    this._chatRuns.set(chatId, run);
+    if (chatId === this.currentChatId) this._setBusy(true);
+    this.refreshSidebar(); // сразу показать индикатор у чата в списке
+
     // Счётчики политики безопасности считаются на ход, а не на сессию:
-    // «за один ответ уже 20 изменений» — сигнал, «за день» — нет.
+    // «за один ответ уже 20 изменений» — сигнал, «за день» — нет. Общий
+    // шлюз обслуживает один ход за раз, поэтому одного глобального
+    // состояния в SecurityEngine достаточно и здесь ничего дублировать не нужно.
     this.agent.security?.resetTurn();
-    // Сообщение пользователя, к которому будет привязано общее время хода
-    // (пункт «тайминг запроса пользователя»): полный цикл от отправки до
-    // финального ответа, включая все вызовы инструментов.
-    this._turnUserMsgId = userMsg.id;
 
     // Шлюз глобален, а модель выбирается у чата. Открытый ранее другой
     // чат мог оставить в шлюзе свою модель — применяем нужную перед
-    // каждым ходом, а не только при переключении чата.
-    await this.applyChatModel(this.currentChatId);
+    // ходом (и ещё раз непосредственно перед обращением к API внутри
+    // _generateResponse, см. пояснение там).
+    await this.applyChatModel(chatId);
 
-    await this._generateResponse();
+    await this._generateResponse(chatId);
   },
 
 
@@ -235,8 +311,42 @@ Object.assign(UI.prototype, {
   // снимались перед вызовами инструментов — то есть на самом долгом этапе
   // пользователь не видел вообще ничего. Панель показывает текущую стадию,
   // счётчик прошедшего времени и (когда задан) остаток бюджета на ход.
-  _showStatus(text, detail = '') {
+  // chatId — чат, к которому относится этот статус (обычно this._chatRuns
+  // ключ). Таймер и текст стадии хранятся в run и тикают независимо от
+  // того, что сейчас на экране: DOM трогаем, только если chatId — это
+  // именно просматриваемый сейчас чат, иначе статус чужого хода лёг бы
+  // поверх переписки другого чата.
+  _showStatus(chatId, text, detail = '') {
+    const run = this._chatRuns.get(chatId);
+    if (run) run.stage = { text, detail };
+
+    if (run && !run.statusTimer) {
+      const started = run.startedAt || Date.now();
+      const budget = this.limits.maxTurnSeconds;
+      run.statusTimer = setInterval(() => {
+        if (chatId !== this.currentChatId) return;
+        const node = document.getElementById('agent-status');
+        const timer = node?.querySelector('.status-timer');
+        if (!timer) return;
+        const sec = Math.floor((Date.now() - started) / 1000);
+        timer.textContent = budget > 0 ? `${sec} с из ${budget}` : `${sec} с`;
+        // Ближе к исчерпанию бюджета подсвечиваем — обрыв не должен
+        // становиться неожиданностью.
+        timer.classList.toggle('near-limit', budget > 0 && sec >= budget * 0.75);
+      }, 1000);
+    }
+
+    if (chatId !== this.currentChatId) return;
+    this._renderStatusBar(text, detail, run);
+  },
+
+  // Отрисовывает панель статуса в текущем #chat-messages по состоянию run.
+  // Используется и из _showStatus (когда просматриваемый чат — это тот,
+  // что сейчас отвечает), и из loadChat() — при возврате в чат, который
+  // продолжал генерировать ответ, пока был не виден.
+  _renderStatusBar(text, detail, run) {
     const container = document.getElementById('chat-messages');
+    if (!container) return;
     let el = document.getElementById('agent-status');
     if (!el) {
       container.insertAdjacentHTML('beforeend', `
@@ -251,37 +361,34 @@ Object.assign(UI.prototype, {
     }
     el.querySelector('.status-text').textContent = text;
     el.querySelector('.status-detail').textContent = detail;
-
-    // Таймер запускаем один раз на весь ход, а не на каждую стадию:
-    // пользователю важно общее время ожидания.
-    if (!this._statusTimer) {
-      const started = this._turnStartedAt || Date.now();
+    if (run) {
+      const sec = Math.floor((Date.now() - (run.startedAt || Date.now())) / 1000);
       const budget = this.limits.maxTurnSeconds;
-      const tick = () => {
-        const node = document.getElementById('agent-status');
-        if (!node) return;
-        const sec = Math.floor((Date.now() - started) / 1000);
-        const timer = node.querySelector('.status-timer');
-        if (!timer) return;
-        timer.textContent = budget > 0
-          ? `${sec} с из ${budget}`
-          : `${sec} с`;
-        // Ближе к исчерпанию бюджета подсвечиваем — обрыв не должен
-        // становиться неожиданностью.
-        timer.classList.toggle('near-limit', budget > 0 && sec >= budget * 0.75);
-      };
-      tick();
-      this._statusTimer = setInterval(tick, 1000);
+      const timer = el.querySelector('.status-timer');
+      timer.textContent = budget > 0 ? `${sec} с из ${budget}` : `${sec} с`;
+      timer.classList.toggle('near-limit', budget > 0 && sec >= budget * 0.75);
     }
   },
 
-  _hideStatus() {
-    clearInterval(this._statusTimer);
-    this._statusTimer = null;
-    document.getElementById('agent-status')?.remove();
+  // Единственная точка завершения хода для всей цепочки (см. depth===0 в
+  // _generateResponse): убирает чат из this._chatRuns, останавливает его
+  // таймер, снимает панель статуса и разблокирует ввод — но только если
+  // это всё ещё влияет на то, что сейчас видно, — и обновляет индикатор
+  // в списке чатов в любом случае.
+  _endRun(chatId) {
+    const run = this._chatRuns.get(chatId);
+    if (run) clearInterval(run.statusTimer);
+    this._chatRuns.delete(chatId);
+    if (chatId === this.currentChatId) {
+      this._setBusy(false);
+      document.getElementById('agent-status')?.remove();
+    }
+    this.refreshSidebar();
   },
 
-  _showTruncationNotice(container) {
+  _showTruncationNotice(chatId) {
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    if (!container) return;
     const max = this.agent.llm.maxTokens;
     const id = 'trunc_' + uid();
     container.insertAdjacentHTML('beforeend', `
@@ -310,7 +417,11 @@ Object.assign(UI.prototype, {
   // Стратегия: системный промпт неприкосновенен, дальше берём сообщения
   // с конца (свежие важнее) пока укладываемся в бюджет. Бюджет — это
   // окно контекста минус место под ответ (max_tokens) минус запас.
-  _trimHistory(allMsgs, systemPrompt) {
+  // ref — модель ИМЕННО этого чата (см. вызов в _generateResponse). Без
+  // явного ref лимит брался бы из того, что сейчас применено к общему
+  // шлюзу, — а это могла успеть переключить другая, просматриваемая в тот
+  // же момент вкладка/чат.
+  _trimHistory(allMsgs, systemPrompt, ref) {
     // Служебные отметки не идут в API (см. model-switch), убираем сразу.
     const usable = allMsgs.filter(m => m.kind !== 'model-switch');
 
@@ -329,13 +440,15 @@ Object.assign(UI.prototype, {
       return { role: m.role, content: m.content };
     };
 
-    const limit = this.effectiveContextLimit();
+    const limit = this.effectiveContextLimit(ref);
     // Лимит неизвестен — обрезать не по чему, оставляем как есть.
     if (!limit) {
       return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0 };
     }
 
-    const reserve = Math.min(this.agent.llm.maxTokens || 4096, Math.floor(limit * 0.3));
+    const resolved = ref ? this.agent.models?.resolve(ref) : null;
+    const maxTokens = resolved ? resolved.model.maxTokens : this.agent.llm.maxTokens;
+    const reserve = Math.min(maxTokens || 4096, Math.floor(limit * 0.3));
     const budget = Math.max(1000, limit - reserve - this._estimateTokens(systemPrompt) - 200);
 
     const costOf = (m) => this._estimateTokens(
@@ -386,10 +499,17 @@ Object.assign(UI.prototype, {
   },
 
   // Уведомление показываем один раз за чат: повтор после каждого
-  // запроса засорял бы переписку.
-  _showTrimNotice(container, trim) {
-    if (this._trimNoticeShownFor === this.currentChatId) return;
-    this._trimNoticeShownFor = this.currentChatId;
+  // запроса засорял бы переписку. Раньше запоминался id только ОДНОГО
+  // чата (this._trimNoticeShownFor) — при переключении между двумя
+  // чатами, каждому из которых нужна обрезка, уведомление лезло бы
+  // заново при каждом возврате. Set помнит все чаты за сессию.
+  _showTrimNotice(chatId, trim) {
+    this._trimNoticeShown = this._trimNoticeShown || new Set();
+    if (this._trimNoticeShown.has(chatId)) return;
+    this._trimNoticeShown.add(chatId);
+
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    if (!container) return;
     container.insertAdjacentHTML('beforeend', `
       <div class="message system context-alert warn">
         ✂️ Ранняя часть переписки (${trim.droppedCount} сообщений) больше не передаётся модели —
@@ -455,65 +575,101 @@ Object.assign(UI.prototype, {
     });
   },
 
-  _stopTurn(container, reason, depth = 0) {
-    container.insertAdjacentHTML('beforeend',
-      `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
-    container.scrollTop = container.scrollHeight;
-    if (depth === 0) { this._setBusy(false); this._hideStatus(); }
+  _stopTurn(chatId, reason, depth = 0) {
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    if (container) {
+      container.insertAdjacentHTML('beforeend', `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
+      container.scrollTop = container.scrollHeight;
+    }
+    if (depth === 0) this._endRun(chatId);
   },
 
 
-  async _generateResponse(depth = 0) {
-    const container = document.getElementById('chat-messages');
+  // chatId захвачен один раз в sendMessage и передаётся через всю
+  // рекурсию tool-calling — НЕ читается из this.currentChatId, который
+  // может измениться в любой момент, если пользователь переключится на
+  // другой чат. Любое обращение к DOM идёт через dom(), проверяющую,
+  // что chatId всё ещё совпадает с просматриваемым чатом, — иначе вывод
+  // этого хода отрисовался бы поверх переписки другого чата.
+  async _generateResponse(chatId, depth = 0) {
+    const run = this._chatRuns.get(chatId);
+    if (!run) return; // ход уже остановлен/завершён откуда-то ещё
     const L = this.limits;
+    const dom = () => (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
 
     // ── Прерывание пользователем: проверяем между шагами цепочки ──
-    if (this._stopRequested) {
-      if (depth === 0) { this._setBusy(false); this._hideStatus(); }
+    if (run.stopRequested) {
+      if (depth === 0) this._endRun(chatId);
       return;
     }
 
     // ── Лимит 1: количество итераций tool-calling ──
     if (L.maxToolSteps > 0 && depth >= L.maxToolSteps) {
-      this._stopTurn(container, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.`, depth);
+      this._stopTurn(chatId, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.`, depth);
       return;
     }
 
     // ── Лимит 2: общий бюджет времени на ход ──
-    if (L.maxTurnSeconds > 0 && this._turnStartedAt) {
-      const elapsedSec = (Date.now() - this._turnStartedAt) / 1000;
+    if (L.maxTurnSeconds > 0 && run.startedAt) {
+      const elapsedSec = (Date.now() - run.startedAt) / 1000;
       if (elapsedSec >= L.maxTurnSeconds) {
-        this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с). Цепочка вызовов инструментов остановлена.`, depth);
+        this._stopTurn(chatId, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с). Цепочка вызовов инструментов остановлена.`, depth);
         return;
       }
     }
 
-    this._setBusy(true);
+    if (chatId === this.currentChatId) this._setBusy(true);
 
-    this._showStatus(
+    this._showStatus(chatId,
       depth === 0 ? 'Отправляю запрос модели…' : `Продолжаю работу (шаг ${depth + 1})…`,
       this.agent.llm.model ? '🧠 ' + this.agent.llm.model : ''
     );
 
     // AbortController прерывает сам HTTP-запрос к LLM — и по таймауту хода,
-    // и по кнопке «⏹» (stopAgent() вызывает abort() через this._abortCtl).
+    // и по кнопке «⏹» (stopAgent() вызывает abort() через run.abortCtl).
     const abortCtl = new AbortController();
-    this._abortCtl = abortCtl;
+    run.abortCtl = abortCtl;
     let turnTimer = null;
-    if (L.maxTurnSeconds > 0 && this._turnStartedAt) {
-      const remainingMs = L.maxTurnSeconds * 1000 - (Date.now() - this._turnStartedAt);
+    if (L.maxTurnSeconds > 0 && run.startedAt) {
+      const remainingMs = L.maxTurnSeconds * 1000 - (Date.now() - run.startedAt);
       turnTimer = setTimeout(() => abortCtl.abort(), Math.max(0, remainingMs));
     }
 
-    // Объявлены выше try: при прерывании (таймаут или кнопка «⏹») к ним
-    // нужно обратиться из catch, чтобы не потерять уже полученный текст.
-    let msgEl = null;
-    let fullContent = '';
+    // Своё состояние стриминга на каждый вызов (в т.ч. рекурсивный) —
+    // предыдущий шаг уже сохранён в БД отдельным сообщением. Хранится в
+    // run, а не в замыкании: если пользователь уйдёт и вернётся в этот
+    // чат, loadChat() должен суметь дорисовать уже накопленный текст.
+    run.partialContent = '';
+    run.streamEl = null;
     const requestStartedAt = performance.now();
 
+    // Создаёт (или переиспользует) DOM-узел стримящегося ответа. Если
+    // сейчас смотрим на другой чат — возвращает null, ничего не трогая;
+    // при возврате в ЭТОТ чат loadChat() уже мог создать узел с
+    // накопленным текстом (run.streamEl) — подхватываем его же.
+    const ensureMsgEl = () => {
+      const container = dom();
+      if (!container) return null;
+      if (!run.streamEl || !run.streamEl.isConnected) {
+        run.streamEl = document.createElement('div');
+        run.streamEl.className = 'message assistant';
+        if (run.partialContent) run.streamEl.innerHTML = renderMarkdown(run.partialContent);
+        container.appendChild(run.streamEl);
+        container.scrollTop = container.scrollHeight;
+      }
+      return run.streamEl;
+    };
+
     try {
-      this._showStatus('Собираю контекст…', 'история чата и активные навыки');
-      const allMsgs = await this.agent.db.getAllByIndex('messages', 'chatId', this.currentChatId);
+      // Ссылка на модель ИМЕННО этого чата — нужна ниже для правильного
+      // бюджета обрезки истории (_trimHistory), даже если к этому моменту
+      // общий шлюз уже смотрит на модель другого, параллельно
+      // просматриваемого чата.
+      const chatForRef = await this.agent.db.get('chats', chatId);
+      const chatRef = this._chatActiveRef(chatForRef, this.agent.models);
+
+      this._showStatus(chatId, 'Собираю контекст…', 'история чата и активные навыки');
+      const allMsgs = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
       allMsgs.sort((a, b) => a.timestamp - b.timestamp);
 
       let systemPrompt = await this.agent.skills.buildSystemPrompt();
@@ -551,21 +707,27 @@ Object.assign(UI.prototype, {
       } catch (_) { /* список файлов не критичен для ответа */ }
 
       const apiMessages = [{ role: 'system', content: systemPrompt }];
-      const trim = this._trimHistory(allMsgs, systemPrompt);
+      const trim = this._trimHistory(allMsgs, systemPrompt, chatRef);
       for (const m of trim.messages) apiMessages.push(m);
 
       if (trim.droppedCount) {
-        this._showTrimNotice(container, trim);
+        this._showTrimNotice(chatId, trim);
       }
 
       const tools = await this.agent.tools.getEnabledToolsForAPI();
 
-      msgEl = document.createElement('div');
-      msgEl.className = 'message assistant';
-      container.appendChild(msgEl);
-
-      this._showStatus('Жду ответ модели…',
+      this._showStatus(chatId, 'Жду ответ модели…',
         `${apiMessages.length} сообщений в запросе` + (tools.length ? `, ${tools.length} инструментов` : ''));
+
+      // Прямо перед обращением к шлюзу — переприменяем модель ЭТОГО чата.
+      // За время сбора контекста (несколько await выше) пользователь мог
+      // заглянуть в другой чат: loadChat() того чата уже настроил бы
+      // общий шлюз на СВОЮ модель, и без повторного применения запрос
+      // ушёл бы не туда, куда должен. modelUsed фиксируем сразу же —
+      // ответ может идти долго, а к его завершению шлюз мог снова
+      // переключиться на модель чата, который в этот момент просматривают.
+      await this.applyChatModel(chatId);
+      const modelUsed = this.agent.llm.model;
 
       let firstChunkSeen = false;
       const result = await this.agent.llm.chat(apiMessages, {
@@ -573,54 +735,60 @@ Object.assign(UI.prototype, {
         stream: true,
         signal: abortCtl.signal,
         onChunk: (chunk) => {
-          fullContent += chunk;
+          run.partialContent += chunk;
           if (!firstChunkSeen) {
             firstChunkSeen = true;
-            this._showStatus('Модель отвечает…', '');
+            this._showStatus(chatId, 'Модель отвечает…', '');
           }
-          // Обновляем объём не на каждый чанк, а раз в ~200 символов:
-          // запись в DOM на каждом токене заметно грузит отрисовку.
-          if (fullContent.length % 200 < chunk.length) {
-            const d = document.querySelector('#agent-status .status-detail');
-            if (d) d.textContent = `${fullContent.length} символов`;
+          const el = ensureMsgEl();
+          if (el) {
+            // Объём в статусе обновляем не на каждый чанк, а раз в ~200
+            // символов: запись в DOM на каждом токене заметно грузит отрисовку.
+            if (run.partialContent.length % 200 < chunk.length) {
+              const d = document.querySelector('#agent-status .status-detail');
+              if (d) d.textContent = `${run.partialContent.length} символов`;
+            }
+            el.innerHTML = renderMarkdown(run.partialContent);
+            const c = dom();
+            if (c) c.scrollTop = c.scrollHeight;
           }
-          msgEl.innerHTML = renderMarkdown(fullContent);
-          container.scrollTop = container.scrollHeight;
         },
       });
 
-      this._showStatus('Обрабатываю ответ…', '');
+      this._showStatus(chatId, 'Обрабатываю ответ…', '');
 
       // Учёт токенов. Многие провайдеры игнорируют stream_options и не
       // присылают usage при stream:true — тогда считаем приблизительно
       // сами, иначе счётчик навсегда остался бы нулевым.
       let contextTokens;
       if (result.usage) {
-        await this._recordUsage(result.usage);
+        await this._recordUsage(chatId, result.usage);
         // prompt_tokens = ровно то, что модель приняла на вход,
         // то есть фактический размер контекста этого запроса.
         contextTokens = result.usage.prompt_tokens || 0;
       } else {
         const est = this._estimateUsage(apiMessages, result);
-        await this._recordUsage(est, true);
+        await this._recordUsage(chatId, est, true);
         contextTokens = est.prompt_tokens;
       }
-      await this._recordContextSize(contextTokens, !result.usage);
-      this.updateChatToolbar();
-      await this._checkContextThresholds(container, contextTokens);
+      await this._recordContextSize(chatId, contextTokens, !result.usage);
+      if (chatId === this.currentChatId) this.updateChatToolbar();
+      await this._checkContextThresholds(chatId, contextTokens);
 
       if (result.tool_calls && result.tool_calls.length > 0) {
         const assistantMsg = {
           id: uid(),
-          chatId: this.currentChatId,
+          chatId,
           role: 'assistant',
           content: result.content || '',
           tool_calls: result.tool_calls,
           timestamp: Date.now(),
           // Модель и время генерации фиксируем в самой истории: модель
           // можно сменить прямо в чате, и без этого потом не понять,
-          // какой именно ответ чем сформирован.
-          model: this.agent.llm.model,
+          // какой именно ответ чем сформирован. modelUsed — а не текущее
+          // this.agent.llm.model — потому что к этому моменту шлюз мог
+          // уже переключиться на модель другого, просматриваемого чата.
+          model: modelUsed,
           durationMs: Math.round(performance.now() - requestStartedAt),
         };
         await this.agent.db.put('messages', assistantMsg);
@@ -631,42 +799,43 @@ Object.assign(UI.prototype, {
           }
 
           // ── Прерывание пользователем ──
-          if (this._stopRequested) {
+          if (run.stopRequested) {
             clearTimeout(turnTimer);
-            if (depth === 0) { this._setBusy(false); this._hideStatus(); }
+            if (depth === 0) this._endRun(chatId);
             return;
           }
 
           // ── Лимит 3: суммарное число вызовов за ход ──
-          if (L.maxToolCallsPerTurn > 0 && this._turnToolCalls >= L.maxToolCallsPerTurn) {
+          if (L.maxToolCallsPerTurn > 0 && run.turnToolCalls >= L.maxToolCallsPerTurn) {
             clearTimeout(turnTimer);
-            this._stopTurn(container, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`, depth);
+            this._stopTurn(chatId, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`, depth);
             return;
           }
           // ── Лимит 2 (повторная проверка между вызовами) ──
-          if (L.maxTurnSeconds > 0 && this._turnStartedAt &&
-              (Date.now() - this._turnStartedAt) / 1000 >= L.maxTurnSeconds) {
+          if (L.maxTurnSeconds > 0 && run.startedAt &&
+              (Date.now() - run.startedAt) / 1000 >= L.maxTurnSeconds) {
             clearTimeout(turnTimer);
-            this._stopTurn(container, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`, depth);
+            this._stopTurn(chatId, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`, depth);
             return;
           }
-          this._turnToolCalls++;
+          run.turnToolCalls++;
 
-          const toolResultDiv = this.toolVerbosity === 'hidden' ? null : document.createElement('div');
+          const toolContainer = dom();
+          const toolResultDiv = (this.toolVerbosity === 'hidden' || !toolContainer) ? null : document.createElement('div');
           if (toolResultDiv) {
             toolResultDiv.className = 'message tool-call';
             toolResultDiv.textContent = `🔧 Вызываю: ${tc.function.name}...`;
-            container.appendChild(toolResultDiv);
-            container.scrollTop = container.scrollHeight;
+            toolContainer.appendChild(toolResultDiv);
+            toolContainer.scrollTop = toolContainer.scrollHeight;
           }
 
           // Самая долгая и самая непрозрачная стадия: показываем, какой
           // именно инструмент выполняется и сколько их всего в этом шаге.
-          this._showStatus(
+          this._showStatus(chatId,
             `Выполняю инструмент: ${tc.function.name}`,
             result.tool_calls.length > 1
-              ? `вызов ${this._turnToolCalls} из ${result.tool_calls.length} в этом шаге`
-              : `всего вызовов за ход: ${this._turnToolCalls}`
+              ? `вызов ${run.turnToolCalls} из ${result.tool_calls.length} в этом шаге`
+              : `всего вызовов за ход: ${run.turnToolCalls}`
           );
 
           const startedAt = performance.now();
@@ -679,19 +848,20 @@ Object.assign(UI.prototype, {
           const resultStr = JSON.stringify(toolResult);
           const isError = !!(toolResult && toolResult.error);
 
-          await this._recordToolCall(tc.function.name, elapsedMs, isError);
-          this.updateChatToolbar();
+          await this._recordToolCall(chatId, tc.function.name, elapsedMs, isError);
+          if (chatId === this.currentChatId) this.updateChatToolbar();
 
-          if (toolResultDiv) {
+          if (toolResultDiv && toolResultDiv.isConnected) {
             toolResultDiv.innerHTML = this._renderToolCallBlock(
               tc.function.name, tc.function.arguments, resultStr, elapsedMs, isError
             );
-            container.scrollTop = container.scrollHeight;
+            const c = dom();
+            if (c) c.scrollTop = c.scrollHeight;
           }
 
           const toolMsg = {
             id: uid(),
-            chatId: this.currentChatId,
+            chatId,
             role: 'tool',
             content: resultStr,
             tool_call_id: tc.id,
@@ -710,17 +880,17 @@ Object.assign(UI.prototype, {
         // сообщение параллельно текущей цепочке. Два одновременных хода
         // затирали состояние друг друга, и кнопка останова оставалась
         // висеть после завершения одного из них.
-        await this._generateResponse(depth + 1);
+        await this._generateResponse(chatId, depth + 1);
         return;
       }
 
       const assistantMsg = {
         id: uid(),
-        chatId: this.currentChatId,
+        chatId,
         role: 'assistant',
         content: result.content,
         timestamp: Date.now(),
-        model: this.agent.llm.model,
+        model: modelUsed,
         durationMs: Math.round(performance.now() - requestStartedAt),
         // 'length' означает, что провайдер оборвал ответ, упёршись в
         // max_tokens. Раньше это никак не показывалось — ответ просто
@@ -729,13 +899,20 @@ Object.assign(UI.prototype, {
       };
       await this.agent.db.put('messages', assistantMsg);
 
-      // Элемент ответа уже отрисован стримингом — дописываем подпись
-      // (время, модель, длительность), не перерисовывая содержимое.
-      msgEl.dataset.msgId = assistantMsg.id;
-      msgEl.insertAdjacentHTML('beforeend', this._msgFooter(assistantMsg));
+      // Элемент ответа уже отрисован стримингом (если чат был виден) —
+      // дописываем подпись (время, модель, длительность), не перерисовывая
+      // содержимое. Если сейчас смотрим на другой чат, ensureMsgEl() ничего
+      // не создаст — при следующем открытии этого чата подпись придёт из
+      // БД вместе с самим сообщением через обычный _renderMessage().
+      const finalEl = ensureMsgEl();
+      if (finalEl) {
+        finalEl.dataset.msgId = assistantMsg.id;
+        finalEl.insertAdjacentHTML('beforeend', this._msgFooter(assistantMsg));
+      }
 
-      if (assistantMsg.truncated) this._showTruncationNotice(container);
-      container.scrollTop = container.scrollHeight;
+      if (assistantMsg.truncated) this._showTruncationNotice(chatId);
+      const doneContainer = dom();
+      if (doneContainer) doneContainer.scrollTop = doneContainer.scrollHeight;
 
     } catch (error) {
 
@@ -745,61 +922,67 @@ Object.assign(UI.prototype, {
       // ПОСЛЕ await, поэтому раньше он терялся — ответ выглядел
       // неполным, а после перезагрузки чата исчезал совсем и выпадал
       // из контекста следующего запроса.
-      if (fullContent.trim()) {
+      if (run.partialContent.trim()) {
         const partial = {
           id: uid(),
-          chatId: this.currentChatId,
+          chatId,
           role: 'assistant',
-          content: fullContent,
+          content: run.partialContent,
           timestamp: Date.now(),
           model: this.agent.llm.model,
           durationMs: Math.round(performance.now() - requestStartedAt),
           interrupted: true,
         };
         await this.agent.db.put('messages', partial);
-        if (msgEl) {
-          msgEl.dataset.msgId = partial.id;
-          msgEl.insertAdjacentHTML('beforeend', this._msgFooter(partial));
+        const el = ensureMsgEl();
+        if (el) {
+          el.dataset.msgId = partial.id;
+          el.insertAdjacentHTML('beforeend', this._msgFooter(partial));
         }
       }
 
-      if (error.name === 'AbortError' && this._stopRequested) {
+      if (error.name === 'AbortError' && run.stopRequested) {
         // Сообщение об остановке уже показал stopAgent() — не дублируем.
       } else {
         const msg = error.name === 'AbortError'
           ? `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с). ` +
-            (fullContent.trim() ? 'Полученная часть ответа сохранена. ' : '') +
+            (run.partialContent.trim() ? 'Полученная часть ответа сохранена. ' : '') +
             'Лимит можно изменить в ⚙ Настройки → Ограничения.'
           : `Ошибка: ${error.message}`;
-        container.insertAdjacentHTML('beforeend', `<div class="message system">❌ ${this._escHtml(msg)}</div>`);
-        container.scrollTop = container.scrollHeight;
+        const errContainer = dom();
+        if (errContainer) {
+          errContainer.insertAdjacentHTML('beforeend', `<div class="message system">❌ ${this._escHtml(msg)}</div>`);
+          errContainer.scrollTop = errContainer.scrollHeight;
+        }
       }
     } finally {
       clearTimeout(turnTimer);
-      this._abortCtl = null;
+      run.abortCtl = null;
       // Единственная точка снятия занятости для всей цепочки: срабатывает
       // на любом пути выхода корневого кадра, включая return из середины
       // цикла вызовов инструментов и любую необработанную ошибку.
-      // Панель статуса снимается здесь же — иначе «зависший» индикатор
-      // пережил бы ошибку или прерывание.
-      if (depth === 0) { this._setBusy(false); this._hideStatus(); }
+      // Панель статуса и запись в this._chatRuns снимаются здесь же —
+      // иначе «зависший» индикатор пережил бы ошибку или прерывание.
+      if (depth === 0) this._endRun(chatId);
     }
 
     // Ход завершён (цепочка вызовов инструментов раскручена) — записываем
     // полное время обработки запроса пользователя: от отправки сообщения
     // до финального ответа, включая все промежуточные вызовы.
-    if (this._turnUserMsgId && this._turnStartedAt) {
-      const msg = await this.agent.db.get('messages', this._turnUserMsgId);
+    if (run.turnUserMsgId && run.startedAt) {
+      const msg = await this.agent.db.get('messages', run.turnUserMsgId);
       if (msg) {
-        msg.turnDurationMs = Date.now() - this._turnStartedAt;
+        msg.turnDurationMs = Date.now() - run.startedAt;
         await this.agent.db.put('messages', msg);
-        const el = document.querySelector(`[data-msg-id="${this._turnUserMsgId}"] .msg-footer`);
-        if (el) el.innerHTML = this._msgFooterInner(msg);
+        if (chatId === this.currentChatId) {
+          const el = document.querySelector(`[data-msg-id="${run.turnUserMsgId}"] .msg-footer`);
+          if (el) el.innerHTML = this._msgFooterInner(msg);
+        }
       }
-      this._turnUserMsgId = null;
+      run.turnUserMsgId = null;
     }
 
-    this.updateChatToolbar();
+    if (chatId === this.currentChatId) this.updateChatToolbar();
   },
 
 
@@ -826,22 +1009,27 @@ Object.assign(UI.prototype, {
   },
 
 
+  // Останавливает ход просматриваемого сейчас чата. Кнопка «⏹» видна
+  // только тогда, когда у this.currentChatId есть активный run (см.
+  // _setBusy/_endRun), так что здесь всегда именно тот чат, что на экране.
   stopAgent() {
-    if (!this.isStreaming) return;
-    this._stopRequested = true;
-    try { this._abortCtl?.abort(); } catch (_) {}
+    const chatId = this.currentChatId;
+    const run = chatId && this._chatRuns.get(chatId);
+    if (!run) return;
+    run.stopRequested = true;
+    try { run.abortCtl?.abort(); } catch (_) {}
 
     // Прячем кнопку сразу: команда принята, повторные нажатия смысла не
     // имеют. Кнопку «Отправить» при этом НЕ разблокируем — цепочка ещё
     // раскручивается (может доигрываться начатый вызов инструмента),
-    // её включит _setBusy(false) в конце _generateResponse.
+    // её включит _endRun() в конце _generateResponse.
     const stop = document.getElementById('stop-btn');
     if (stop) stop.hidden = true;
 
     // Уже запущенный вызов инструмента прервать нельзя — он доигрывает до
     // своего таймаута. Показываем это явно, иначе пауза после нажатия
     // выглядит как зависание.
-    this._showStatus('Останавливаю…', 'жду завершения текущей операции');
+    this._showStatus(chatId, 'Останавливаю…', 'жду завершения текущей операции');
 
     const container = document.getElementById('chat-messages');
     container.insertAdjacentHTML('beforeend',
