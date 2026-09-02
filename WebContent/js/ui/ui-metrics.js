@@ -468,9 +468,12 @@ Object.assign(UI.prototype, {
   // Каждый уровень показывается один раз за чат, иначе сообщение
   // повторялось бы после каждого запроса и засоряло переписку.
   // chatId — чат, которому принадлежит этот ответ (не обязательно тот,
-  // что сейчас на экране): DOM трогаем, только если это совпадает.
-  async _checkContextThresholds(chatId, contextTokens) {
-    const limit = this.effectiveContextLimit();
+  // что сейчас на экране): DOM трогаем, только если это совпадает. ref —
+  // ссылка на модель ИМЕННО этого чата (см. _trimHistory) — без неё лимит
+  // считался бы по модели общего шлюза, а тот к этому моменту мог уже
+  // переключиться на модель другого, параллельно просматриваемого чата.
+  async _checkContextThresholds(chatId, contextTokens, ref) {
+    const limit = this.effectiveContextLimit(ref);
     if (!limit || !contextTokens) return;
 
     const stats = await this._getChatStats(chatId);

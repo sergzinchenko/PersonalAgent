@@ -773,7 +773,7 @@ Object.assign(UI.prototype, {
       }
       await this._recordContextSize(chatId, contextTokens, !result.usage);
       if (chatId === this.currentChatId) this.updateChatToolbar();
-      await this._checkContextThresholds(chatId, contextTokens);
+      await this._checkContextThresholds(chatId, contextTokens, chatRef);
 
       if (result.tool_calls && result.tool_calls.length > 0) {
         const assistantMsg = {
