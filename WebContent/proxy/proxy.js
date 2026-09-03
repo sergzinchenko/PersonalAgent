@@ -387,7 +387,16 @@ const server = http.createServer(async (req, res) => {
   // ведёт сам curl (NTLM/Negotiate), и клиентский заголовок Authorization
   // тут не при делах и может сломать хендшейк, если случайно попадёт в запрос.
   const skipHeaders = new Set([
-    'host', 'connection', 'content-length', 'origin', 'referer',
+    // hop-by-hop и всё, что описывает ЭТО соединение, а не запрос:
+    // дальше формируется новое соединение со своими заголовками.
+    // transfer-encoding особенно важен: тело мы уже прочитали целиком и
+    // ниже проставляем Content-Length сами. Если при этом переслать ещё и
+    // "Transfer-Encoding: chunked" от клиента, получится запрос сразу с
+    // двумя способами указать длину тела — Node такой отвергает, и клиент
+    // получает 400 без единого пояснения. Ловится не всегда: браузер для
+    // строкового тела ставит Content-Length, а вот http-клиент Node по
+    // умолчанию шлёт chunked, и на нём это воспроизводится сразу.
+    'host', 'connection', 'content-length', 'transfer-encoding', 'origin', 'referer',
     // служебные заголовки самого прокси — не предназначены для целевого сервера
     'x-target-url', 'x-use-sso',
   ]);

@@ -23,6 +23,7 @@
 // при этом работает как обычно и даёт основной эффект.
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 const JavaScriptObfuscator = require('javascript-obfuscator');
 
 const ROOT = path.join(__dirname, '..');
@@ -76,6 +77,18 @@ function buildProdHtml(html) {
   return replaced.join('\n');
 }
 
+// Обфусцированный код проверяем на разбираемость прямо в сборке: ошибку в
+// нём иначе обнаружит только пользователь, открыв пустую страницу или
+// получив сбой на старте прокси. vm.Script парсит без исполнения — этого
+// достаточно, чтобы поймать катастрофическую поломку вывода.
+function assertParses(code, what) {
+  try {
+    new vm.Script(code, { filename: what });
+  } catch (e) {
+    throw new Error(`Обфусцированный ${what} не разбирается как JS: ${e.message}`);
+  }
+}
+
 function build() {
   const html = fs.readFileSync(INDEX_HTML_PATH, 'utf8');
   const files = extractScriptOrder(html);
@@ -105,6 +118,8 @@ function build() {
     debugProtection: false,
   }).getObfuscatedCode();
 
+  assertParses(obfuscated, `dist/${BUNDLE_NAME}`);
+
   fs.mkdirSync(DIST_DIR, { recursive: true });
   fs.writeFileSync(path.join(DIST_DIR, BUNDLE_NAME), obfuscated, 'utf8');
   console.log(`✓ dist/${BUNDLE_NAME} записан (${obfuscated.length} символов)`);
@@ -119,20 +134,60 @@ function build() {
   fs.writeFileSync(path.join(DIST_DIR, 'index.html'), prodHtml, 'utf8');
   console.log('✓ dist/index.html записан');
 
-  // proxy/ копируется НЕ обфусцированным и не входит в бандл: это отдельный
-  // Node-процесс, который пользователь запускает у себя, а не часть страницы.
-  // Нужен в dist потому, что генератор файлов прокси (⚙ Настройки →
-  // Безопасность) отдаёт пользователю именно этот proxy.js, забирая его
-  // с того же адреса, откуда открыто приложение.
+  // ── proxy/ ──
+  // Не часть страницы и не часть бандла: это отдельный Node-процесс,
+  // который пользователь запускает у себя. В dist он нужен потому, что
+  // генератор файлов прокси (⚙ Настройки → Безопасность) отдаёт
+  // пользователю именно этот proxy.js, забирая его с того же адреса,
+  // откуда открыто приложение.
+  //
+  // proxy.js обфусцируется отдельным проходом и СВОИМИ настройками:
+  // это код для Node, а не для браузера (target: 'node'). config.js
+  // остаётся исходником намеренно — это файл настроек, который правят
+  // руками после генерации; обфусцировать его значило бы сломать саму
+  // возможность настроить прокси.
   const proxySrc = path.join(ROOT, 'proxy');
   if (fs.existsSync(proxySrc)) {
     const proxyDist = path.join(DIST_DIR, 'proxy');
     fs.mkdirSync(proxyDist, { recursive: true });
+
     for (const f of fs.readdirSync(proxySrc)) {
       if (!f.endsWith('.js')) continue;
-      fs.copyFileSync(path.join(proxySrc, f), path.join(proxyDist, f));
+      const srcPath = path.join(proxySrc, f);
+      const outPath = path.join(proxyDist, f);
+
+      if (f === 'config.js') {
+        fs.copyFileSync(srcPath, outPath);
+        console.log('✓ dist/proxy/config.js скопирован (исходником — его правят руками)');
+        continue;
+      }
+
+      const code = fs.readFileSync(srcPath, 'utf8');
+      const out = JavaScriptObfuscator.obfuscate(code, {
+        // Тот же принцип, что и у бандла: прячем внутренности, но не ломаем
+        // отладку и не платим за это скоростью.
+        target: 'node',              // иначе обфускатор добавит браузерные обёртки
+        compact: true,
+        controlFlowFlattening: false,
+        deadCodeInjection: false,
+        stringArray: true,
+        stringArrayThreshold: 0.75,
+        stringArrayEncoding: ['base64'],
+        identifierNamesGenerator: 'hexadecimal',
+        renameGlobals: false,
+        selfDefending: false,
+        debugProtection: false,
+        // Имя конфигурационного модуля должно остаться читаемым в require:
+        // пользователь кладёт config.js рядом руками, и подмена этой строки
+        // на элемент stringArray превратила бы понятную ошибку «не найден
+        // config.js» в невнятный сбой на старте.
+        reservedStrings: ['\\./config\\.js'],
+      }).getObfuscatedCode();
+
+      assertParses(out, `dist/proxy/${f}`);
+      fs.writeFileSync(outPath, out, 'utf8');
+      console.log(`✓ dist/proxy/${f} обфусцирован (${code.length} → ${out.length} символов)`);
     }
-    console.log('✓ dist/proxy/ скопирован (исходником, без обфускации)');
   }
 
   console.log('\nГотово. dist/ можно раздавать как есть любым статическим веб-сервером.');
