@@ -117,13 +117,17 @@ const { LLMRegistry, SecurityEngine, ToolsEngine } = sandbox;
     sec.configure({
       allowedMcpHosts: 'a.test, b.test',
       maxCallsPerToolPerTurn: 5,
-      mcpLimits: { requireHttps: false, allowLocalServers: true, timeoutSeconds: 10, maxCallsPerTurn: 3 },
+      mcpLimits: { requireHttps: false, allowLocalServers: true, maxCallsPerTurn: 3 },
     });
     ok('белый список MCP разобран', sec.allowedMcpHosts.join(',') === 'a.test,b.test');
     ok('лимит вызовов применён', sec.maxCallsPerToolPerTurn === 5);
     ok('частичный патч mcpLimits не затирает остальные поля',
-      sec.mcpLimits.maxResponseChars === 100000 && sec.mcpLimits.timeoutSeconds === 10 &&
-      sec.mcpLimits.markUntrusted === true,
+      sec.mcpLimits.maxCallsPerTurn === 3 && sec.mcpLimits.markUntrusted === true &&
+      sec.mcpLimits.allowLocalServers === true,
+      JSON.stringify(sec.mcpLimits));
+    // Таймаут и предел ответа у MCP свои больше не хранятся (Цикл 32).
+    ok('у MCP нет собственных таймаута и предела ответа',
+      sec.mcpLimits.timeoutSeconds === undefined && sec.mcpLimits.maxResponseChars === undefined,
       JSON.stringify(sec.mcpLimits));
 
     // Настройка адреса должна влиять на проверку в клиенте MCP.

@@ -119,6 +119,22 @@ function build() {
   fs.writeFileSync(path.join(DIST_DIR, 'index.html'), prodHtml, 'utf8');
   console.log('✓ dist/index.html записан');
 
+  // proxy/ копируется НЕ обфусцированным и не входит в бандл: это отдельный
+  // Node-процесс, который пользователь запускает у себя, а не часть страницы.
+  // Нужен в dist потому, что генератор файлов прокси (⚙ Настройки →
+  // Безопасность) отдаёт пользователю именно этот proxy.js, забирая его
+  // с того же адреса, откуда открыто приложение.
+  const proxySrc = path.join(ROOT, 'proxy');
+  if (fs.existsSync(proxySrc)) {
+    const proxyDist = path.join(DIST_DIR, 'proxy');
+    fs.mkdirSync(proxyDist, { recursive: true });
+    for (const f of fs.readdirSync(proxySrc)) {
+      if (!f.endsWith('.js')) continue;
+      fs.copyFileSync(path.join(proxySrc, f), path.join(proxyDist, f));
+    }
+    console.log('✓ dist/proxy/ скопирован (исходником, без обфускации)');
+  }
+
   console.log('\nГотово. dist/ можно раздавать как есть любым статическим веб-сервером.');
 }
 

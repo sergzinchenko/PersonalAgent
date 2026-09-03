@@ -129,7 +129,11 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
   const list = await call('llm_list');
   ok('llm_list перечисляет провайдеров', list.providers.length === 2, JSON.stringify(list.providers));
   ok('llm_list перечисляет модели', list.models.length === 3);
-  ok('llm_list не отдаёт ключи', !JSON.stringify(list).includes('k1'));
+  // Ключ ищем именно как ЗНАЧЕНИЕ ("k1" в кавычках), а не как подстроку:
+  // id провайдера начинается с Date.now().toString(36), и в отдельные
+  // получасовые окна времени он сам содержит "k1" — проверка по подстроке
+  // ложно срабатывала на нём (и только на нём: ключа в ответе нет).
+  ok('llm_list не отдаёт ключи', !JSON.stringify(list).includes('"k1"'), JSON.stringify(list));
   ok('в списке есть класс сложности', list.models.every(m => !!m.tierLabel));
 
   const st = await call('llm_status');
@@ -242,6 +246,23 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
   const denied2 = await engine.executeTool('llm_switch', { connection: 'Основной' }, {});
   ok('в максимальном режиме спрашивают подтверждение', asked !== null, JSON.stringify(asked));
   ok('отказ пользователя останавливает вызов', denied2.denied === true, JSON.stringify(denied2));
+
+  console.log('\n── Выключенный инструмент недоступен для вызова ──');
+  {
+    // Проверяем именно исполнителя, а не политику безопасности — иначе
+    // не понятно, какая из двух проверок сработала.
+    const savedSecurity = engine.security;
+    engine.security = null;
+    const tool = await db.get('tools', 'builtin_llm_switch');
+    tool.enabled = false;
+    await db.put('tools', tool);
+    const disabledCall = await engine.executeTool('llm_switch', { connection: 'Основной' }, {});
+    ok('вызов выключенного инструмента отклонён', !!disabledCall.error && /отключ/.test(disabledCall.error),
+       JSON.stringify(disabledCall));
+    tool.enabled = true;
+    await db.put('tools', tool);
+    engine.security = savedSecurity;
+  }
 
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);

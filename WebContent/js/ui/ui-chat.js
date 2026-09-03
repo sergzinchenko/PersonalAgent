@@ -555,9 +555,12 @@ Object.assign(UI.prototype, {
           <label>Что именно будет выполнено</label>
           <pre class="tool-pre" style="max-height:30vh;">${this._escHtml(argsText)}</pre>
         </div>
-        ${req.host ? `<label class="check-row">
+        ${req.host && !req.noRemember ? `<label class="check-row">
           <input type="checkbox" id="sec_remember_host"> Больше не спрашивать про ${this._escHtml(req.host)} в этой сессии
         </label>` : ''}
+        ${req.noRemember ? `<div style="font-size:11px;color:var(--warning);margin-top:8px;">
+          Об этом спрашивают каждый раз: разрешение не запоминается.
+        </div>` : ''}
         <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
           Отказ не прерывает работу агента — он получит сообщение, что операция не разрешена.
         </div>
@@ -570,7 +573,7 @@ Object.assign(UI.prototype, {
           });
         },
         () => { if (!settled) resolve({ approved: false }); },
-        { modal: true, wide: true }
+        { wide: true }
       );
     });
   },

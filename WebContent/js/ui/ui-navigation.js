@@ -232,6 +232,10 @@ Object.assign(UI.prototype, {
     const folders = await this.agent.folders.all(type);
     const mcpServers = type === 'tools' ? await this.agent.db.getAll('mcp_servers') : [];
     const mcpById = new Map(mcpServers.map(s => [s.id, s]));
+    // Только для tools: список нужен, чтобы у каждой папки посчитать,
+    // сколько инструментов внутри неё и всех вложенных папок включено —
+    // см. переключатель папки целиком (_folderSubtreeIds).
+    const tools = type === 'tools' ? await this.agent.tools.loadTools() : [];
 
     const byParent = {};
     folders.forEach(f => { const k = f.parentId || 'root'; (byParent[k] = byParent[k] || []).push(f); });
@@ -250,11 +254,31 @@ Object.assign(UI.prototype, {
         const hasKids = (byParent[f.id] || []).length > 0;
         const server = f.mcpServerId ? mcpById.get(f.mcpServerId) : null;
         const label = server ? server.name : f.name;
+
+        let toggle = '';
+        if (type === 'tools') {
+          const scope = new Set(this._folderSubtreeIds(folders, f.id));
+          // Системные инструменты в счёт папки не идут: их состояние
+          // менять нельзя, и, попади они в счётчик, переключатель папки
+          // навсегда застрял бы в промежуточном состоянии.
+          const inScope = tools.filter(t => !t.locked && scope.has(t.parentId || null));
+          if (inScope.length) {
+            const enabledCount = inScope.filter(t => t.enabled).length;
+            const mixed = enabledCount > 0 && enabledCount < inScope.length;
+            toggle = `
+              <label class="toggle-switch sm" title="${enabledCount} из ${inScope.length} инструментов включено">
+                <input type="checkbox" data-folder-toggle="${f.id}" ${enabledCount === inScope.length ? 'checked' : ''} ${mixed ? 'data-mixed="1"' : ''}>
+                <span class="toggle-slider"></span>
+              </label>`;
+          }
+        }
+
         html += `
           <div class="tree-node">
             <div class="tree-node-row ${sel}" data-folder-id="${f.id}" ${server ? `data-mcp-server="${server.id}"` : ''}>
               <span class="tw-toggle">${hasKids ? '▾' : '•'}</span>
               <span class="tw-name">${server ? '🧩' : '📁'} ${this._escHtml(label)}</span>
+              ${toggle}
               <span class="tw-actions">
                 <button data-add-sub="${f.id}" title="Подпапка">＋</button>
                 ${server
@@ -284,6 +308,9 @@ Object.assign(UI.prototype, {
         </div>
       </div>`;
 
+    // indeterminate — свойство DOM-объекта, атрибутом в HTML не задаётся.
+    list.querySelectorAll('[data-folder-toggle][data-mixed]').forEach(cb => { cb.indeterminate = true; });
+
     this._bindSidebarTree(type);
   },
 
@@ -294,7 +321,7 @@ Object.assign(UI.prototype, {
     // Выбор папки / сворачивание
     list.querySelectorAll('.tree-node-row').forEach(row => {
       row.addEventListener('click', (e) => {
-        if (e.target.closest('.tw-actions')) return;
+        if (e.target.closest('.tw-actions') || e.target.closest('.toggle-switch')) return;
 
         if (e.target.classList.contains('tw-toggle')) {
           const kids = row.nextElementSibling;
@@ -338,6 +365,23 @@ Object.assign(UI.prototype, {
       const folder = await this.agent.db.get('folders', fid);
       await this.agent.folders.remove(fid, type);
       if (this.folderSelection[type] === fid) this.folderSelection[type] = folder?.parentId || null;
+      await this.refreshSidebar();
+      this._refreshPanel(type);
+    }));
+
+    // Переключатель папки целиком: включает/выключает все инструменты
+    // прямо в ней и во всех вложенных папках (в т.ч. под MCP-сервером —
+    // сама область видимости от этого не меняется, просто у сервера тоже
+    // бывают вложенные подпапки).
+    list.querySelectorAll('[data-folder-toggle]').forEach(cb => cb.addEventListener('change', async () => {
+      const folders = await this.agent.folders.all(type);
+      const scope = new Set(this._folderSubtreeIds(folders, cb.dataset.folderToggle));
+      const tools = await this.agent.tools.loadTools();
+      const affected = tools.filter(t => !t.locked && scope.has(t.parentId || null));
+      for (const t of affected) {
+        t.enabled = cb.checked;
+        await this.agent.db.put('tools', t);
+      }
       await this.refreshSidebar();
       this._refreshPanel(type);
     }));
@@ -415,6 +459,19 @@ Object.assign(UI.prototype, {
         this._refreshPanel(type);
       });
     });
+  },
+
+
+  // fid + id всех вложенных папок любой глубины (плоский список) —
+  // общая область видимости для операций над содержимым папки целиком
+  // (см. переключатель "включить/выключить все инструменты" ниже).
+  _folderSubtreeIds(folders, fid) {
+    const byParent = {};
+    folders.forEach(f => { const k = f.parentId || 'root'; (byParent[k] = byParent[k] || []).push(f); });
+    const acc = [fid];
+    const walk = (id) => { (byParent[id] || []).forEach(f => { acc.push(f.id); walk(f.id); }); };
+    walk(fid);
+    return acc;
   },
 
 
@@ -506,31 +563,75 @@ Object.assign(UI.prototype, {
     const tools = await this.agent.tools.loadTools();
     const mount = document.getElementById('tools-grid');
 
-    const renderCard = (t) => `
-      <div class="tool-card" data-id="${t.id}">
+    // Обратная сторона связи «навык ↔ инструменты»: у какого навыка этот
+    // инструмент числится. Показываем прямо на карточке — иначе понять,
+    // на что повлияет выключение инструмента, можно только перебрав навыки.
+    const skills = await this.agent.skills.loadSkills();
+    const usedBy = new Map();
+    for (const s of skills) {
+      for (const id of this.agent.skills.toolIdsOf(s)) {
+        if (!usedBy.has(id)) usedBy.set(id, []);
+        usedBy.get(id).push(s);
+      }
+    }
+
+    const renderCard = (t) => {
+      const inSkills = usedBy.get(t.id) || [];
+      const skillsLine = inSkills.length
+        ? `<div class="tool-skills" title="Навыки, к которым привязан инструмент">
+             🧩 ${inSkills.map(s => `${this._escHtml(s.icon)} ${this._escHtml(s.name)}`).join(' · ')}
+           </div>`
+        : '';
+      // Системный инструмент: тумблер заблокирован, удаления нет —
+      // на нём держатся базовые механизмы агента (см. навык «Системный»).
+      const lockTitle = 'Системный инструмент — на нём держатся базовые механизмы агента, выключить нельзя';
+      return `
+      <div class="tool-card${t.locked ? ' tool-locked' : ''}" data-id="${t.id}">
         <div class="tool-header">
-          <span class="tool-name">${t.mcpServerId ? '🧩 ' : ''}${this._escHtml(t.name)}</span>
-          <label class="toggle-switch">
-            <input type="checkbox" ${t.enabled ? 'checked' : ''} data-toggle="${t.id}">
+          <span class="tool-name">${t.locked ? '🔒 ' : (t.mcpServerId ? '🧩 ' : '')}${this._escHtml(t.name)}</span>
+          <label class="toggle-switch${t.locked ? ' locked' : ''}" ${t.locked ? `title="${lockTitle}"` : ''}>
+            <input type="checkbox" ${t.enabled ? 'checked' : ''} ${t.locked ? 'disabled' : ''} data-toggle="${t.id}">
             <span class="toggle-slider"></span>
           </label>
         </div>
         <div class="tool-desc">${this._escHtml(t.description)}</div>
+        ${skillsLine}
         <div class="tool-params">${this._escHtml(JSON.stringify(t.parameters, null, 2))}</div>
-        ${!t.builtin ? `<div style="margin-top:12px; display:flex; gap:8px;">
-          ${t.mcpServerId ? '' : `<button class="btn btn-secondary btn-sm" data-edit-tool="${t.id}">✏ Редактировать</button>`}
-          <button class="btn btn-danger btn-sm" data-del-tool="${t.id}">Удалить</button>
-        </div>` : ''}
+        <div class="tool-actions">
+          <button class="btn btn-secondary btn-sm" data-tool-skills="${t.id}">🧩 Навыки${inSkills.length ? ` (${inSkills.length})` : ''}</button>
+          ${!t.builtin && !t.mcpServerId ? `<button class="btn btn-secondary btn-sm" data-edit-tool="${t.id}">✏ Редактировать</button>` : ''}
+          ${!t.builtin ? `<button class="btn btn-danger btn-sm" data-del-tool="${t.id}">Удалить</button>` : ''}
+        </div>
       </div>`;
+    };
 
     const bind = (scope) => {
       scope.querySelectorAll('[data-toggle]').forEach(el => el.addEventListener('change', async () => {
         const tool = await this.agent.db.get('tools', el.dataset.toggle);
+        // Системный инструмент нельзя выключить даже в обход disabled
+        // (например, снятием атрибута в DevTools).
+        if (tool.locked) { el.checked = true; return; }
         tool.enabled = el.checked; await this.agent.db.put('tools', tool);
+        // Привязки не меняются, но подпись «включён/выключен» в навыках
+        // и в системном промпте зависит от этого флага.
+        this.renderTools();
       }));
+      scope.querySelectorAll('[data-tool-skills]').forEach(el => el.addEventListener('click', () => this.showToolSkillsModal(el.dataset.toolSkills)));
       scope.querySelectorAll('[data-edit-tool]').forEach(el => el.addEventListener('click', () => this.showAddToolModal(el.dataset.editTool)));
       scope.querySelectorAll('[data-del-tool]').forEach(el => el.addEventListener('click', async () => {
-        await this.agent.db.delete('tools', el.dataset.delTool); this.renderTools();
+        const id = el.dataset.delTool;
+        const inSkills = usedBy.get(id) || [];
+        if (inSkills.length) {
+          const yes = await this._confirm(
+            `Инструмент привязан к навыкам: ${inSkills.map(s => s.name).join(', ')}. ` +
+            'Удалить его и убрать эти привязки?', { title: 'Удаление инструмента', danger: true });
+          if (!yes) return;
+        }
+        await this.agent.db.delete('tools', id);
+        // Иначе в навыках остались бы ссылки на несуществующий инструмент.
+        await this.agent.skills.forgetTool(id);
+        this.agent.tools.unregisterHandler(id);
+        this.renderTools();
       }));
     };
 
@@ -542,31 +643,60 @@ Object.assign(UI.prototype, {
     const skills = await this.agent.skills.loadSkills();
     const mount = document.getElementById('skills-container');
 
-    const renderCard = (s) => `
-      <div class="tool-card" data-id="${s.id}">
+    // Привязанные инструменты с их текущим состоянием: выключенный
+    // инструмент навыку недоступен, и это стоит видеть, не открывая
+    // вкладку Tools.
+    const allTools = await this.agent.tools.loadTools();
+    const toolsById = new Map(allTools.map(t => [t.id, t]));
+
+    const renderCard = (s) => {
+      const bound = this.agent.skills.toolIdsOf(s).map(id => toolsById.get(id)).filter(Boolean);
+      const offCount = bound.filter(t => !t.enabled).length;
+      const toolsBlock = bound.length ? `
+        <div class="skill-tools" title="Инструменты, привязанные к навыку">
+          ${bound.map(t => `<span class="skill-tool-chip${t.enabled ? '' : ' off'}"
+            title="${t.enabled ? 'Инструмент включён' : 'Инструмент выключен — навык не сможет им воспользоваться'}"
+            >${this._escHtml(t.name)}</span>`).join('')}
+          ${offCount ? `<span class="skill-tools-warn" title="Выключенные инструменты модели не передаются">⚠ ${offCount} выключено</span>` : ''}
+        </div>` : '';
+
+      // Системный навык описывает устройство самого агента и участвует
+      // в каждом запросе — выключать и удалять его нечему.
+      const lockTitle = 'Системный навык — описывает устройство агента, выключить нельзя';
+      return `
+      <div class="tool-card${s.locked ? ' tool-locked' : ''}" data-id="${s.id}">
         <div class="tool-header">
-          <span class="tool-name">${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
-          <label class="toggle-switch">
-            <input type="checkbox" ${s.enabled ? 'checked' : ''} data-skill-toggle="${s.id}">
+          <span class="tool-name">${s.locked ? '🔒 ' : ''}${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
+          <label class="toggle-switch${s.locked ? ' locked' : ''}" ${s.locked ? `title="${lockTitle}"` : ''}>
+            <input type="checkbox" ${s.enabled ? 'checked' : ''} ${s.locked ? 'disabled' : ''} data-skill-toggle="${s.id}">
             <span class="toggle-slider"></span>
           </label>
         </div>
         <div class="tool-desc">${this._escHtml(s.description)}</div>
+        ${toolsBlock}
         <div class="tool-params" style="white-space:pre-wrap">${this._escHtml(s.systemPrompt)}</div>
-        <div style="margin-top:12px; display:flex; gap:8px;">
-          <button class="btn btn-secondary btn-sm" data-edit-skill="${s.id}">✏ Редактировать</button>
-          <button class="btn btn-danger btn-sm" data-del-skill="${s.id}">Удалить</button>
+        <div class="tool-actions">
+          <button class="btn btn-secondary btn-sm" data-edit-skill="${s.id}">${s.locked ? '👁 Посмотреть' : '✏ Редактировать'}</button>
+          ${s.locked ? '' : `<button class="btn btn-danger btn-sm" data-del-skill="${s.id}">Удалить</button>`}
         </div>
       </div>`;
+    };
 
     const bind = (scope) => {
       scope.querySelectorAll('[data-skill-toggle]').forEach(el => el.addEventListener('change', async () => {
         const skill = await this.agent.db.get('skills', el.dataset.skillToggle);
+        if (skill.locked) { el.checked = true; return; }
         skill.enabled = el.checked; await this.agent.db.put('skills', skill);
+        this.updateChatToolbar();
       }));
       scope.querySelectorAll('[data-edit-skill]').forEach(el => el.addEventListener('click', () => this.showAddSkillModal(el.dataset.editSkill)));
       scope.querySelectorAll('[data-del-skill]').forEach(el => el.addEventListener('click', async () => {
-        await this.agent.db.delete('skills', el.dataset.delSkill); this.renderSkills();
+        const skill = await this.agent.db.get('skills', el.dataset.delSkill);
+        if (skill?.locked) return;
+        if (!await this._confirm(`Удалить навык «${skill?.name || ''}»?`, { title: 'Удаление навыка', danger: true })) return;
+        await this.agent.db.delete('skills', el.dataset.delSkill);
+        this.renderSkills();
+        this.updateChatToolbar();
       }));
     };
 

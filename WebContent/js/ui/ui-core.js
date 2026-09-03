@@ -23,6 +23,11 @@ class UI {
       maxTurnSeconds: 180,   // общий бюджет времени на ход, сек (0 — без лимита)
       toolTimeoutSeconds: 30,// таймаут одного вызова инструмента, сек (0 — без лимита)
       maxToolCallsPerTurn: 50, // суммарный потолок вызовов за ход
+      // Сколько символов чужого ответа пускать в контекст. ОДНО значение на
+      // все каналы (MCP, proxy_fetch, http_fetch): раньше их было три —
+      // отдельная настройка у MCP, отдельная у прокси и зашитые 4000 в
+      // http_fetch, — хотя смысл везде один и тот же.
+      maxToolResponseChars: 20000,
     };
 
     // Степень детализации вывода вызовов инструментов в чат:
@@ -61,6 +66,16 @@ class UI {
     // по имени модели; contextWarnPercent — порог предупреждения.
     this.contextLimit = 0;
     this.contextWarnPercent = 75;
+
+    // Локальный прокси для инструмента proxy_fetch (proxy/proxy.js).
+    // Пустой baseUrl = не настроен, инструмент вернёт понятную ошибку.
+    // SSO по умолчанию запрещён: он ходит с доменными правами пользователя.
+    this.proxy = { baseUrl: '', allowSso: false, maxResponseChars: 8000 };
+
+    // Тема оформления: 'system' (по умолчанию, следует за ОС), 'dark', 'light'.
+    // Реально применяется через applyTheme() — см. agent.js (после чтения
+    // settings/theme) и ui-settings.js (после сохранения формы).
+    this.theme = 'system';
 
     this._bindGlobalEvents();
   }
@@ -194,6 +209,16 @@ class UI {
     } catch (_) { /* сохранение раскладки не критично */ }
   }
 
+  // Применяет тему: 'light'/'dark' — атрибут на <html>, чей CSS уже
+  // переопределяет переменные (:root[data-theme="..."], см. styles.css);
+  // 'system' — атрибут снимается, и решает media-запрос prefers-color-scheme.
+  applyTheme(theme) {
+    this.theme = (theme === 'light' || theme === 'dark') ? theme : 'system';
+    const root = document.documentElement;
+    if (this.theme === 'system') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', this.theme);
+  }
+
   // Применяет сохранённую раскладку при запуске (вызывается из agent.js).
   applyLayout(layout) {
     if (!layout) return;
@@ -271,13 +296,17 @@ class UI {
   // ══════════════════════════════════════════════
   //  _showModal — универсальный метод
   //
-  //  options.modal  (bool, default false)
-  //    true  → окно НЕ закрывается по клику на оверлей
-  //    false → окно закрывается по клику на оверлей
-  //            (прежнее поведение)
+  //  ВСЕ окна строго модальны: клик мимо окна не закрывает его никогда.
+  //  Раньше это было опцией (options.modal), и по умолчанию окна
+  //  закрывались промахом мыши — а почти в каждом из них лежит
+  //  несохранённая форма: промах стирал введённое без предупреждения.
+  //  Закрыть окно можно кнопками «Отмена»/«Сохранить» или клавишей Esc
+  //  (равносильна «Отмене» — окно всегда должно закрываться с клавиатуры).
+  //
+  //  options.wide (bool) — широкая раскладка окна.
   // ══════════════════════════════════════════════
   _showModal(title, bodyHtml, onSave, onCancel, options = {}) {
-    const { modal = false, wide = false } = options;
+    const { wide = false } = options;
     const id = 'modal_' + uid();
     const modals = document.getElementById('modals');
     modals.innerHTML = `
@@ -293,18 +322,27 @@ class UI {
       </div>
     `;
 
+    // Esc — единственный способ закрыть окно помимо кнопок. Слушатель
+    // глобальный (фокус может быть где угодно внутри формы) и снимает сам
+    // себя, когда его окна в документе больше нет: окно могло смениться
+    // другим прямо из onSave (см. ниже), и старый слушатель не должен
+    // гасить чужое окно.
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      if (!document.getElementById(id)) { document.removeEventListener('keydown', onKey); return; }
+      e.preventDefault();
+      document.removeEventListener('keydown', onKey);
+      modals.innerHTML = '';
+      onCancel?.();
+    };
+    document.addEventListener('keydown', onKey);
+
     // «Отмена» — всегда закрывает
     document.getElementById(`${id}_cancel`).addEventListener('click', () => {
+      document.removeEventListener('keydown', onKey);
       modals.innerHTML = '';
       onCancel?.();
     });
-
-    // Клик по оверлею — только если НЕ strict modal
-    if (!modal) {
-      document.getElementById(id).addEventListener('click', (e) => {
-        if (e.target.id === id) { modals.innerHTML = ''; onCancel?.(); }
-      });
-    }
 
     // «Сохранить». onSave читает значения полей формы, поэтому окно нельзя
     // стереть заранее — а onSave (например, _backToProviders) может сам
@@ -313,6 +351,7 @@ class UI {
     // значит, onSave сам позаботился о переходе, и стирать нечего.
     document.getElementById(`${id}_save`).addEventListener('click', async () => {
       await onSave?.();
+      document.removeEventListener('keydown', onKey);
       if (document.getElementById(id)) modals.innerHTML = '';
     });
 
@@ -359,7 +398,7 @@ class UI {
       }, () => {
         // «Отмена» / закрытие
         if (!resolved) resolve({ answered: false, answer: null });
-      }, { modal: true }); // strict: клик по оверлею не закрывает окно
+      });
 
       // Автофокус + отправка по Ctrl/Cmd+Enter
       setTimeout(() => {

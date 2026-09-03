@@ -137,7 +137,7 @@ Object.assign(UI.prototype, {
         Можно добавить сразу несколько. Правая кнопка по значку в чате убирает модель из набора.
       </div>
       <div id="cmp_list" style="max-height:50vh;overflow-y:auto;">${await renderGroups()}</div>
-    `, null, null, { wide: true, modal: true });
+    `, null, null, { wide: true });
 
     // Делегирование на контейнер, а не на кнопки: после добавления модели
     // список перерисовывается целиком (новые кнопки — новые DOM-узлы), и
@@ -157,6 +157,64 @@ Object.assign(UI.prototype, {
       };
     }
   },
+
+  // ── Быстрое включение навыка: разобраться с его инструментами ──
+  // Навык может опираться на инструменты, которые сейчас выключены. Тогда
+  // он включается наполовину: указания модель получит, а выполнить их не
+  // сможет — со стороны это выглядит как «навык не работает».
+  // Включать инструменты молча нельзя: это отдельное решение пользователя
+  // (в том числе про инструменты, написанные моделью). Поэтому — разовый
+  // вопрос ровно в момент включения навыка, со списком и галочками.
+  async _offerEnableSkillTools(skill) {
+    let off;
+    try {
+      off = await this.agent.skills.disabledToolsOf(skill);
+    } catch (_) { return; }
+    if (!off || !off.length) return;
+
+    const rows = off.map(t => `
+      <label class="skill-tool-row bound">
+        <input type="checkbox" data-enable-tool="${t.id}" checked>
+        <span class="skill-tool-name">${this._escHtml(t.name)}</span>
+        <span class="skill-tool-state">выключен</span>
+      </label>`).join('');
+
+    // Кнопка «Отмена» здесь — «оставить как есть»: навык уже включён,
+    // отказ касается только инструментов.
+    this._showModal(`🧩 Навык «${this._escHtml(skill.name)}» включён`, `
+      <div style="font-size:13px;color:var(--text-primary);line-height:1.6;margin-bottom:10px;">
+        ${off.length === 1 ? 'Инструмент, на который опирается этот навык, сейчас выключен' :
+          `Инструменты, на которые опирается этот навык, сейчас выключены (${off.length})`} —
+        модель их не получит и вызвать не сможет.
+      </div>
+      <div class="skill-tools-picker">${rows}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.5;">
+        «Сохранить» — включить отмеченные. «Отмена» — оставить как есть:
+        навык всё равно останется включённым, просто без этих действий.
+        Инструменты можно включить позже на вкладке Tools.
+      </div>
+    `, async () => {
+      const ids = [...document.querySelectorAll('[data-enable-tool]')]
+        .filter(cb => cb.checked).map(cb => cb.dataset.enableTool);
+      const names = [];
+      for (const id of ids) {
+        const tool = await this.agent.db.get('tools', id);
+        if (!tool) continue;
+        tool.enabled = true;
+        await this.agent.db.put('tools', tool);
+        names.push(tool.name);
+      }
+      if (!names.length) return;
+      this.renderTools?.();
+      const c = document.getElementById('chat-messages');
+      c?.insertAdjacentHTML('beforeend',
+        `<div class="message system">✅ Для навыка «${this._escHtml(skill.name)}» ` +
+        `${names.length === 1 ? 'включён инструмент' : 'включены инструменты'}: ` +
+        `${this._escHtml(names.join(', '))}.</div>`);
+      if (c) c.scrollTop = c.scrollHeight;
+    });
+  },
+
 
   async updateChatToolbar() {
     const toolbar = document.getElementById('chat-toolbar');
@@ -229,10 +287,15 @@ Object.assign(UI.prototype, {
     const shown = skillsMode === 'all' ? skills : enabled;
     const hiddenCount = skills.length - shown.length;
 
-    const skillChips = shown.map(s => `
-      <span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
-        ${this._escHtml(s.icon)} ${this._escHtml(s.name)}
-      </span>`).join('');
+    // Системный навык показываем, но кликом не переключаем: он действует
+    // всегда. Без него в панели он выглядел бы как выключаемый.
+    const skillChips = shown.map(s => s.locked
+      ? `<span class="chip active chip-locked" title="${this._escHtml(s.description)} Выключить нельзя.">
+           🔒 ${this._escHtml(s.icon)} ${this._escHtml(s.name)}
+         </span>`
+      : `<span class="chip ${s.enabled ? 'active' : ''}" data-skill="${s.id}" title="${this._escHtml(s.description)}">
+           ${this._escHtml(s.icon)} ${this._escHtml(s.name)}
+         </span>`).join('');
 
     // В компактном режиме без включённых навыков панель была бы пустой и
     // непонятной — поясняем, что навыки есть и как их показать.
@@ -270,6 +333,7 @@ Object.assign(UI.prototype, {
     toolbar.querySelectorAll('.chip[data-skill]').forEach(chip => {
       chip.addEventListener('click', async () => {
         const skill = await this.agent.db.get('skills', chip.dataset.skill);
+        if (skill.locked) return;
         skill.enabled = !skill.enabled;
         await this.agent.db.put('skills', skill);
         // В компактном режиме отключённый навык исчезает из панели —
@@ -284,6 +348,13 @@ Object.assign(UI.prototype, {
           c.scrollTop = c.scrollHeight;
         }
         this.updateChatToolbar();
+
+        // Проверка привязанных инструментов — ТОЛЬКО в момент включения
+        // навыка отсюда, и только один раз. Постоянный контроль здесь не
+        // нужен: состояние инструментов пользователь меняет сам и видит
+        // это на вкладке Tools, а навязчивое напоминание в каждом ответе
+        // быстро превратилось бы в шум, который перестают читать.
+        if (skill.enabled) await this._offerEnableSkillTools(skill);
       });
     });
 

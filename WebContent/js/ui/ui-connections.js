@@ -268,7 +268,7 @@ Object.assign(UI.prototype, {
       // и прятать его за лишним кликом незачем.
       this._openProviders.add(saved.id);
       await this._backToProviders();
-    }, () => this._backToProviders(), { modal: true });
+    }, () => this._backToProviders());
 
     document.querySelectorAll('input[name="pe_auth"]').forEach(r => {
       r.addEventListener('change', () => {
@@ -291,7 +291,7 @@ Object.assign(UI.prototype, {
       // Своей формы для сохранения нет — модели добавляются кнопками
       // внутри списка. «Сохранить» здесь равнозначно «Отмена»: закрыть
       // и вернуться к настройкам.
-      () => this._backToProviders(), () => this._backToProviders(), { wide: true, modal: true });
+      () => this._backToProviders(), () => this._backToProviders(), { wide: true });
 
     const res = await reg.fetchAvailable(connId);
     const body = document.getElementById('mp_body');
@@ -453,7 +453,7 @@ Object.assign(UI.prototype, {
       this.updateModelDisplay?.();
       this.updateChatToolbar?.();
       await this._backToProviders();
-    }, () => this._backToProviders(), { modal: true });
+    }, () => this._backToProviders());
 
     // max_tokens следует за окном контекста, пока пользователь не тронул
     // его вручную, — иначе выставленное здесь-же значение по умолчанию

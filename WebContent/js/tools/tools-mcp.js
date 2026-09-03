@@ -42,11 +42,14 @@ Object.assign(ToolsEngine.prototype, {
       if (addr.error) return { error: addr.error };
 
       // ── 2. Таймаут ──
-      // Без него зависший MCP-сервер держит весь ход агента: у fetch
-      // нет собственного предела ожидания, а таймаут в executeTool
-      // отпускает ожидание, но не разрывает соединение.
-      const limits = (this.security && this.security.mcpLimits) || {};
-      const timeoutMs = (limits.timeoutSeconds || 30) * 1000;
+      // Без него зависший MCP-сервер держит весь ход агента: у fetch нет
+      // собственного предела ожидания, а таймаут в executeTool отпускает
+      // ожидание, но не разрывает соединение — поэтому AbortController
+      // здесь нужен свой. А вот ЧИСЛО берётся общее (⚙ Ограничения):
+      // отдельная настройка таймаута у MCP означала лишь два разных
+      // значения на один и тот же вызов и вопрос, какое сработало.
+      const shared = await this._toolLimits();
+      const timeoutMs = (shared.timeoutSeconds || 30) * 1000;
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), timeoutMs);
 
@@ -80,11 +83,11 @@ Object.assign(ToolsEngine.prototype, {
         // Ответ уходит прямо в контекст диалога. Мегабайтный ответ не
         // просто расходует токены — он вытесняет из контекста историю
         // и системный промпт, включая правила поведения агента.
-        const maxChars = (limits.maxResponseChars || 100000);
+        const maxChars = shared.maxResponseChars;
         if (raw.length > maxChars) {
           return {
             error: `Ответ MCP-сервера слишком большой (${raw.length} символов, предел ${maxChars}). ` +
-                   'Уточни запрос или увеличь предел в настройках безопасности.',
+                   'Уточни запрос или увеличь предел в ⚙ Настройки → Ограничения.',
             truncatedPreview: raw.slice(0, 2000),
           };
         }
@@ -377,6 +380,13 @@ Object.assign(ToolsEngine.prototype, {
 
     const tools = (await this.db.getAll('tools')).filter(t => t.mcpServerId === id);
     for (const t of tools) this.unregisterHandler(t.id);
+
+    // Инструменты сервера могли быть привязаны к навыкам — привязки на
+    // удалённое не должны пережить сам инструмент (см. SkillsEngine.forgetTool).
+    try {
+      const sk = this._skills();
+      for (const t of tools) await sk.forgetTool(t.id);
+    } catch (_) { /* без движка навыков просто нечего чистить */ }
 
     if (tools.length) await this.db.deleteAll('tools', tools.map(t => t.id));
     if (folderIds.size) await this.db.deleteAll('folders', Array.from(folderIds));

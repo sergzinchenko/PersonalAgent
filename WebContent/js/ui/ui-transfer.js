@@ -76,7 +76,7 @@ Object.assign(UI.prototype, {
       </div>
       <button class="btn btn-primary btn-sm" id="chats-do-export">📦 Скачать архив</button>
       <span id="chats-exp-status" style="font-size:12px;margin-left:8px;"></span>
-    `, null, null, { modal: true, wide: true });
+    `, null, null, { wide: true });
 
     setTimeout(() => {
       const boxes = () => Array.from(document.querySelectorAll('.chat-sel'));
@@ -164,7 +164,7 @@ Object.assign(UI.prototype, {
       </div>
       <button class="btn btn-primary btn-sm" id="chats-do-import">📥 Загрузить</button>
       <span id="chats-imp-status" style="font-size:12px;margin-left:8px;"></span>
-    `, null, null, { modal: true, wide: true });
+    `, null, null, { wide: true });
 
     setTimeout(() => {
       document.getElementById('chats-do-import')?.addEventListener('click', async () => {
@@ -231,7 +231,7 @@ Object.assign(UI.prototype, {
         <button class="btn btn-primary btn-sm" id="chat-do-export">⬆ Скачать файл</button>
         <span id="chat-exp-status" style="font-size:12px;margin-left:8px;"></span>
       </div>
-    `, null, null, { modal: true });
+    `, null, null);
 
     setTimeout(() => {
       document.getElementById('chat-do-export')?.addEventListener('click', async () => {
@@ -278,7 +278,7 @@ Object.assign(UI.prototype, {
       </div>
       <button class="btn btn-primary btn-sm" id="chat-do-import">⬇ Загрузить чат</button>
       <span id="chat-imp-status" style="font-size:12px;margin-left:8px;"></span>
-    `, null, null, { modal: true });
+    `, null, null);
 
     setTimeout(() => {
       document.getElementById('chat-do-import')?.addEventListener('click', async () => {
@@ -378,7 +378,7 @@ Object.assign(UI.prototype, {
       </div>
       <button class="btn btn-primary btn-sm" id="sel-export-btn">⬆ Скачать зашифрованный архив</button>
       <span id="sel-status" style="font-size:12px;margin-left:8px;"></span>
-    `, null, null, { modal: true, wide: true });
+    `, null, null, { wide: true });
 
     // Все папки-потомки заданной (для охвата «со вложенными»)
     const descendants = (rootId) => {
@@ -567,7 +567,7 @@ Object.assign(UI.prototype, {
       </div>
       <button class="btn btn-primary btn-sm" id="do-import-btn">\u2193 Расшифровать и импортировать</button>
       <span id="imp-status" style="font-size:12px;margin-left:8px;"></span>
-    `, null, null, { modal: true, wide: true });
+    `, null, null, { wide: true });
 
     setTimeout(() => {
       document.getElementById('do-import-btn')?.addEventListener('click', () => this._doImport(section));

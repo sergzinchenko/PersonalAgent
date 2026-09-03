@@ -35,13 +35,32 @@ Object.assign(ToolsEngine.prototype, {
 	    const existing = await this.db.getAll('tools');
 	    const existingIds = new Set(existing.map(t => t.id));
 
+	    const defs = this._allBuiltinDefs();
+
 	    // Досеиваем встроенные tools, которых ещё нет в базе
-	    const missing = this._allBuiltinDefs().filter(def => !existingIds.has(def.id));
+	    const missing = defs.filter(def => !existingIds.has(def.id));
 	    for (const def of missing) {
 	      await this.db.put('tools', def);
 	    }
 
-	    const all = missing.length ? await this.db.getAll('tools') : existing;
+	    // ── Системные инструменты ──
+	    // На них держатся базовые механизмы агента (память, вопрос
+	    // пользователю, объяснение устройства, самодиагностика — см. навык
+	    // «Системный»), поэтому выключить их нельзя. Флаг проставляется и
+	    // состояние выправляется на КАЖДОЙ загрузке, а не только при
+	    // досеивании: в базе, заведённой раньше, эти записи уже есть — и
+	    // могли быть выключены, пока запрета не существовало.
+	    const lockedIds = new Set(defs.filter(d => d.locked).map(d => d.id));
+	    let relocked = 0;
+	    for (const t of existing) {
+	      if (!lockedIds.has(t.id) || (t.locked === true && t.enabled === true)) continue;
+	      t.locked = true;
+	      t.enabled = true;
+	      await this.db.put('tools', t);
+	      relocked++;
+	    }
+
+	    const all = (missing.length || relocked) ? await this.db.getAll('tools') : existing;
 
 	    // Восстанавливаем обработчики MCP-инструментов, не переживающие релоад (см. комментарий выше).
 	    for (const t of all) {

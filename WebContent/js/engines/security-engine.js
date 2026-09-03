@@ -39,11 +39,12 @@ class SecurityEngine {
     // уходят на чужой сервер, а ответ возвращается прямо в контекст
     // модели. Поэтому у него отдельный набор ограничений, а не общие
     // сетевые правила.
+    // Таймаута и предела ответа здесь нет намеренно: они общие для всех
+    // инструментов и живут в settings/limits (⚙ Ограничения). Свои копии
+    // означали бы два разных числа на один и тот же вызов.
     this.mcpLimits = {
       requireHttps: true,        // токен не должен уходить открытым текстом
       allowLocalServers: false,  // localhost — обычный сценарий, но включается вручную
-      timeoutSeconds: 30,
-      maxResponseChars: 100000,  // ответ вытесняет историю из контекста
       markUntrusted: true,       // помечать ответ как данные, а не указания
       maxCallsPerTurn: 15,
     };
@@ -68,7 +69,6 @@ class SecurityEngine {
         .split(/[\s,;]+/).map(h => h.trim().toLowerCase()).filter(Boolean);
     }
     if (patch.maxWritesPerTurn !== undefined) this.maxWritesPerTurn = patch.maxWritesPerTurn;
-    if (patch.maxNetworkPerTurn !== undefined) this.maxNetworkPerTurn = patch.maxNetworkPerTurn;
     if (patch.maxCallsPerToolPerTurn !== undefined) this.maxCallsPerToolPerTurn = patch.maxCallsPerToolPerTurn;
     if (patch.mcpLimits !== undefined) this.mcpLimits = { ...this.mcpLimits, ...patch.mcpLimits };
     if (patch.allowedMcpHosts !== undefined) {
@@ -101,7 +101,7 @@ class SecurityEngine {
     create_folder: 'write', rename_folder: 'write', move_folder: 'write',
     move_item: 'write', move_chat: 'write', chat_folder: 'write',
     create_prompt: 'write', update_prompt: 'write',
-    create_skill: 'write', update_skill: 'write',
+    create_skill: 'write', update_skill: 'write', link_skill_tools: 'write',
     persistent_memory: 'write', export_chat: 'write', export_chats: 'write',
 
     // Разрушительное
@@ -110,6 +110,9 @@ class SecurityEngine {
 
     // Сеть
     http_fetch: 'network',
+    // Через локальный прокси пользователя. Категория та же, но у вызова с
+    // sso:true есть отдельное, более строгое правило в check().
+    proxy_fetch: 'network',
 
     // Исполнение / подмена поведения
     create_tool: 'execute', update_tool: 'execute',
@@ -136,6 +139,27 @@ class SecurityEngine {
   // Возвращает { allow, reason, confirm } — confirm означает «нужен ответ
   // пользователя». Сам вопрос задаёт вызывающая сторона через confirmFn.
   async check(toolName, args, tool) {
+    // ── SSO через прокси: спрашиваем ВСЕГДА ──
+    // Проверка стоит до всего остального, включая режим 'off'. Причина не
+    // в категории операции, а в том, ЧЕМ платят за ошибку: запрос уходит с
+    // доменными правами текущего пользователя Windows (NTLM/Negotiate), а
+    // адрес выбирает модель — в том числе под влиянием текста, пришедшего
+    // из внешнего источника. Поэтому здесь нет ни режима, который это
+    // разрешает молча, ни «больше не спрашивать про этот адрес»
+    // (noRemember): один вопрос = один запрос с чужими правами.
+    if (toolName === 'proxy_fetch' && args && args.sso === true) {
+      const ssoHost = this._hostOf(args);
+      return {
+        allow: true, confirm: true, category: 'network', toolName, args,
+        host: ssoHost, noRemember: true,
+        risks: [
+          'Запрос уйдёт с доменными правами текущего пользователя Windows (SSO)',
+          'Целевой адрес: ' + (ssoHost || '(не распознан)'),
+          'Отвечающий сервер увидит вашу учётную запись — разрешайте только для внутренних серверов, которым доверяете',
+        ],
+      };
+    }
+
     if (this.mode === 'off') return { allow: true };
 
     const cat = this.categoryOf(toolName, tool);
@@ -383,11 +407,14 @@ class SecurityEngine {
     } catch (_) { return null; }
   }
 
+  // Проверяется только потолок изменений: сетевая ветка здесь была
+  // мёртвой — `_overLimit('network')` не вызывался ниоткуда, поэтому
+  // `maxNetworkPerTurn` выглядел настройкой, но ничего не ограничивал.
+  // Сетевые вызовы и так закрыты двумя настоящими потолками: общим числом
+  // вызовов за ход (⚙ Ограничения) и потолком на один инструмент.
+  // Счётчик turn.network при этом остаётся — он нужен статистике хода.
   _overLimit(kind) {
-    const limits = {
-      writes: this.maxWritesPerTurn || 20,
-      network: this.maxNetworkPerTurn || 10,
-    };
+    const limits = { writes: this.maxWritesPerTurn || 20 };
     return this.turn[kind] >= (limits[kind] || Infinity);
   }
 

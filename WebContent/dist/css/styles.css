@@ -22,6 +22,59 @@
   --transition: 0.2s ease;
   --sidebar-w: 280px;
   --header-h: 56px;
+  --tint-soft: rgba(255,255,255,0.02);
+  --overlay-strong: rgba(15,15,20,0.94);
+}
+
+/* ===== ТЕМА: СВЕТЛАЯ =====
+   Тёмная тема — значения по умолчанию в :root выше. Весь остальной
+   CSS написан через var(...), поэтому просто переопределяем те же
+   переменные — новых правил для конкретных элементов не нужно.
+   - Явный выбор "Светлая" (атрибут data-theme="light") побеждает
+     всегда, независимо от настроек ОС.
+   - Режим "Системная" — это ОТСУТСТВИЕ атрибута data-theme; тогда
+     решает медиа-запрос prefers-color-scheme. Если ОС просит тёмную
+     или ничего не сообщает, остаются значения :root выше как есть. */
+:root[data-theme="light"] {
+  --bg-primary: #f3f3f8;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e9e9f2;
+  --bg-hover: #dfe0ee;
+  --text-primary: #1c1c28;
+  --text-secondary: #55556f;
+  --text-muted: #8a8aa0;
+  --accent: #6c5ce7;
+  --accent-light: #5b4bd6;
+  --accent-dark: #4834d4;
+  --success: #00997a;
+  --warning: #a9720a;
+  --danger: #c0392b;
+  --border: #dadae8;
+  --shadow: 0 4px 24px rgba(30,30,60,0.12);
+  --tint-soft: rgba(0,0,0,0.025);
+  --overlay-strong: rgba(255,255,255,0.94);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg-primary: #f3f3f8;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #e9e9f2;
+    --bg-hover: #dfe0ee;
+    --text-primary: #1c1c28;
+    --text-secondary: #55556f;
+    --text-muted: #8a8aa0;
+    --accent: #6c5ce7;
+    --accent-light: #5b4bd6;
+    --accent-dark: #4834d4;
+    --success: #00997a;
+    --warning: #a9720a;
+    --danger: #c0392b;
+    --border: #dadae8;
+    --shadow: 0 4px 24px rgba(30,30,60,0.12);
+    --tint-soft: rgba(0,0,0,0.025);
+    --overlay-strong: rgba(255,255,255,0.94);
+  }
 }
 
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -466,6 +519,19 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 @keyframes statusSpin { to { transform: rotate(360deg); } }
 
+/* Индикатор «этот чат сейчас генерирует ответ» в списке чатов —
+   виден и тогда, когда открыт другой чат (см. this._chatRuns в ui.js). */
+.chat-busy-spinner {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: statusSpin 0.8s linear infinite;
+}
+.sidebar-item.chat-item.chat-busy .title { color: var(--accent-light); }
+
 .typing-indicator {
   display: flex;
   gap: 4px;
@@ -805,6 +871,103 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   background: #fff;
 }
 
+/* Компактный вариант — для строки дерева папок (переключатель всей
+   вложенной группы инструментов сразу, см. _renderSidebarTree). */
+.toggle-switch.sm { width: 28px; height: 16px; flex: 0 0 auto; }
+.toggle-switch.sm .toggle-slider { border-radius: 16px; }
+.toggle-switch.sm .toggle-slider::before { width: 10px; height: 10px; left: 3px; bottom: 3px; }
+.toggle-switch.sm input:checked + .toggle-slider::before { transform: translateX(12px); }
+
+/* «Часть содержимого включена, часть выключена» — третье состояние
+   нативного checkbox (indeterminate ставится только из JS). */
+.toggle-switch input:indeterminate + .toggle-slider { background: var(--text-muted); }
+.toggle-switch input:indeterminate + .toggle-slider::before { transform: translateX(10px); }
+
+/* ===== ПРИВЯЗКА НАВЫК ↔ ИНСТРУМЕНТЫ ===== */
+
+/* Список с галочками в редакторе навыка */
+.skill-tools-picker {
+  max-height: 210px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  padding: 4px;
+}
+
+.skill-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+}
+/* Фильтр в списке прячет строки через row.hidden. Без этого правила
+   ничего не происходило: display:flex выше — правило автора, а
+   [hidden]{display:none} приходит из таблицы стилей браузера и проигрывает
+   ему по специфичности. Внешне это выглядело как «поиск не работает». */
+.skill-tool-row[hidden] { display: none; }
+.skill-tool-row:hover { background: var(--bg-hover); }
+.skill-tool-row.bound { background: rgba(108,92,231,0.12); }
+.skill-tool-row input { width: auto; margin: 0; }
+.skill-tool-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.skill-tool-state {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 7px;
+  flex: 0 0 auto;
+}
+.skill-tool-state.on { color: var(--success); border-color: var(--success); }
+
+/* Привязанные инструменты на карточке навыка */
+.skill-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 4px;
+}
+
+.skill-tool-chip {
+  font-size: 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  color: var(--accent-light);
+  border: 1px solid transparent;
+}
+/* Выключенный инструмент навыку недоступен — видно без наведения */
+.skill-tool-chip.off {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: transparent;
+  text-decoration: line-through;
+}
+
+.skill-tools-warn { font-size: 10px; color: var(--warning); padding: 2px 4px; }
+
+/* Системные навык и инструменты: выключить нельзя */
+.toggle-switch.locked { cursor: not-allowed; opacity: 0.75; }
+.toggle-switch.locked .toggle-slider { background: var(--text-muted); }
+.tool-card.tool-locked { border-left: 3px solid var(--accent); }
+.chip.chip-locked { cursor: default; }
+
+/* Ряд кнопок на карточке (навыки, правка, удаление) */
+.tool-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Навыки, использующие инструмент, — на карточке инструмента */
+.tool-skills {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 6px 0 2px;
+  line-height: 1.5;
+}
+
 /* ===== SKILLS PANEL ===== */
 .skills-container {
   padding: 20px;
@@ -1117,7 +1280,7 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 .tree-folder {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  background: rgba(255,255,255,0.02);
+  background: var(--tint-soft);
 }
 
 .tree-folder-header {
@@ -1221,7 +1384,7 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 /* ===== BOOT ERROR ===== */
 .boot-error {
   position: fixed; inset: 0; z-index: 9999;
-  background: rgba(15,15,20,0.94);
+  background: var(--overlay-strong);
   display: flex; align-items: center; justify-content: center;
   padding: 24px;
 }

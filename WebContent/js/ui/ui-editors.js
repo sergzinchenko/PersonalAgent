@@ -132,10 +132,394 @@ Object.assign(UI.prototype, {
   },
 
 
+  // Та же связь, что в редакторе навыка, но с другой стороны: к каким
+  // навыкам относится ЭТОТ инструмент. Отдельным окном, а не полем в
+  // редакторе инструмента, потому что редактор открывается только у
+  // собственных инструментов — а привязывать нужно и встроенные, и
+  // пришедшие с MCP-сервера.
+  async showToolSkillsModal(toolId) {
+    const tool = await this.agent.db.get('tools', toolId);
+    if (!tool) return;
+
+    const skills = (await this.agent.skills.loadSkills())
+      .slice().sort((a, b) => a.name.localeCompare(b.name));
+    const boundIds = new Set(skills.filter(s => this.agent.skills.toolIdsOf(s).includes(toolId)).map(s => s.id));
+
+    // Системный навык показываем, но снять галочку нельзя: его состав —
+    // часть описания механизмов агента. Живая, но бездействующая галочка
+    // была бы хуже отсутствия — она обещает то, чего не происходит.
+    const rows = skills.map(s => `
+      <label class="skill-tool-row${boundIds.has(s.id) ? ' bound' : ''}" data-filter-name="${this._escHtml(s.name.toLowerCase())}"
+             ${s.locked ? 'title="Системный навык — его состав не меняется"' : ''}>
+        <input type="checkbox" data-skill-of-tool="${s.id}" ${boundIds.has(s.id) ? 'checked' : ''} ${s.locked ? 'disabled' : ''}>
+        <span class="skill-tool-name">${s.locked ? '🔒 ' : ''}${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
+        <span class="skill-tool-state${s.enabled ? ' on' : ''}">${s.enabled ? 'включён' : 'выключен'}</span>
+      </label>`).join('');
+
+    this._showModal(`🧩 Навыки инструмента «${this._escHtml(tool.name)}»`, `
+      <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;">
+        Отметьте навыки, которые пользуются этим инструментом. Один инструмент
+        может участвовать в нескольких навыках.
+        Отметка ничего не включает: ${tool.locked
+          ? 'этот инструмент системный и включён всегда'
+          : `инструмент сейчас <b>${tool.enabled ? 'включён' : 'выключен'}</b>, и это решает только его собственный тумблер`}.
+      </div>
+      ${skills.length ? `
+        <input id="ts_filter" placeholder="Фильтр по названию навыка" style="margin-bottom:6px;">
+        <div class="skill-tools-picker" id="ts_list">${rows}</div>`
+        : '<div style="font-size:12px;color:var(--text-muted);">Навыков пока нет.</div>'}
+    `, async () => {
+      const chosen = [...document.querySelectorAll('[data-skill-of-tool]')]
+        .filter(cb => cb.checked).map(cb => cb.dataset.skillOfTool);
+      await this.agent.skills.setToolSkills(toolId, chosen);
+      this.renderTools();
+      this.renderSkills();
+      this.updateChatToolbar();
+    });
+
+    setTimeout(() => {
+      const list = document.getElementById('ts_list');
+      list?.addEventListener('change', (e) => {
+        if (!e.target.matches('[data-skill-of-tool]')) return;
+        e.target.closest('.skill-tool-row')?.classList.toggle('bound', e.target.checked);
+      });
+      document.getElementById('ts_filter')?.addEventListener('input', (e) => {
+        const q = e.target.value.trim().toLowerCase();
+        list?.querySelectorAll('.skill-tool-row').forEach(row => {
+          row.hidden = !!q && !row.dataset.filterName.includes(q);
+        });
+      });
+    }, 50);
+  },
+
+
+  // ── Генератор файлов локального прокси ──
+  // Прокси — отдельный Node-процесс, и до сих пор его нужно было добыть
+  // самому. Здесь его комплект собирается по заполненной форме: config.js
+  // с подставленными значениями, сам proxy.js и скрипты запуска.
+  //
+  // proxy.js НЕ хранится копией внутри приложения, а забирается с того же
+  // адреса, откуда открыта страница (в dist он тоже кладётся сборкой).
+  // Вторая копия исходника рано или поздно разошлась бы с оригиналом, и
+  // пользователь получал бы прокси, отличающийся от того, что в репозитории.
+  showProxySetupModal() {
+    const cfg = this.proxy || {};
+    let port = 3000;
+    try { port = parseInt(new URL(cfg.baseUrl).port, 10) || 3000; } catch (_) { port = 3000; }
+
+    const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'];
+
+    this._showModal('📦 Файлы локального прокси', `
+      <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+        Соберём комплект для запуска прокси: <code>config.js</code> с вашими значениями,
+        <code>proxy.js</code> и скрипты запуска. Сохранить их нужно в одну папку —
+        браузер спросит, в какую.
+      </div>
+
+      <div class="settings-grid">
+        <div class="form-group">
+          <label>Порт</label>
+          <input id="pg_port" type="number" min="1" max="65535" value="${port}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            На нём прокси слушает запросы от этой страницы.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Максимальный размер запроса, МБ</label>
+          <input id="pg_body_mb" type="number" min="1" max="512" value="10">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Разрешённые хосты (белый список)</label>
+        <input id="pg_allowlist" placeholder="intranet.corp.local, api.example.com — пусто = без ограничений">
+        <div style="font-size:11px;color:var(--warning);margin-top:2px;line-height:1.5;">
+          Пустой список означает, что прокси сходит куда угодно — включая внутреннюю сеть —
+          по просьбе любой страницы, знающей его порт. Для постоянной работы список лучше заполнить.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Разрешённые методы</label>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;">
+          ${METHODS.map(m => `
+            <label style="display:flex;align-items:center;gap:5px;font-weight:400;font-size:12px;">
+              <input type="checkbox" data-pg-method="${m}" style="width:auto;" checked> ${m}
+            </label>`).join('')}
+        </div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:6px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:4px;">SSO (доменная аутентификация)</div>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;">
+          Включается не здесь, а в каждом запросе отдельно (<code>sso: true</code>). Эти значения
+          лишь задают, как прокси будет вызывать <code>curl</code>, когда его об этом попросят.
+        </div>
+        <div class="form-group">
+          <label>Путь к curl</label>
+          <input id="pg_curl" value="curl.exe" placeholder="curl.exe или полный путь">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            На Windows curl с поддержкой SSPI идёт в комплекте системы. На других ОС — <code>curl</code>.
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+          <input type="checkbox" id="pg_ntlm" style="width:auto;" checked> Разрешить NTLM
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400;margin-top:4px;">
+          <input type="checkbox" id="pg_negotiate" style="width:auto;" checked> Разрешить Negotiate (Kerberos)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400;margin-top:4px;">
+          <input type="checkbox" id="pg_insecure" style="width:auto;"> Принимать самоподписанные сертификаты (-k)
+        </label>
+        <div style="font-size:11px;color:var(--warning);margin:2px 0 8px 22px;line-height:1.5;">
+          Отключает проверку сертификата целиком — только для внутренних серверов, где это неизбежно.
+        </div>
+        <div class="settings-grid">
+          <div class="form-group">
+            <label>Таймаут curl, сек</label>
+            <input id="pg_sso_timeout" type="number" min="1" max="600" value="60">
+          </div>
+          <div class="form-group">
+            <label>Предел ответа в SSO-режиме, МБ</label>
+            <input id="pg_sso_mb" type="number" min="1" max="512" value="20">
+          </div>
+        </div>
+      </div>
+
+      <label class="check-row" style="margin-top:8px;">
+        <input type="checkbox" id="pg_set_url" checked> Прописать адрес прокси в настройках агента
+      </label>
+      <div id="pg_result" style="font-size:12px;margin-top:10px;line-height:1.6;"></div>
+    `, async () => {
+      const num = (id, def) => { const v = parseInt(document.getElementById(id)?.value, 10); return v > 0 ? v : def; };
+      const methods = [...document.querySelectorAll('[data-pg-method]')]
+        .filter(cb => cb.checked).map(cb => cb.dataset.pgMethod);
+      const allowlist = (document.getElementById('pg_allowlist')?.value || '')
+        .split(/[\s,;]+/).map(h => h.trim()).filter(Boolean);
+
+      const opts = {
+        port: num('pg_port', 3000),
+        methods: methods.length ? methods : ['GET'],
+        allowlist,
+        bodyMb: num('pg_body_mb', 10),
+        curlBin: (document.getElementById('pg_curl')?.value || 'curl.exe').trim() || 'curl.exe',
+        useNtlm: !!document.getElementById('pg_ntlm')?.checked,
+        useNegotiate: !!document.getElementById('pg_negotiate')?.checked,
+        insecure: !!document.getElementById('pg_insecure')?.checked,
+        ssoTimeout: num('pg_sso_timeout', 60),
+        ssoMb: num('pg_sso_mb', 20),
+      };
+
+      const files = [
+        { name: 'config.js', text: this._buildProxyConfigJs(opts) },
+        { name: 'start-proxy.bat', text: this._buildProxyLauncher('bat') },
+        { name: 'start-proxy.sh', text: this._buildProxyLauncher('sh') },
+      ];
+
+      // proxy.js берём с адреса, откуда открыто приложение. Если его там
+      // нет (страницу открыли из папки без proxy/), честно говорим об этом
+      // и отдаём остальное: config.js без proxy.js бесполезен не полностью —
+      // его можно положить рядом с уже имеющимся прокси.
+      let proxyJsError = null;
+      try {
+        const r = await fetch('proxy/proxy.js', { cache: 'no-store' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        files.unshift({ name: 'proxy.js', text: await r.text() });
+      } catch (e) {
+        proxyJsError = e.message;
+      }
+
+      const saved = await this._saveGeneratedFiles(files);
+      if (document.getElementById('pg_set_url')?.checked) {
+        this.proxy = { ...this.proxy, baseUrl: 'http://localhost:' + opts.port };
+        await this.agent.db.put('settings', { key: 'proxy', ...this.proxy });
+      }
+
+      const list = files.map(f => f.name).join(', ');
+      await this._confirm(
+        (saved.ok
+          ? `Сохранено в выбранную папку: ${list}.`
+          : saved.downloaded
+            ? `Папку выбрать не удалось (${saved.reason}), файлы скачаны по одному: ${list}.`
+            : `Не удалось сохранить файлы: ${saved.reason}`) +
+        (proxyJsError
+          ? `\n\nproxy.js получить не удалось (${proxyJsError}) — возьмите его из папки proxy/ репозитория.`
+          : '') +
+        (saved.ok || saved.downloaded
+          ? '\n\nЗапуск: start-proxy.bat (Windows) или sh start-proxy.sh. Нужен установленный Node.js.'
+          : ''),
+        { title: 'Файлы прокси' });
+    }, null, { wide: true });
+  },
+
+
+  // config.js собирается с комментариями, а не голыми значениями: файл
+  // правят руками после генерации, и без пояснений «allowlist: []» через
+  // месяц выглядит как «тут ничего не нужно».
+  _buildProxyConfigJs(o) {
+    const q = (s) => "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+    return `// Конфигурация локального прокси. Сгенерирована из ⚙ Настройки → Безопасность.
+// Правьте значения и перезапускайте proxy.js — переменные окружения не нужны.
+module.exports = {
+  // Порт, на котором прокси слушает входящие запросы из браузера.
+  port: ${o.port},
+
+  // Разрешённые HTTP-методы. GET/HEAD тела не имеют, остальные поддерживаются полностью.
+  allowedMethods: [${o.methods.map(q).join(', ')}],
+
+  // Белый список хостов, куда прокси разрешено ходить (защита от SSRF —
+  // без него любая страница, знающая порт прокси, может ходить куда угодно
+  // от имени вашей локальной машины). Пустой массив = ограничений нет.
+  allowlist: [${o.allowlist.map(q).join(', ')}],
+
+  // Максимальный размер тела входящего запроса от браузера, в байтах.
+  maxRequestBodyBytes: ${o.bodyMb} * 1024 * 1024, // ${o.bodyMb} MB
+
+  // Сколько байт тела запроса/ответа печатать в консоль при логировании
+  // (клиенту пересылается всё целиком, лимит только для лога).
+  maxLogBytes: 4096,
+
+  // Отключить цветной (ANSI) вывод — удобно, если логи пишутся в файл.
+  noColor: false,
+
+  // ---- SSO: аутентификация к целевому серверу через curl (NTLM/Negotiate) ----
+  // Включается на конкретный запрос заголовком X-Use-Sso: 1 или ?sso=1 —
+  // остальные запросы всегда идут обычным путём через http/https.
+  sso: {
+    // Путь к исполняемому файлу curl.
+    curlBin: ${q(o.curlBin)},
+
+    // Механизмы аутентификации, разрешённые curl. На Windows с пустыми
+    // user:pass это даёт SSO текущего пользователя через SSPI, без пароля.
+    useNtlm: ${o.useNtlm},
+    useNegotiate: ${o.useNegotiate},
+
+    // -k у curl — принимать самоподписанные сертификаты.
+    insecure: ${o.insecure},
+
+    // Таймаут одного запроса curl, в секундах.
+    timeoutSec: ${o.ssoTimeout},
+
+    // Предел ответа в SSO-режиме: здесь ответ буферизуется в памяти целиком.
+    maxResponseBytes: ${o.ssoMb} * 1024 * 1024, // ${o.ssoMb} MB
+  },
+};
+`;
+  },
+
+
+  _buildProxyLauncher(kind) {
+    if (kind === 'bat') {
+      return [
+        '@echo off',
+        'rem Запуск локального прокси. Файл должен лежать рядом с proxy.js и config.js.',
+        'cd /d "%~dp0"',
+        'where node >nul 2>nul || (echo Node.js не найден в PATH. Установите его: https://nodejs.org && pause && exit /b 1)',
+        'node proxy.js',
+        'rem Окно не закрывается сразу — иначе причину падения не прочитать.',
+        'pause',
+        '',
+      ].join('\r\n');
+    }
+    return [
+      '#!/bin/sh',
+      '# Запуск локального прокси. Файл должен лежать рядом с proxy.js и config.js.',
+      'cd "$(dirname "$0")" || exit 1',
+      'command -v node >/dev/null 2>&1 || { echo "Node.js не найден в PATH: https://nodejs.org"; exit 1; }',
+      'exec node proxy.js',
+      '',
+    ].join('\n');
+  },
+
+
+  // Сохранение пачки файлов в выбранную пользователем папку. Fallback —
+  // обычное скачивание по одному: File System Access есть не везде, и
+  // остаться совсем без файлов из-за этого пользователь не должен.
+  async _saveGeneratedFiles(files) {
+    if (typeof window.showDirectoryPicker === 'function') {
+      try {
+        const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+        for (const f of files) {
+          const handle = await dir.getFileHandle(f.name, { create: true });
+          const w = await handle.createWritable();
+          await w.write(f.text);
+          await w.close();
+        }
+        return { ok: true };
+      } catch (e) {
+        // Отмена выбора папки — не ошибка и не повод скачивать файлы,
+        // которых пользователь мог и не захотеть.
+        if (e && e.name === 'AbortError') return { ok: false, downloaded: false, reason: 'выбор папки отменён' };
+        for (const f of files) this.agent.tools._downloadFile(f.text, f.name, 'text/plain');
+        return { ok: false, downloaded: true, reason: e.message };
+      }
+    }
+    for (const f of files) this.agent.tools._downloadFile(f.text, f.name, 'text/plain');
+    return { ok: false, downloaded: true, reason: 'браузер не поддерживает выбор папки' };
+  },
+
+
+  // Системный навык — только просмотр. Отдельное окно, а не форма с
+  // заблокированными полями: disabled-поля выглядят как «сломалось»,
+  // а здесь нужно объяснить, ПОЧЕМУ его не правят.
+  async showSystemSkillModal(skill) {
+    const tools = await this.agent.skills.toolsOfSkill(skill);
+    this._showModal(`🔒 ${this._escHtml(skill.icon)} ${this._escHtml(skill.name)}`, `
+      <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+        Системный навык описывает устройство самого агента — память, подтверждение
+        операций, судьбу выключенных инструментов, подрезку истории. Он участвует
+        в <b>каждом</b> запросе, идёт <b>перед</b> остальными навыками, и его правила
+        имеют приоритет над ними. Поэтому его нельзя выключить, удалить или изменить:
+        правка тихо поменяла бы основания, на которые опирается всё остальное поведение.
+      </div>
+      <div class="form-group">
+        <label>Описание</label>
+        <div style="font-size:13px;color:var(--text-primary);">${this._escHtml(skill.description)}</div>
+      </div>
+      <div class="form-group">
+        <label>Инструменты навыка (тоже неотключаемые)</label>
+        <div class="skill-tools">
+          ${tools.map(t => `<span class="skill-tool-chip">${this._escHtml(t.name)}</span>`).join('') ||
+            '<span style="font-size:12px;color:var(--text-muted);">нет</span>'}
+        </div>
+      </div>
+      <div class="form-group">
+        <label>System Prompt</label>
+        <div class="tool-params" style="white-space:pre-wrap;max-height:40vh;overflow:auto;">${this._escHtml(skill.systemPrompt)}</div>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
+        Нужно другое поведение — не меняйте системный навык, а добавьте свой:
+        его указания применяются поверх, но не отменяют системные.
+      </div>
+    `, null, null, { wide: true });
+  },
+
+
   showAddSkillModal(editId = null) {
     const loadAndShow = async () => {
       const skill = editId ? await this.agent.db.get('skills', editId) : null;
+      // Системный навык не редактируется: он описывает устройство самого
+      // агента и участвует в каждом запросе. Правка его текста тихо меняла
+      // бы правила, на которые опирается всё остальное, — включая то, как
+      // агент объясняет отказы политики и судьбу выключенных инструментов.
+      // Показываем как есть, только на чтение.
+      if (skill?.locked) return this.showSystemSkillModal(skill);
+
       const title = skill ? 'Редактировать Skill' : 'Новый Skill';
+
+      // Привязка к инструментам. Отмеченные не включаются и не выключаются —
+      // это связь «чем пользуется навык», а доступность по-прежнему решает
+      // собственный тумблер инструмента (см. комментарий в SkillsEngine).
+      const allTools = (await this.agent.tools.loadTools())
+        .slice().sort((a, b) => a.name.localeCompare(b.name));
+      const boundIds = new Set(this.agent.skills.toolIdsOf(skill));
+
+      const toolRows = allTools.map(t => `
+        <label class="skill-tool-row${boundIds.has(t.id) ? ' bound' : ''}" data-filter-name="${this._escHtml(t.name.toLowerCase())}">
+          <input type="checkbox" data-skill-tool="${t.id}" ${boundIds.has(t.id) ? 'checked' : ''}>
+          <span class="skill-tool-name">${t.mcpServerId ? '🧩 ' : ''}${this._escHtml(t.name)}</span>
+          <span class="skill-tool-state${t.enabled ? ' on' : ''}">${t.enabled ? 'включён' : 'выключен'}</span>
+        </label>`).join('');
 
       this._showModal(title, `
         <div class="form-group">
@@ -163,7 +547,22 @@ Object.assign(UI.prototype, {
           <label>System Prompt</label>
           <textarea id="sk_prompt" rows="6">${skill ? this._escHtml(skill.systemPrompt) : ''}</textarea>
         </div>
+        <div class="form-group">
+          <label>Инструменты навыка <span id="sk_tools_count" style="color:var(--text-muted);font-weight:400;"></span></label>
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;line-height:1.5;">
+            Отметьте, чем пользуется этот навык. Один инструмент может быть привязан
+            к нескольким навыкам. Отметка НЕ включает инструмент: доступность
+            по-прежнему решает его собственный тумблер на вкладке Tools —
+            привязанный, но выключенный будет назван модели как недоступный.
+          </div>
+          ${allTools.length ? `
+            <input id="sk_tools_filter" placeholder="Фильтр по имени инструмента" style="margin-bottom:6px;">
+            <div class="skill-tools-picker" id="sk_tools_list">${toolRows}</div>`
+            : '<div style="font-size:12px;color:var(--text-muted);">Инструментов пока нет.</div>'}
+        </div>
       `, async () => {
+        const toolIds = [...document.querySelectorAll('[data-skill-tool]')]
+          .filter(cb => cb.checked).map(cb => cb.dataset.skillTool);
         const obj = {
           id: editId || 'skill_' + uid(),
           icon: document.getElementById('sk_icon').value || '🤖',
@@ -172,12 +571,38 @@ Object.assign(UI.prototype, {
           category: document.getElementById('sk_cat').value,
           systemPrompt: document.getElementById('sk_prompt').value.trim(),
           enabled: skill?.enabled ?? false,
+          toolIds,
           parentId: editId ? (skill?.parentId ?? null) : (this.folderSelection.skills || null),
         };
         await this.agent.db.put('skills', obj);
         this.renderSkills();
         this.updateChatToolbar();
       });
+
+      // Фильтр и счётчик отмеченного. Инструментов бывает много (одни
+      // только встроенные — четвёртый десяток), без поиска список
+      // превращается в прокрутку вслепую.
+      setTimeout(() => {
+        const list = document.getElementById('sk_tools_list');
+        const counter = document.getElementById('sk_tools_count');
+        const syncCount = () => {
+          if (!counter) return;
+          const n = document.querySelectorAll('[data-skill-tool]:checked').length;
+          counter.textContent = n ? `— отмечено ${n}` : '— ничего не отмечено';
+        };
+        syncCount();
+        list?.addEventListener('change', (e) => {
+          if (!e.target.matches('[data-skill-tool]')) return;
+          e.target.closest('.skill-tool-row')?.classList.toggle('bound', e.target.checked);
+          syncCount();
+        });
+        document.getElementById('sk_tools_filter')?.addEventListener('input', (e) => {
+          const q = e.target.value.trim().toLowerCase();
+          list?.querySelectorAll('.skill-tool-row').forEach(row => {
+            row.hidden = !!q && !row.dataset.filterName.includes(q);
+          });
+        });
+      }, 50);
     };
     loadAndShow();
   },

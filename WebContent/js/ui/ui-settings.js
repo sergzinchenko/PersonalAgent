@@ -8,9 +8,9 @@ Object.assign(UI.prototype, {
 
 
   // ──────────────────────────────────────────────
-  //  showSettingsModal — вызывается с modal: true,
-  //  чтобы клик по оверлею НЕ закрывал окно.
-  //  Настройки сгруппированы по вкладкам: Подключение / Модель / Журналирование.
+  //  Настройки сгруппированы по вкладкам:
+  //  Провайдеры и модели / Ограничения / Отображение / Безопасность / Журналирование.
+  //  Окно, как и все прочие, строго модально — см. _showModal.
   // ──────────────────────────────────────────────
   showSettingsModal() {
     const llm = this.agent.llm;
@@ -82,10 +82,30 @@ Object.assign(UI.prototype, {
           <label>Максимум вызовов инструментов за ответ</label>
           <input id="s_max_calls" type="number" min="0" value="${this.limits.maxToolCallsPerTurn}">
         </div>
+        <div class="form-group">
+          <label>Предел ответа инструмента, символов</label>
+          <input id="s_max_resp_chars" type="number" min="500" step="500" value="${this.limits.maxToolResponseChars}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Сколько символов ответа попадёт в контекст. Действует на все внешние
+            каналы сразу: MCP-серверы, <code>proxy_fetch</code>, <code>http_fetch</code>.
+            Большой ответ вытесняет из контекста историю переписки и системный промпт.
+          </div>
+        </div>
         </div>
       </div>
 
       <div class="settings-tab-panel" data-settings-panel="display" hidden>
+        <div class="form-group">
+          <label>Тема оформления</label>
+          <select id="s_theme">
+            <option value="system" ${this.theme === 'system' ? 'selected' : ''}>Системная (по умолчанию)</option>
+            <option value="dark" ${this.theme === 'dark' ? 'selected' : ''}>Тёмная</option>
+            <option value="light" ${this.theme === 'light' ? 'selected' : ''}>Светлая</option>
+          </select>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+            «Системная» следует за настройкой оформления вашей ОС/браузера.
+          </div>
+        </div>
         <div class="form-group">
           <label>Детализация вызовов инструментов в чате</label>
           <select id="s_tool_verbosity">
@@ -219,18 +239,13 @@ Object.assign(UI.prototype, {
             </div>
           </div>
 
-          <div style="display:flex;gap:8px;">
-            <div class="form-group" style="flex:1;">
-              <label>Таймаут, сек</label>
-              <input id="s_mcp_timeout" type="number" min="1" max="300" value="${this.agent.security.mcpLimits.timeoutSeconds || 30}">
-            </div>
-            <div class="form-group" style="flex:1;">
-              <label>Предел ответа, символов</label>
-              <input id="s_mcp_size" type="number" min="1000" step="1000" value="${this.agent.security.mcpLimits.maxResponseChars || 100000}">
-            </div>
-            <div class="form-group" style="flex:1;">
-              <label>Вызовов за ответ</label>
-              <input id="s_mcp_calls" type="number" min="1" max="200" value="${this.agent.security.mcpLimits.maxCallsPerTurn || 15}">
+          <div class="form-group">
+            <label>Вызовов MCP за ответ</label>
+            <input id="s_mcp_calls" type="number" min="1" max="200" value="${this.agent.security.mcpLimits.maxCallsPerTurn || 15}">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+              Отдельный, более узкий потолок именно для MCP — поверх общего числа
+              вызовов за ответ на вкладке «Ограничения».
+              Таймаут и предел ответа у MCP не свои: действуют общие оттуда же.
             </div>
           </div>
 
@@ -241,6 +256,53 @@ Object.assign(UI.prototype, {
 
           <div class="form-group" style="margin-top:10px;">
             <button class="btn btn-secondary btn-sm" id="sec-show-mcp">🔌 Показать подключённые MCP-серверы</button>
+          </div>
+        </div>
+
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:14px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Локальный прокси</div>
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;">
+            Отдельный процесс на вашей машине (<code>node proxy/proxy.js</code>), через который
+            инструмент <b>proxy_fetch</b> обходит CORS и достаёт внутренние адреса.
+            Пока адрес не задан, а сам инструмент не включён на вкладке Tools, агент им не пользуется.
+            Свой белый список хостов у прокси задаётся в его <code>proxy/config.js</code>.
+          </div>
+
+          <div class="form-group">
+            <label>Адрес прокси</label>
+            <input id="s_proxy_url" value="${this._escHtml(this.proxy?.baseUrl || '')}"
+                   placeholder="http://localhost:3000">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+              Порт берётся из <code>proxy/config.js</code> (по умолчанию 3000). Пусто = инструмент отключён.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+              <input type="checkbox" id="s_proxy_sso" style="width:auto;" ${this.proxy?.allowSso ? 'checked' : ''}>
+              Разрешить режим SSO (доменная аутентификация)
+            </label>
+            <div style="font-size:11px;color:var(--warning);margin:2px 0 0 22px;line-height:1.5;">
+              В этом режиме прокси обращается к цели через curl с правами вашей учётной записи Windows
+              (NTLM/Negotiate), и целевой сервер видит, кто вы. Адрес при этом выбирает модель, поэтому
+              каждый такой запрос подтверждается вручную — независимо от режима выше, и без варианта
+              «больше не спрашивать».
+            </div>
+          </div>
+
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
+            Предел ответа — общий для всех внешних каналов, он на вкладке «⏱ Ограничения».
+            В отдельном вызове его можно понизить параметром <code>max_chars</code>.
+          </div>
+
+          <div class="form-group">
+            <button class="btn btn-secondary btn-sm" id="sec-check-proxy">🔌 Проверить прокси</button>
+            <button class="btn btn-secondary btn-sm" id="sec-gen-proxy">📦 Сгенерировать файлы прокси</button>
+            <span id="proxy_check_result" style="font-size:12px;margin-left:8px;"></span>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+              Генератор соберёт <code>config.js</code> по вашим значениям, приложит
+              <code>proxy.js</code> и скрипты запуска и предложит сохранить всё в одну папку.
+            </div>
           </div>
         </div>
 
@@ -301,9 +363,14 @@ Object.assign(UI.prototype, {
         maxTurnSeconds: Math.max(0, parseInt(document.getElementById('s_max_turn_sec').value) || 0),
         toolTimeoutSeconds: Math.max(0, parseInt(document.getElementById('s_tool_timeout_sec').value) || 0),
         maxToolCallsPerTurn: Math.max(0, parseInt(document.getElementById('s_max_calls').value) || 0),
+        maxToolResponseChars: Math.max(500, parseInt(document.getElementById('s_max_resp_chars').value) || 20000),
       };
       this.limits = limits;
       await this.agent.db.put('settings', { key: 'limits', ...limits });
+
+      // Тема оформления.
+      this.applyTheme(document.getElementById('s_theme').value);
+      await this.agent.db.put('settings', { key: 'theme', value: this.theme });
 
       // Отображение хода вызова инструментов.
       this.toolVerbosity = document.getElementById('s_tool_verbosity').value;
@@ -330,6 +397,16 @@ Object.assign(UI.prototype, {
       this.agent.security.configure(secCfg);
       await this.agent.db.put('settings', { key: 'security', ...secCfg });
 
+      // Локальный прокси (инструмент proxy_fetch). Адрес не секрет,
+      // но по нему ходят запросы с правами пользователя — храним отдельным
+      // ключом, а не внутри security, чтобы не смешивать политику
+      // подтверждений с настройкой канала.
+      this.proxy = {
+        baseUrl: (document.getElementById('s_proxy_url')?.value || '').trim(),
+        allowSso: !!document.getElementById('s_proxy_sso')?.checked,
+      };
+      await this.agent.db.put('settings', { key: 'proxy', ...this.proxy });
+
       // Журналирование: значения не секретные, храним как есть (без шифрования).
       const loggingConfig = {
         llmDebug: document.getElementById('s_debug_llm').checked,
@@ -342,7 +419,7 @@ Object.assign(UI.prototype, {
       this.updateConnectionStatus();
       this.updateModelDisplay();
       this.updateChatToolbar();
-    }, null, { modal: true, wide: true }); // ← strict modal: overlay click does NOT close
+    }, null, { wide: true });
 
     setTimeout(() => {
       // Переход к списку подключений. Настройки при этом закрываются:
@@ -383,6 +460,33 @@ Object.assign(UI.prototype, {
 
       document.getElementById('sec-show-audit')?.addEventListener('click', () => this.showSecurityAudit());
       document.getElementById('sec-show-mcp')?.addEventListener('click', () => this.showMcpServers());
+
+      // Проверка прокси. Берём адрес прямо из поля, а не из сохранённых
+      // настроек: проверять хочется ДО сохранения формы, иначе «проверить»
+      // означало бы «сначала сохрани, потом проверь, потом снова открой».
+      // Генератор открывается поверх настроек. Окно настроек при этом
+      // закрывается (два окна друг над другом — верный способ потерять,
+      // где ты что менял), поэтому текущий адрес прокси генератор берёт
+      // из уже сохранённого this.proxy, а не из поля формы.
+      document.getElementById('sec-gen-proxy')?.addEventListener('click', () => this.showProxySetupModal());
+
+      document.getElementById('sec-check-proxy')?.addEventListener('click', async () => {
+        const out = document.getElementById('proxy_check_result');
+        const base = (document.getElementById('s_proxy_url')?.value || '').trim();
+        if (!base) { out.style.color = 'var(--warning)'; out.textContent = 'Адрес не задан'; return; }
+        out.style.color = 'var(--text-muted)';
+        out.textContent = 'Проверяю…';
+        try {
+          // Запрос без url= — прокси штатно отвечает 400 с описанием, и это
+          // ровно то, что нужно: значит, он слушает и отвечает.
+          const r = await fetch(base.replace(/\/+$/, '') + '/', { method: 'GET' });
+          out.style.color = 'var(--success)';
+          out.textContent = `Прокси отвечает (HTTP ${r.status})`;
+        } catch (e) {
+          out.style.color = 'var(--danger)';
+          out.textContent = 'Не отвечает — запущен ли «node proxy/proxy.js»?';
+        }
+      });
 
     }, 50);
   },

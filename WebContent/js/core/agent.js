@@ -28,6 +28,7 @@ class AIAgent {
     this.security = new SecurityEngine();
     this.tools.folders = this.folders;
     this.tools.files = this.files;   // доступ к файлам из инструментов
+    this.tools.skills = this.skills; // связь «навык ↔ инструменты» из tools
     this.tools.security = this.security; // единая точка проверки операций
 
     // Реестр провайдеров и моделей. Автоматического переключения нет:
@@ -85,6 +86,11 @@ class AIAgent {
     this.ui = new UI(this);
     this.tools.ui = this.ui;
 
+    // Тема оформления — как можно раньше после создания UI, чтобы
+    // окно не мигало тёмным перед переключением на светлую/системную.
+    const themeSetting = await this.db.get('settings', 'theme');
+    this.ui.applyTheme(themeSetting?.value);
+
 
     // Пользовательские ограничения работы с tools и настройки отображения.
     // Применяем ПОСЛЕ создания UI (значения живут в нём), перекрывая дефолты
@@ -100,6 +106,15 @@ class AIAgent {
       if (display.filesContextMode) this.ui.filesContextMode = display.filesContextMode;
       if (display.skillsPanelMode) this.ui.skillsPanelMode = display.skillsPanelMode;
     }
+    // Локальный прокси: форма настроек читает значения из this.ui.proxy.
+    // Сам инструмент proxy_fetch берёт их напрямую из БД на каждый вызов —
+    // здесь только то, что нужно интерфейсу.
+    const proxy = await this.db.get('settings', 'proxy');
+    if (proxy) {
+      const { key, ...values } = proxy;
+      this.ui.proxy = { ...this.ui.proxy, ...values };
+    }
+
     const context = await this.db.get('settings', 'context');
     if (context) {
       if (typeof context.contextLimit === 'number') this.ui.contextLimit = context.contextLimit;
