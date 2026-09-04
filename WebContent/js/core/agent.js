@@ -13,6 +13,7 @@ class AIAgent {
     this.artifacts = null;
     this.tasks = null;
     this.security = null;
+    this.about = null;
     this.models = null;
     this.ui = null;
   }
@@ -30,6 +31,12 @@ class AIAgent {
     this.artifacts = new ArtifactsEngine(this.db);
     this.tasks = new TasksEngine(this.db);
     this.security = new SecurityEngine();
+    // Имя агента и история его доработок. Поднимается рано: имя уходит
+    // в системный промпт, то есть нужно раньше первого запроса к модели.
+    this.about = new AboutEngine(this.db);
+    await this.about.load();
+    this.skills.about = this.about;   // имя агента в системном промпте
+    this.tools.about = this.about;    // agent_name и whats_new
     this.tools.folders = this.folders;
     this.tools.files = this.files;   // доступ к файлам из инструментов
     this.tools.artifacts = this.artifacts; // чтение больших результатов вне контекста
@@ -131,6 +138,12 @@ class AIAgent {
     const layout = await this.db.get('settings', 'layout');
     this.ui.applyLayout(layout);
 
+    // Подпись в шапке и номер релиза. До первого запуска имени нет —
+    // тогда в шапке стоит подпись по умолчанию, а спросим мы ниже,
+    // когда интерфейс уже собран и вопрос не повиснет в пустоте.
+    this.ui.applyAgentName(this.about.name);
+    await this.ui.updateReleaseBadge();
+
     this.ui.updateConnectionStatus();
 
     // Открываем последний использованный чат, а не пустое состояние: без
@@ -157,6 +170,19 @@ class AIAgent {
       if (interrupted) console.warn('Прерванных ходов найдено:', interrupted);
     } catch (e) {
       console.error('Не удалось разобрать прерванные ходы', e);
+    }
+
+    // ── Знакомство и «Что нового» ──
+    // Строго в этом порядке и в самом конце: сначала пользователь даёт
+    // агенту имя (без него агент не знает, как себя называть, — см.
+    // engines/about-engine.js), и только потом ему показывают, что нового.
+    // Два окна разом, да ещё поверх непрочитанного предложения продолжить
+    // прерванный ход, — это не знакомство, а завал.
+    try {
+      if (!this.about.name) await this.ui.askAgentName({ first: true });
+      await this.ui.checkWhatsNew();
+    } catch (e) {
+      console.error('Знакомство и история доработок: сбой', e);
     }
 
     console.log('🚀 AI Agent initialized');

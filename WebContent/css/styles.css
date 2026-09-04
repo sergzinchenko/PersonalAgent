@@ -21,6 +21,7 @@
   --shadow: 0 4px 24px rgba(0,0,0,0.4);
   --transition: 0.2s ease;
   --sidebar-w: 280px;
+  --plan-w: 300px;
   --header-h: 56px;
   --tint-soft: rgba(255,255,255,0.02);
   --overlay-strong: rgba(15,15,20,0.94);
@@ -90,10 +91,14 @@ body {
 /* ===== LAYOUT ===== */
 #app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  /* Третья колонка — панель плана. Она нулевой ширины, пока плана нет:
+     так у раскладки не появляется второго набора правил, а появление
+     панели — это одна переменная, а не перестройка сетки. */
+  grid-template-columns: var(--sidebar-w) 1fr 0;
   grid-template-rows: var(--header-h) 1fr;
   height: 100vh;
 }
+#app.plan-open { grid-template-columns: var(--sidebar-w) 1fr var(--plan-w); }
 
 /* ===== HEADER ===== */
 #header {
@@ -114,6 +119,31 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   white-space: nowrap;
+}
+
+/* Счётчик релизов. Мелко и нейтрально: это отметка версии, а не
+   элемент управления, но кликом открывается история доработок. */
+#release-badge {
+  align-self: center;
+  margin-left: -8px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: inherit;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition);
+}
+#release-badge:hover { color: var(--accent-light); border-color: var(--accent); }
+/* Есть непрочитанное — значок перестаёт быть нейтральным. */
+#release-badge.has-unread {
+  color: var(--accent-light);
+  border-color: var(--accent);
+  background: rgba(108,92,231,0.12);
 }
 
 #header .tabs {
@@ -163,7 +193,8 @@ body {
 /* Свёрнутое состояние: панель убирается целиком, ширину колонки
    обнуляем на #app (см. .sidebar-collapsed), поэтому здесь достаточно
    спрятать содержимое. */
-#app.sidebar-collapsed { grid-template-columns: 0 1fr; }
+#app.sidebar-collapsed { grid-template-columns: 0 1fr 0; }
+#app.sidebar-collapsed.plan-open { grid-template-columns: 0 1fr var(--plan-w); }
 #app.sidebar-collapsed #sidebar { display: none; }
 
 /* Полоса для перетаскивания правой границы панели.
@@ -480,9 +511,12 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 .message p { margin-bottom: 8px; }
 .message p:last-child { margin-bottom: 0; }
 
-/* Панель хода работы агента */
+/* Панель хода работы агента.
+   Живёт над полем ввода (см. #agent-status-host в index.html), а не в
+   ленте сообщений: в ленте её уносило вверх растущим ответом ровно
+   тогда, когда она нужнее всего. */
+#agent-status-host { margin-bottom: 8px; }
 .agent-status {
-  align-self: center;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -759,6 +793,95 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 .plan-step.plan-doing .plan-title { color: var(--accent-light); font-weight: 600; }
 .plan-step.plan-failed .plan-mark { color: var(--danger); }
 .chip.plan-chip { cursor: pointer; }
+
+/* ── Панель плана справа ──
+   Оглавление работы, а не часть переписки: поэтому вынесена из ленты
+   в собственную колонку (см. #app.plan-open). */
+#plan-panel {
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* Специфичнее, чем #plan-panel выше: иначе display:flex победил бы
+   стандартное правило [hidden] и панель осталась бы на экране. */
+#plan-panel[hidden] { display: none; }
+
+.plan-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.plan-panel-title { font-size: 13px; font-weight: 600; color: var(--text-primary); flex: 1; }
+#plan-panel-hide {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: var(--radius);
+}
+#plan-panel-hide:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.plan-panel-body { padding: 12px 14px; overflow-y: auto; flex: 1; }
+.plan-goal {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.plan-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.plan-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+.plan-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+/* Шаг «в работе» подсвечивается фоном: в панели, в отличие от окна,
+   важнее всего ответ на вопрос «чем агент занят прямо сейчас». */
+.plan-panel-body .plan-step { padding: 4px 6px; border-radius: var(--radius); }
+.plan-panel-body .plan-step.plan-doing { background: var(--tint-soft); }
+.plan-facts { margin-top: 12px; }
+.plan-facts-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 4px;
+}
+.plan-facts ul { margin: 0; padding-left: 16px; }
+.plan-facts li { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+.plan-panel-actions { margin-top: 14px; }
+.plan-panel-hint { font-size: 10px; color: var(--text-muted); margin-top: 10px; line-height: 1.5; }
+
+/* Вызовы, которыми агент ведёт план, показываются одной строкой при
+   любой выбранной детализации: содержимое плана целиком видно в панели
+   справа, а десять подробных блоков «отметил шаг» вытесняли из ленты
+   сам разговор. */
+.message.tool-call.tool-plan {
+  padding: 4px 10px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.message.tool-call.tool-plan .tool-compact { font-size: 11px; }
 
 /* Свёрнутая часть переписки: служебная запись, по умолчанию сложена. */
 .message.system.context-summary { border-left: 2px solid var(--warning); }
@@ -1284,8 +1407,14 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 /* ===== RESPONSIVE ===== */
 @media (max-width: 768px) {
-  #app { grid-template-columns: 1fr; }
+  #app,
+  #app.plan-open,
+  #app.sidebar-collapsed,
+  #app.sidebar-collapsed.plan-open { grid-template-columns: 1fr; }
   #sidebar { display: none; }
+  /* На узком экране панель плана отняла бы у переписки половину ширины.
+     План при этом не пропадает: он остаётся чипом в панели чата. */
+  #app.plan-open #plan-panel { display: none; }
 }
 
 /* ===== FILES ===== */

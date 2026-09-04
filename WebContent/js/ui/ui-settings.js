@@ -128,6 +128,26 @@ Object.assign(UI.prototype, {
 
       <div class="settings-tab-panel" data-settings-panel="display" hidden>
         <div class="form-group">
+          <label>Имя агента</label>
+          <input id="s_agent_name" maxlength="${AboutEngine.MAX_NAME}"
+                 value="${this._escHtml(this.agent.about?.name || '')}"
+                 placeholder="Например: Ада, Помощник, Пятница">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+            Видно в шапке приложения и в заголовке вкладки. Агент знает своё имя и отзывается
+            на него — переименовать можно и прямо в разговоре, просто попросив.
+            Пустое поле имя не сбрасывает.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>История доработок</label>
+          <div style="font-size:11px;color:var(--text-muted);">
+            Сейчас релиз ${APP_RELEASE_COUNT}. Что появлялось от релиза к релизу, показывает значок
+            «r${APP_RELEASE_COUNT}» в шапке; то же окно открывается само, когда есть непрочитанное.
+            Кнопки здесь нет намеренно: она закрыла бы это окно вместе с несохранёнными изменениями.
+            Спросить агента «что нового» тоже можно — он расскажет.
+          </div>
+        </div>
+        <div class="form-group">
           <label>Тема оформления</label>
           <select id="s_theme">
             <option value="system" ${this.theme === 'system' ? 'selected' : ''}>Системная (по умолчанию)</option>
@@ -402,6 +422,15 @@ Object.assign(UI.prototype, {
       };
       this.limits = limits;
       await this.agent.db.put('settings', { key: 'limits', ...limits });
+
+      // Имя агента. Пустое поле — это НЕ сброс: имя уходит в системный
+      // промпт, и агент без имени начал бы придумывать его заново.
+      // Чтобы сменить имя, его надо ввести.
+      const nameInput = document.getElementById('s_agent_name')?.value || '';
+      if (nameInput.trim() && this.agent.about) {
+        const res = await this.agent.about.setName(nameInput);
+        if (!res.error) this.applyAgentName(res.name);
+      }
 
       // Тема оформления.
       this.applyTheme(document.getElementById('s_theme').value);

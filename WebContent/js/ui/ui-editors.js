@@ -707,6 +707,10 @@ module.exports = {
           enabled: skill?.enabled ?? false,
           toolIds,
           parentId: editId ? (skill?.parentId ?? null) : (this.folderSelection.skills || null),
+          // Отметка «текст правил пользователь»: встроенные навыки
+          // обновляются из кода при загрузке (см. loadSkills), и своё,
+          // отредактированное, обновлением затирать нельзя.
+          editedByUser: true,
         };
         await this.agent.db.put('skills', obj);
         this.renderSkills();

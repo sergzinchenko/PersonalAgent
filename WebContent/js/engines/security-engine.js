@@ -109,6 +109,9 @@ class SecurityEngine {
     // План — собственное рабочее состояние агента, без внешних действий
     // и без данных пользователя: подтверждать тут нечего.
     task_plan: 'read',
+    // История доработок — текст, зашитый в само приложение. Читать его
+    // не опаснее, чем читать эту же страницу настроек.
+    whats_new: 'read',
     // Вики: адрес задан пользователем в настройках и модели неподконтролен,
     // поэтому это не 'network' (та категория существует ради случая, когда
     // хост выбирает модель — см. http_fetch). Чтение читает, запись пишет.
@@ -125,6 +128,10 @@ class SecurityEngine {
     confluence_configure: 'write', confluence_create_page: 'write', confluence_update_page: 'write',
     xwiki_configure: 'write', xwiki_create_page: 'write', xwiki_update_page: 'write',
     persistent_memory: 'write', export_chat: 'write', export_chats: 'write',
+    // Переименование агента: меняет то, что видит пользователь, поэтому
+    // не 'read'. Но это обратимая подпись, а не действие над данными —
+    // в мягких режимах спрашивать не о чем.
+    agent_name: 'write',
 
     // Разрушительное
     delete_folder: 'destroy',

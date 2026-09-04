@@ -9,6 +9,13 @@
 // бы новый артефакт, и модель ходила бы по матрёшке вместо данных.
 const ARTIFACT_TOOLS = new Set(['artifact_read', 'artifact_grep', 'artifact_list']);
 
+// Инструменты, которыми агент ведёт план задачи. Их вызовы показываются
+// одной строкой при ЛЮБОЙ выбранной детализации: содержимое плана целиком
+// видно в панели справа, а подробные блоки «начал шаг 3» / «закрыл шаг 3»
+// на длинной задаче вытесняли из ленты сам разговор. Режим «Скрывать»
+// это правило не отменяет — скрыто значит скрыто.
+const PLAN_TOOLS = new Set(['task_plan']);
+
 Object.assign(UI.prototype, {
 
 
@@ -82,6 +89,11 @@ Object.assign(UI.prototype, {
       }
       if (run.stage) this._renderStatusBar(run.stage.text, run.stage.detail, run);
       container.scrollTop = container.scrollHeight;
+    } else {
+      // Строка состояния живёт вне ленты и не стирается вместе с ней:
+      // без этого индикатор чужого хода остался бы висеть над чатом,
+      // в котором ничего не происходит.
+      this._hideStatusBar();
     }
     // Кнопки «Отправить»/«⏹» отражают состояние именно этого, просматриваемого
     // сейчас чата — а не то, что где-то на фоне работает другой.
@@ -161,6 +173,14 @@ Object.assign(UI.prototype, {
                                       !!msg.isError, msg.artifactId || null, msg.subChatId) +
             `</div>`;
         }
+      }
+      // Ведение плана и после перезагрузки чата остаётся одной строкой.
+      // Подпись взята из самой записи: аргументы вызова в истории не
+      // хранятся, а «сверился с планом» вместо «закрыл шаг 3» — это уже
+      // не краткость, а неправда.
+      if (msg.planLabel) {
+        return `<div class="message tool-call tool-plan"><div class="tool-compact">` +
+               `${msg.isError ? '❌' : '🗂'} ${this._escHtml(msg.planLabel)}</div></div>`;
       }
       return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}</div>`;
     }
@@ -413,20 +433,26 @@ Object.assign(UI.prototype, {
   // что сейчас отвечает), и из loadChat() — при возврате в чат, который
   // продолжал генерировать ответ, пока был не виден.
   _renderStatusBar(text, detail, run) {
-    const container = document.getElementById('chat-messages');
-    if (!container) return;
+    // Хозяин строки — область ввода (#agent-status-host в index.html), а
+    // не лента сообщений. В ленте строка была последним элементом и
+    // уезжала вверх вместе с растущим ответом: на самом долгом ходе, где
+    // она и нужна, пользователь не видел ни стадии, ни времени и не мог
+    // отличить работу от зависания.
+    const host = document.getElementById('agent-status-host');
+    if (!host) return;
     let el = document.getElementById('agent-status');
     if (!el) {
-      container.insertAdjacentHTML('beforeend', `
+      host.innerHTML = `
         <div class="agent-status" id="agent-status">
           <span class="status-spinner"></span>
           <span class="status-text"></span>
           <span class="status-detail"></span>
           <span class="status-timer"></span>
-        </div>`);
+        </div>`;
       el = document.getElementById('agent-status');
-      container.scrollTop = container.scrollHeight;
     }
+    host.hidden = false;
+    if (!el) return;
     el.querySelector('.status-text').textContent = text;
     el.querySelector('.status-detail').textContent = detail;
     if (run) {
@@ -443,6 +469,16 @@ Object.assign(UI.prototype, {
   // таймер, снимает панель статуса и разблокирует ввод — но только если
   // это всё ещё влияет на то, что сейчас видно, — и обновляет индикатор
   // в списке чатов в любом случае.
+  // Снимает строку состояния. Раньше её уносило вместе с содержимым
+  // ленты (innerHTML при loadChat) — теперь она вне ленты и обязана
+  // сниматься явно, иначе висела бы над чужим, ничего не делающим чатом.
+  _hideStatusBar() {
+    const host = document.getElementById('agent-status-host');
+    if (!host) return;
+    host.hidden = true;
+    host.innerHTML = '';
+  },
+
   _endRun(chatId) {
     const run = this._chatRuns.get(chatId);
     if (run) clearInterval(run.statusTimer);
@@ -453,7 +489,7 @@ Object.assign(UI.prototype, {
     this._runJournalClear(chatId);
     if (chatId === this.currentChatId) {
       this._setBusy(false);
-      document.getElementById('agent-status')?.remove();
+      this._hideStatusBar();
     }
     this.refreshSidebar();
   },
@@ -975,7 +1011,10 @@ Object.assign(UI.prototype, {
           const toolContainer = dom();
           const toolResultDiv = (this.toolVerbosity === 'hidden' || !toolContainer) ? null : document.createElement('div');
           if (toolResultDiv) {
-            toolResultDiv.className = 'message tool-call';
+            // Вызовы ведения плана помечаем сразу: их блок оформлен тише
+            // остальных (см. PLAN_TOOLS и .tool-plan в styles.css).
+            toolResultDiv.className = 'message tool-call' +
+              (PLAN_TOOLS.has(tc.function.name) ? ' tool-plan' : '');
             toolResultDiv.textContent = `🔧 Вызываю: ${tc.function.name}...`;
             toolContainer.appendChild(toolResultDiv);
             toolContainer.scrollTop = toolContainer.scrollHeight;
@@ -1055,6 +1094,13 @@ Object.assign(UI.prototype, {
             artifactId,
             // То же для подзадачи: ссылка на её переписку.
             subChatId,
+            // Готовая подпись для ленты — только у вызовов ведения плана
+            // (см. _renderMessage). Поле не заводится там, где оно
+            // не нужно: тысячи tool-записей чата не должны толстеть
+            // ради одного их вида.
+            ...(PLAN_TOOLS.has(tc.function.name)
+              ? { planLabel: this._planCallLabel(tc.function.arguments, resultStr, isError) }
+              : {}),
           };
           await this.agent.db.put('messages', toolMsg);
           await this._runJournalPut(chatId, {
@@ -1207,6 +1253,14 @@ Object.assign(UI.prototype, {
           ${subBtn}`;
       }
     }
+    // ── Ведение плана: одна строка при любой детализации ──
+    // Полный аргумент и результат тут не нужны никому: то же самое, но
+    // связно и целиком, показывает панель плана справа. См. PLAN_TOOLS.
+    if (PLAN_TOOLS.has(name)) {
+      return `<div class="tool-compact">${isError ? '❌' : '🗂'} ` +
+             `${this._escHtml(this._planCallLabel(argsRaw, resultStr, isError))}</div>`;
+    }
+
     if (this.toolVerbosity === 'detailed') {
       let argsPretty = argsRaw;
       try { argsPretty = JSON.stringify(JSON.parse(argsRaw), null, 2); } catch (_) {}
@@ -1225,6 +1279,35 @@ Object.assign(UI.prototype, {
     return `<div class="tool-compact">${icon} ${this._escHtml(name)} → ` +
            `${this._escHtml(resultStr.substring(0, 300))}${resultStr.length > 300 ? '…' : ''}</div>` +
            `<span class="tool-meta">${elapsedMs} мс</span>` + artifactBtn + subBtn;
+  },
+
+
+  // Человеческая подпись к вызову task_plan: «План: взялся за шаг 3 · 2/7».
+  // Из аргументов, а не из результата: результат у половины действий —
+  // это сводка плана, из которой не видно, что именно агент только что
+  // сделал, а видно лишь состояние после.
+  _planCallLabel(argsRaw, resultStr, isError) {
+    let a = {};
+    try { a = JSON.parse(argsRaw) || {}; } catch (_) {}
+    const action = String(a.action || 'show').toLowerCase();
+    const labels = {
+      create: 'составил план',
+      show: 'сверился с планом',
+      start: `взялся за шаг ${a.step}`,
+      done: `закрыл шаг ${a.step}`,
+      fail: `шаг ${a.step} не удался`,
+      fact: 'записал факт',
+      add_steps: 'дописал шаги',
+      finish: 'завершил план',
+      cancel: 'прекратил план',
+    };
+    let out = 'План: ' + (labels[action] || action);
+
+    let r = {};
+    try { r = JSON.parse(resultStr) || {}; } catch (_) {}
+    if (isError || r.error) return out + ' — ' + (r.error || 'ошибка');
+    if (r.plan && typeof r.plan.total === 'number') out += ` · ${r.plan.done}/${r.plan.total}`;
+    return out;
   },
 
 

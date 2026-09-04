@@ -395,7 +395,110 @@ Object.assign(UI.prototype, {
     document.getElementById('model-add-btn')?.addEventListener('click', () => this.showChatModelPicker());
 
     document.getElementById('tool-stats-chip')?.addEventListener('click', () => this.showChatStatsModal());
-    document.getElementById('task-plan-chip')?.addEventListener('click', () => this.showTaskPlanModal());
+    // Клик по чипу возвращает панель, если её закрыли крестиком, и
+    // открывает окно плана, когда панель и так видна (на узком экране
+    // панели нет вовсе — там окно остаётся единственным способом
+    // посмотреть план целиком).
+    document.getElementById('task-plan-chip')?.addEventListener('click', () => {
+      const app = document.getElementById('app');
+      if (app && !app.classList.contains('plan-open')) {
+        this._planPanelDismissed = null;
+        this.renderPlanPanel();
+      } else {
+        this.showTaskPlanModal();
+      }
+    });
+
+    // Панель плана справа обновляется вместе с панелью чата: обе
+    // показывают одно и то же состояние, и расходиться им нельзя.
+    await this.renderPlanPanel();
+  },
+
+
+  // ── Панель плана справа ──
+  // Показывает то же, что уходит модели в каждом запросе: цель, шаги,
+  // текущий шаг и выясненные по дороге факты. Пока плана нет — панели
+  // нет: пустая колонка отнимала бы у переписки треть ширины ни за что.
+  async renderPlanPanel() {
+    const app = document.getElementById('app');
+    const panel = document.getElementById('plan-panel');
+    const body = document.getElementById('plan-panel-body');
+    if (!app || !panel || !body) return;
+
+    let plan = null;
+    try {
+      // План принадлежит чату, а не приложению: панель показывает план
+      // ПРОСМАТРИВАЕМОГО чата, даже если ход идёт в другом.
+      plan = (this.currentTab === 'chat' && this.currentChatId)
+        ? await this.agent.tasks?.active(this.currentChatId)
+        : null;
+    } catch (_) { /* панель не должна ронять чат */ }
+
+    // Панель, закрытую крестиком, не возвращаем до смены плана —
+    // иначе она всплывала бы снова после каждого отмеченного шага.
+    if (!plan || this._planPanelDismissed === plan.id) {
+      app.classList.remove('plan-open');
+      panel.hidden = true;
+      body.innerHTML = '';
+      return;
+    }
+
+    const mark = { done: '✔', doing: '▶', failed: '✖', todo: '·' };
+    const done = plan.steps.filter(s => s.status === 'done').length;
+    const failed = plan.steps.filter(s => s.status === 'failed').length;
+    const pct = plan.steps.length ? Math.round((done / plan.steps.length) * 100) : 0;
+
+    const steps = plan.steps.map(s => `
+      <div class="plan-step plan-${s.status}">
+        <span class="plan-mark">${mark[s.status] || '·'}</span>
+        <span class="plan-title">${s.n}. ${this._escHtml(s.title)}</span>
+        ${s.note ? `<div class="plan-note">${this._escHtml(s.note)}</div>` : ''}
+      </div>`).join('');
+
+    body.innerHTML = `
+      <div class="plan-goal">${this._escHtml(plan.goal)}</div>
+      <div class="plan-progress">
+        <span>${done} из ${plan.steps.length}${failed ? ` · ${failed} не удалось` : ''}</span>
+        <span class="plan-bar"><span style="width:${pct}%"></span></span>
+      </div>
+      <div class="plan-list">${steps}</div>
+      ${plan.facts.length ? `
+        <div class="plan-facts">
+          <div class="plan-facts-title">Выяснено по ходу работы</div>
+          <ul>${plan.facts.map(f => `<li>${this._escHtml(f)}</li>`).join('')}</ul>
+        </div>` : ''}
+      <div class="plan-panel-actions">
+        <button class="btn btn-secondary btn-sm btn-block" id="plan-panel-finish">Прекратить план</button>
+      </div>
+      <div class="plan-panel-hint">
+        План хранится отдельно от переписки: он переживает и подрезку истории,
+        и перезагрузку страницы. Агент видит ровно то же, что показано здесь.
+      </div>`;
+
+    document.getElementById('plan-panel-finish')?.addEventListener('click', async () => {
+      const yes = await this._confirm(
+        'Прекратить план? Агент перестанет получать эту сводку в каждом запросе.',
+        { title: 'Прекратить план' });
+      if (!yes) return;
+      await this.agent.tasks.finish(this.currentChatId, 'cancelled');
+      this.updateChatToolbar();
+    });
+
+    panel.hidden = false;
+    app.classList.add('plan-open');
+  },
+
+  // Крестик в шапке панели. План при этом не трогается — скрыт только
+  // его показ, и до появления следующего плана панель не вернётся.
+  hidePlanPanel() {
+    const app = document.getElementById('app');
+    const panel = document.getElementById('plan-panel');
+    // Запоминаем ИМЕННО закрытый план: следующий должен показаться сам.
+    Promise.resolve(this.agent.tasks?.active(this.currentChatId))
+      .then(p => { this._planPanelDismissed = p?.id || null; })
+      .catch(() => {});
+    app?.classList.remove('plan-open');
+    if (panel) panel.hidden = true;
   },
 
 

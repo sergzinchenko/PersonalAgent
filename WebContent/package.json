@@ -5,7 +5,7 @@
   "description": "Продакшен-сборка (обфускация одного бандла в dist/) для статического AI-агента. Сам продукт сборки не требует — см. readme.md.",
   "scripts": {
     "build": "node scripts/build-prod.js",
-    "test": "node js/tests/test-tools.js && node js/tests/test-registry.js && node js/tests/test-integration.js && node js/tests/test-chat-switching.js && node js/tests/test-skill-tools.js && node js/tests/test-modals.js && node js/tests/test-proxy-fetch.js && node js/tests/test-wiki.js && node js/tests/test-artifacts.js && node js/tests/test-subtask.js && node js/tests/test-tasks.js && node js/tests/test-compaction.js && node js/tests/test-resume.js",
+    "test": "node js/tests/test-tools.js && node js/tests/test-registry.js && node js/tests/test-integration.js && node js/tests/test-chat-switching.js && node js/tests/test-skill-tools.js && node js/tests/test-modals.js && node js/tests/test-proxy-fetch.js && node js/tests/test-wiki.js && node js/tests/test-artifacts.js && node js/tests/test-subtask.js && node js/tests/test-tasks.js && node js/tests/test-compaction.js && node js/tests/test-resume.js && node js/tests/test-about.js",
     "smoke:proxy": "node scripts/smoke-proxy.js"
   },
   "devDependencies": {

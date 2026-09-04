@@ -116,11 +116,14 @@ Object.assign(UI.prototype, {
     // Показываем свёртку сразу: пользователь должен видеть, что часть
     // переписки теперь участвует в работе агента в сжатом виде.
     if (chatId === this.currentChatId) {
+      // Просто в конец ленты: строка состояния теперь живёт над полем
+      // ввода, а не последним элементом ленты, и вставлять запись
+      // «перед ней» стало нечем — да и незачем.
       const container = document.getElementById('chat-messages');
-      const status = document.getElementById('agent-status');
-      const html = this._renderMessage(summary);
-      if (status) status.insertAdjacentHTML('beforebegin', html);
-      else if (container) container.insertAdjacentHTML('beforeend', html);
+      if (container) {
+        container.insertAdjacentHTML('beforeend', this._renderMessage(summary));
+        container.scrollTop = container.scrollHeight;
+      }
     }
 
     return summary;

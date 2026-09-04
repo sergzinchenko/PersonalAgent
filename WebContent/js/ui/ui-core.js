@@ -89,6 +89,11 @@ class UI {
     // settings/theme) и ui-settings.js (после сохранения формы).
     this.theme = 'system';
 
+    // Панель плана справа. Пользователь может закрыть её крестиком —
+    // тогда до следующего изменения плана она не показывается снова,
+    // иначе закрытая панель возвращалась бы после каждого шага агента.
+    this._planPanelDismissed = null;   // id плана, который закрыли вручную
+
     this._bindGlobalEvents();
   }
 
@@ -100,6 +105,14 @@ class UI {
     });
 
     document.getElementById('settings-btn').addEventListener('click', () => this.showSettingsModal());
+    // Значок релиза в шапке: показывает всю историю доработок, а не
+    // только непрочитанное, — к нему возвращаются и после того, как
+    // окно «Что нового» уже закрыли.
+    document.getElementById('release-badge')?.addEventListener('click', () => this.showWhatsNewModal({ onlyUnread: false }));
+    // Панель плана закрывается вручную, если мешает. Сам план при этом
+    // не трогается: скрыта только панель, и до следующего изменения
+    // плана она не вернётся.
+    document.getElementById('plan-panel-hide')?.addEventListener('click', () => this.hidePlanPanel());
     document.getElementById('sidebar-new-btn').addEventListener('click', () => this._handleNewItem());
     document.getElementById('sidebar-search').addEventListener('input', (e) => this._handleSearch(e.target.value));
 
@@ -314,6 +327,9 @@ class UI {
     if (ioRow) ioRow.hidden = tab !== 'chat';
     const iosRow = document.getElementById('chats-io-row');
     if (iosRow) iosRow.hidden = tab !== 'chat';
+    // Панель плана относится к переписке: на вкладке инструментов или
+    // файлов она отняла бы место у того, ради чего туда и переключились.
+    this.renderPlanPanel?.();
     if (tab === 'files') this.renderFiles();
     if (tab === 'tools') this.renderTools();
     if (tab === 'skills') this.renderSkills();

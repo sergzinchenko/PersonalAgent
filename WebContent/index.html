@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Agent — Personal Assistant</title>
+<!-- Иконка вкладки и закладки. Нарисована прямо здесь, а не лежит
+     отдельным файлом: приложение открывают и как статические файлы,
+     и с диска, и отдельный favicon.ico при этом то и дело не находился,
+     а браузер молча показывал чужую иконку по умолчанию. SVG в data-URI
+     не требует ни запроса, ни правильного пути, и остаётся резким на
+     любом экране. Рисунок — облако реплики с молнией: разговор,
+     который что-то делает. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23a29bfe'/%3E%3Cstop offset='1' stop-color='%234834d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='2' y='2' width='60' height='60' rx='16' fill='url(%23g)'/%3E%3Cpath d='M21 39l-3 12 13-8z' fill='%23fff' opacity='.94'/%3E%3Crect x='12' y='14' width='40' height='28' rx='9' fill='%23fff' opacity='.94'/%3E%3Cpath d='M35 18l-11 14h7l-2 10 11-14h-7z' fill='%235b4bd6'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -11,7 +19,14 @@
 <div id="app">
   <!-- HEADER -->
   <header id="header">
-    <div class="logo">⚡ AI Agent</div>
+    <!-- Имя агента задаёт пользователь при первом запуске (см.
+         engines/about-engine.js). До этого здесь стоит подпись
+         по умолчанию — именно подпись, а не имя. -->
+    <div class="logo" id="app-logo" title="Имя агента — ⚙ Настройки → Отображение">⚡ <span id="agent-name">AI Agent</span></div>
+    <!-- Счётчик релизов: мелко, рядом с именем. Кликом открывается
+         история доработок — то же окно, что показывается само, когда
+         появилось что-то непрочитанное. -->
+    <button type="button" id="release-badge" title="Что нового">r0</button>
     <div class="tabs">
       <button class="tab-btn active" data-tab="chat">💬 Чаты</button>
       <button class="tab-btn" data-tab="tools">🔧 Tools</button>
@@ -55,6 +70,13 @@
         </div>
       </div>
       <div id="chat-input-area">
+        <!-- Строка состояния агента живёт ЗДЕСЬ, а не в ленте сообщений.
+             Пока она была последним элементом ленты, её уносило вверх
+             растущим ответом: на самом длинном ходе — с вызовами
+             инструментов и стримингом — пользователь не видел ни стадии,
+             ни времени, ни того, что работа вообще идёт. Здесь она
+             прибита к полю ввода и видна всегда. -->
+        <div id="agent-status-host" hidden></div>
         <div class="chat-toolbar" id="chat-toolbar"></div>
         <div id="chat-input-row">
           <textarea id="chat-input" placeholder="Введите сообщение... (Shift+Enter — новая строка)" rows="1"></textarea>
@@ -112,6 +134,19 @@
       <div class="files-container" id="files-container"></div>
     </div>
   </main>
+
+  <!-- ПАНЕЛЬ ПЛАНА -->
+  <!-- Появляется сама, когда у открытого чата есть активный план, и исчезает,
+       когда план закрыт. Место справа выбрано намеренно: план — это не
+       часть переписки, а её оглавление, и в ленте он либо уезжал вверх,
+       либо мешал читать ответы. -->
+  <aside id="plan-panel" hidden>
+    <div class="plan-panel-header">
+      <span class="plan-panel-title">🗂 План задачи</span>
+      <button type="button" id="plan-panel-hide" title="Скрыть панель плана">✕</button>
+    </div>
+    <div class="plan-panel-body" id="plan-panel-body"></div>
+  </aside>
 </div>
 
 <!-- MODALS CONTAINER -->
@@ -121,6 +156,7 @@
      markdown), engines (независимые движки без общего префикса файлов),
      llm, tools, ui, tests. Порядок между подпапками и внутри них остаётся
      прежним — только пути сменились, ни один файл не переименован. -->
+<script src="js/core/changelog.js"></script>
 <script src="js/core/db.js"></script>
 <script src="js/core/crypto-utils.js"></script>
 <script src="js/llm/llm-gateway.js"></script>
@@ -138,6 +174,7 @@
 <script src="js/tools/tools-artifacts.js"></script>
 <script src="js/tools/tools-subtask.js"></script>
 <script src="js/tools/tools-tasks.js"></script>
+<script src="js/tools/tools-about.js"></script>
 <script src="js/engines/skills-engine.js"></script>
 <script src="js/engines/prompts-library.js"></script>
 <script src="js/engines/folders-engine.js"></script>
@@ -145,11 +182,13 @@
 <script src="js/engines/artifacts-engine.js"></script>
 <script src="js/engines/tasks-engine.js"></script>
 <script src="js/engines/security-engine.js"></script>
+<script src="js/engines/about-engine.js"></script>
 <script src="js/core/markdown.js"></script>
 <!-- UI разбит на функциональные модули. ui-core.js объявляет класс UI,
      остальные дополняют UI.prototype примесями — порядок важен:
      ui-core.js должен идти первым. -->
 <script src="js/ui/ui-core.js"></script>
+<script src="js/ui/ui-about.js"></script>
 <script src="js/ui/ui-navigation.js"></script>
 <script src="js/ui/ui-chat.js"></script>
 <script src="js/ui/ui-subtask.js"></script>
