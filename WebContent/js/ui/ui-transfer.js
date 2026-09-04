@@ -10,7 +10,10 @@ Object.assign(UI.prototype, {
   // Показывает все чаты с указанием папки; по умолчанию отмечены те,
   // что лежат в выбранной сейчас папке (или все, если выбран корень).
   async showChatsExportModal() {
-    const chats = await this.agent.db.getAll('chats');
+    // Переписки подзадач (subtaskOf) — часть родительского чата, а не
+    // самостоятельные разговоры: в списке чатов они не показываются,
+    // и здесь их тоже быть не должно.
+    const chats = (await this.agent.db.getAll('chats')).filter(c => !c.subtaskOf);
     if (!chats.length) {
       alert('Нет чатов для выгрузки.');
       return;

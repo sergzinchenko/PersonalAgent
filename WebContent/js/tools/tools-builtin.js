@@ -529,9 +529,12 @@ Object.assign(ToolsEngine.prototype, {
               if (f.parentId && subtree.has(f.parentId) && !subtree.has(f.id)) { subtree.add(f.id); grew = true; }
             }
           }
-          selected = all.filter(c => c.parentId && subtree.has(c.parentId));
+          selected = all.filter(c => c.parentId && subtree.has(c.parentId) && !c.subtaskOf);
         } else {
-          selected = all;
+          // Без явного перечня выгружаем только собственные чаты
+          // пользователя: переписки подзадач — часть родительского чата
+          // и в его архиве не нужны. По id их выгрузить всё ещё можно.
+          selected = all.filter(c => !c.subtaskOf);
         }
 
         if (!selected.length) return { error: 'Под условие не попал ни один чат' };
@@ -847,7 +850,9 @@ Object.assign(ToolsEngine.prototype, {
 
         if (action === 'list') {
           const all = await this.folders.all('chats');
-          const chats = await this.db.getAll('chats');
+          // Переписки подзадач в раскладке по папкам не считаем: они не
+          // видны пользователю в списке, и их счёт сбивал бы с толку.
+          const chats = (await this.db.getAll('chats')).filter(c => !c.subtaskOf);
           const path = (f) => {
             const names = [f.name];
             let p = f.parentId;
@@ -1021,6 +1026,10 @@ Object.assign(ToolsEngine.prototype, {
           matches.push({
             chatId: m.chatId,
             chatTitle: chatById[m.chatId]?.title || '(без названия)',
+            // Найтись может и переписка подзадачи — она полноценная часть
+            // истории, но в списке чатов её нет. Помечаем, иначе непонятно,
+            // почему пользователь такого чата у себя не видит.
+            subtask: chatById[m.chatId]?.subtaskOf ? true : undefined,
             role: m.role,
             date: new Date(m.timestamp).toISOString(),
             excerpt: (from > 0 ? '…' : '') + raw.slice(from, to) + (to < raw.length ? '…' : ''),
