@@ -36,6 +36,10 @@ class UI {
       // от maxToolSteps: подзадача — это часть хода, и ей нужен свой,
       // более тесный бюджет, иначе одна такая часть съест весь ход.
       subtaskMaxSteps: 10,
+      // Сворачивать вытесняемую часть переписки в резюме вместо того,
+      // чтобы просто её терять (см. ui-compaction.js). Стоит одного
+      // дополнительного запроса к модели в момент переполнения окна.
+      contextCompaction: true,
     };
 
     // Степень детализации вывода вызовов инструментов в чат:
@@ -127,6 +131,15 @@ class UI {
       if (af) this.showArtifact(af.dataset.artifact);
       const sub = e.target.closest('[data-subchat]');
       if (sub) this.openSubtaskChat(sub.dataset.subchat);
+      // Свёрнутая часть переписки: развернуть/свернуть резюме.
+      const sum = e.target.closest('[data-summary-toggle]');
+      if (sum) {
+        const body = document.getElementById(sum.dataset.summaryToggle)?.querySelector('.summary-body');
+        if (body) {
+          body.hidden = !body.hidden;
+          sum.textContent = body.hidden ? 'Показать' : 'Скрыть';
+        }
+      }
     });
     document.getElementById('add-tool-btn').addEventListener('click', () => this.showAddToolModal());
     document.getElementById('add-mcp-server-btn').addEventListener('click', () => this.showAddMCPServerModal());

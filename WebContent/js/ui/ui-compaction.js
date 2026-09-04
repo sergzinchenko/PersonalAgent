@@ -1,0 +1,143 @@
+// ============================================================
+//  UI COMPACTION — свёртка вытесненной части переписки
+// ============================================================
+//
+// ЗАЧЕМ. Когда история перестаёт помещаться в окно контекста, её начало
+// вытесняется. Раньше на его месте оставалась заглушка «столько-то
+// сообщений не переданы, попроси пользователя повторить» — то есть
+// работа, проделанная в начале разговора, для агента исчезала: принятые
+// решения, найденные пути, выясненные ограничения. Дальше он либо
+// переспрашивал уже отвеченное, либо, что хуже, действовал по догадке.
+//
+// ЧТО ВМЕСТО. Вытесняемая часть один раз прогоняется через модель и
+// превращается в структурированное резюме: цель, что сделано, что
+// выяснено, решения, незакрытые вопросы, конкретные значения. Резюме
+// сохраняется в переписку отдельным сообщением (kind:'context-summary')
+// и с этого момента едет в запросы ВМЕСТО покрытых им сообщений
+// (см. _trimHistory). Десяток строк вместо десятков тысяч токенов.
+//
+// ЦЕНА. Свёртка — это лишний запрос к модели, поэтому она делается
+// только когда история реально не помещается, и на неё уходит один
+// вызов на много вытесненных сообщений. Если запрос не удался, работает
+// прежнее поведение (заглушка) — потерять контекст неприятно, но это
+// лучше, чем не ответить вовсе.
+
+Object.assign(UI.prototype, {
+
+  _compactionPrompt() {
+    return 'Ты сжимаешь начало переписки пользователя с ИИ-агентом, чтобы оно поместилось ' +
+      'в окно контекста. Это НЕ пересказ для человека: результат прочитает сам агент ' +
+      'и продолжит по нему работу.\n\n' +
+      'Верни сжатую выжимку по разделам (пропускай пустые):\n' +
+      '1. Задача — чего добивается пользователь.\n' +
+      '2. Сделано — какие шаги уже выполнены и с каким результатом.\n' +
+      '3. Выяснено — факты, значения, пути, идентификаторы, ограничения. Приводи их ТОЧНО, ' +
+      'не пересказывай приблизительно: именно за ними сюда и будут возвращаться.\n' +
+      '4. Решения и договорённости — что выбрано и почему, что пользователь запретил или попросил.\n' +
+      '5. Открытые вопросы — что осталось сделать или уточнить.\n\n' +
+      'Правила: не выдумывай ничего, чего нет в тексте; не описывай, какие инструменты ' +
+      'вызывались, — только то, что из них получилось; уложись в 400 слов; ' +
+      'пиши по-русски, если переписка на русском.';
+  },
+
+  // Собирает текст вытесненной части. Каждое сообщение подрезается: цель —
+  // сохранить смысл, а не буквальный текст, и сама свёртка не должна
+  // упереться в то же окно контекста, из-за которого затевается.
+  _compactionTranscript(dropped) {
+    const PER_MESSAGE = 1200;
+    const TOTAL = 60000;
+    const lines = [];
+    for (const m of dropped) {
+      if (m.kind === 'model-switch') continue;
+      const who = m.role === 'tool' ? `инструмент ${m.name || ''}` : m.role;
+      let text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+      if (m.tool_calls) text += ' ' + JSON.stringify(m.tool_calls).slice(0, 300);
+      if (text.length > PER_MESSAGE) text = text.slice(0, PER_MESSAGE) + '…';
+      lines.push(`[${who}] ${text}`);
+    }
+    let out = lines.join('\n');
+    if (out.length > TOTAL) {
+      // Режем СЕРЕДИНУ: начало разговора задаёт задачу, конец — ближе
+      // всего к тому, чем агент занят сейчас; провисает наименее ценная часть.
+      const half = Math.floor(TOTAL / 2);
+      out = out.slice(0, half) + '\n\n[…середина пропущена, слишком длинная…]\n\n' + out.slice(-half);
+    }
+    return out;
+  },
+
+  // ── Свернуть вытесненную часть в резюме ──
+  // Возвращает сохранённое сообщение-резюме или null, если свернуть не
+  // удалось (тогда вызывающая сторона откатывается к прежнему поведению).
+  async _compactHistory(chatId, dropped, ref) {
+    if (!dropped || !dropped.length) return null;
+
+    const transcript = this._compactionTranscript(dropped);
+    if (!transcript.trim()) return null;
+
+    this._showStatus(chatId, 'Сворачиваю раннюю часть переписки…',
+      `${dropped.length} сообщений — чтобы не потерять сделанное`);
+
+    // Модель — та же, что у чата: другая может не знать предметной
+    // терминологии разговора, а резюме потом читает именно она.
+    if (ref) this.agent.models?.applyRef(ref);
+
+    let text = '';
+    try {
+      const result = await this.agent.llm.chat([
+        { role: 'system', content: this._compactionPrompt() },
+        { role: 'user', content: transcript },
+      ], { stream: false });
+      text = (result && result.content) ? result.content.trim() : '';
+      if (result && result.usage) await this._recordUsage(chatId, result.usage);
+    } catch (e) {
+      console.error('Свёртка переписки не удалась', e);
+      return null;
+    }
+
+    if (!text) return null;
+
+    const lastCovered = dropped[dropped.length - 1];
+    const summary = {
+      id: uid(),
+      chatId,
+      role: 'system',
+      kind: 'context-summary',
+      content: text,
+      // Метка времени ровно на границе покрытой части: так резюме встаёт
+      // в ленте на место свёрнутых сообщений и при сборке контекста
+      // легко определить, что именно оно заменяет.
+      timestamp: (lastCovered.timestamp || Date.now()) + 1,
+      coveredCount: dropped.length,
+      coveredFrom: dropped[0].timestamp || null,
+      coveredTo: lastCovered.timestamp || null,
+    };
+    await this.agent.db.put('messages', summary);
+
+    // Показываем свёртку сразу: пользователь должен видеть, что часть
+    // переписки теперь участвует в работе агента в сжатом виде.
+    if (chatId === this.currentChatId) {
+      const container = document.getElementById('chat-messages');
+      const status = document.getElementById('agent-status');
+      const html = this._renderMessage(summary);
+      if (status) status.insertAdjacentHTML('beforebegin', html);
+      else if (container) container.insertAdjacentHTML('beforeend', html);
+    }
+
+    return summary;
+  },
+
+  // Разметка свёрнутой части: по умолчанию сложена, разворачивается кликом.
+  // Показывать резюме целиком в ленте незачем — это служебная запись,
+  // но спрятать её совсем нельзя: пользователь должен понимать, на чём
+  // именно агент теперь основывается.
+  _renderContextSummary(msg) {
+    const id = 'cs_' + (msg.id || uid());
+    return `<div class="message system context-summary" id="${id}">
+      🗜 Ранняя часть переписки (${msg.coveredCount || 0} сообщений) свёрнута в резюме —
+      агент работает по нему, ничего не потеряно.
+      <button class="btn btn-secondary btn-sm" data-summary-toggle="${id}">Показать</button>
+      <div class="summary-body" hidden>${renderMarkdown(msg.content || '')}</div>
+    </div>`;
+  },
+
+});

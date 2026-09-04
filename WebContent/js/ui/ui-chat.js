@@ -161,6 +161,9 @@ Object.assign(UI.prototype, {
       return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}</div>`;
     }
     if (msg.role === 'system') {
+      // Свёрнутая часть переписки — служебная запись со своим видом
+      // (сложена, разворачивается кликом), см. ui-compaction.js.
+      if (msg.kind === 'context-summary') return this._renderContextSummary(msg);
       // Отметка смены модели — самостоятельный тип записи, показываем целиком
       // и без обрезки, в отличие от прочих системных сообщений.
       if (msg.kind === 'model-switch') {
@@ -465,15 +468,49 @@ Object.assign(UI.prototype, {
   // явного ref лимит брался бы из того, что сейчас применено к общему
   // шлюзу, — а это могла успеть переключить другая, просматриваемая в тот
   // же момент вкладка/чат.
+  //
+  // ВЫТЕСНЕННОЕ БОЛЬШЕ НЕ ТЕРЯЕТСЯ. Начало переписки, не поместившееся в
+  // бюджет, сначала сворачивается в резюме (_compactHistory) и участвует
+  // в контексте уже в виде десятка строк. Здесь такое резюме — обычное
+  // сообщение с kind:'context-summary'; всё, что оно покрывает, в запрос
+  // не идёт, иначе платили бы дважды за одно и то же.
   _trimHistory(allMsgs, systemPrompt, ref) {
     // Служебные отметки не идут в API (см. model-switch), убираем сразу.
-    const usable = allMsgs.filter(m => m.kind !== 'model-switch');
+    let usable = allMsgs.filter(m => m.kind !== 'model-switch');
 
-    const toApi = (m) => {
+    // Всё, что уже свёрнуто, заменено последним резюме — оно идёт вместо
+    // покрытых сообщений и стоит на их месте в ленте.
+    const summaries = usable.filter(m => m.kind === 'context-summary');
+    if (summaries.length) {
+      const last = summaries[summaries.length - 1];
+      usable = usable.filter(m => m === last || m.timestamp > last.timestamp);
+    }
+
+    // ── Старые результаты инструментов передаются коротко ──
+    // Свежие результаты нужны целиком: с ними агент работает прямо
+    // сейчас. Те, что старше последних нескольких, почти всегда уже
+    // отработаны — но продолжали ехать в каждый запрос полным текстом.
+    // Оставляем начало и говорим прямо, где взять остальное.
+    const KEEP_FULL_TOOL_RESULTS = 6;
+    const toolIdx = [];
+    usable.forEach((m, i) => { if (m.role === 'tool') toolIdx.push(i); });
+    const shrinkBefore = toolIdx.length > KEEP_FULL_TOOL_RESULTS
+      ? toolIdx[toolIdx.length - KEEP_FULL_TOOL_RESULTS]
+      : -1;
+
+    const toApi = (m, idx) => {
       if (m.role === 'tool') {
+        let content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        if (shrinkBefore >= 0 && idx < shrinkBefore && content.length > 400) {
+          content = content.slice(0, 400) +
+            `… [результат сокращён: было ${content.length} символов. ` +
+            (m.artifactId
+              ? `Полный текст — artifact_read({ id: "${m.artifactId}" })]`
+              : 'Если он снова нужен — повтори вызов]');
+        }
         return {
           role: 'tool',
-          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          content,
           tool_call_id: m.tool_call_id,
           name: m.name,
         };
@@ -487,7 +524,7 @@ Object.assign(UI.prototype, {
     const limit = this.effectiveContextLimit(ref);
     // Лимит неизвестен — обрезать не по чему, оставляем как есть.
     if (!limit) {
-      return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0 };
+      return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0, dropped: [] };
     }
 
     const resolved = ref ? this.agent.models?.resolve(ref) : null;
@@ -509,7 +546,7 @@ Object.assign(UI.prototype, {
     keptIdx.reverse();
 
     if (keptIdx.length === usable.length) {
-      return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0 };
+      return { messages: usable.map(toApi), droppedCount: 0, droppedTokens: 0, dropped: [] };
     }
 
     let start = keptIdx[0];
@@ -535,9 +572,12 @@ Object.assign(UI.prototype, {
     };
 
     return {
-      messages: [summary, ...kept.map(toApi)],
+      messages: [summary, ...kept.map((m, i) => toApi(m, start + i))],
       droppedCount: dropped.length,
       droppedTokens,
+      // Сами вытесненные записи нужны вызывающей стороне: она сворачивает
+      // их в резюме (_compactHistory), чтобы работа не пропадала.
+      dropped,
       budget,
     };
   },
@@ -766,12 +806,32 @@ Object.assign(UI.prototype, {
       } catch (_) { /* список файлов не критичен для ответа */ }
 
       const apiMessages = [{ role: 'system', content: systemPrompt }];
-      const trim = this._trimHistory(allMsgs, systemPrompt, chatRef);
-      for (const m of trim.messages) apiMessages.push(m);
+      let trim = this._trimHistory(allMsgs, systemPrompt, chatRef);
 
-      if (trim.droppedCount) {
+      // ── Свёртка вместо потери ──
+      // Часть переписки не помещается в окно — вместо того чтобы просто
+      // выбросить её, сворачиваем в резюме одним запросом к модели и
+      // пересобираем контекст уже с ним (см. ui-compaction.js). Так
+      // сделанное в начале разговора продолжает работать, занимая
+      // десяток строк вместо десятков тысяч токенов.
+      if (trim.droppedCount && this.limits.contextCompaction !== false) {
+        const summary = await this._compactHistory(chatId, trim.dropped, chatRef);
+        if (summary) {
+          const refreshed = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
+          refreshed.sort((a, b) => a.timestamp - b.timestamp);
+          trim = this._trimHistory(refreshed, systemPrompt, chatRef);
+          // Модель этого чата могла смениться внутри свёртки — вернём.
+          await this.applyChatModel(chatId);
+        } else {
+          // Свернуть не удалось (сбой сети, отказ провайдера) — работает
+          // прежнее поведение: начало не передаётся, но об этом сказано.
+          this._showTrimNotice(chatId, trim);
+        }
+      } else if (trim.droppedCount) {
         this._showTrimNotice(chatId, trim);
       }
+
+      for (const m of trim.messages) apiMessages.push(m);
 
       const tools = await this.agent.tools.getEnabledToolsForAPI();
 

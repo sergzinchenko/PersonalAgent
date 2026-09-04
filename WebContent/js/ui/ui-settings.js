@@ -92,6 +92,18 @@ Object.assign(UI.prototype, {
           </div>
         </div>
         <div class="form-group">
+          <label class="check-row">
+            <input type="checkbox" id="s_ctx_compaction" ${this.limits.contextCompaction !== false ? 'checked' : ''}>
+            Сворачивать переписку вместо потери начала
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Когда история перестаёт помещаться в окно контекста, её начало один раз
+            сжимается моделью в резюме — что сделано, что выяснено, какие решения приняты —
+            и дальше участвует в работе в таком виде. Стоит одного дополнительного запроса
+            в момент переполнения. Без этого начало переписки просто перестаёт передаваться.
+          </div>
+        </div>
+        <div class="form-group">
           <label>Максимум шагов внутри подзадачи</label>
           <input id="s_subtask_steps" type="number" min="1" max="30" value="${this.limits.subtaskMaxSteps}">
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
@@ -386,6 +398,7 @@ Object.assign(UI.prototype, {
         maxToolResponseChars: Math.max(500, parseInt(document.getElementById('s_max_resp_chars').value) || 20000),
         artifactThresholdChars: Math.max(0, parseInt(document.getElementById('s_artifact_threshold').value) || 0),
         subtaskMaxSteps: Math.min(30, Math.max(1, parseInt(document.getElementById('s_subtask_steps').value) || 10)),
+        contextCompaction: !!document.getElementById('s_ctx_compaction')?.checked,
       };
       this.limits = limits;
       await this.agent.db.put('settings', { key: 'limits', ...limits });

@@ -287,7 +287,7 @@ const { SkillsEngine, ToolsEngine } = sandbox;
     ok('он идёт первым', prompt4.indexOf('Системный') < prompt4.indexOf('Программист'),
        String(prompt4.indexOf('Системный')) + ' / ' + String(prompt4.indexOf('Программист')));
     ok('промпт объясняет судьбу выключенных инструментов', /Выключенный вызвать нельзя/.test(prompt4));
-    ok('и подрезку истории', /отбрасывается/.test(prompt4));
+    ok('и свёртку истории при переполнении контекста', /СВОРАЧИВАЕТСЯ в резюме/.test(prompt4));
 
     // Даже если запись в базе окажется выключенной — навык всё равно в промпте.
     const forced = await db4.get('skills', 'skill_system');
