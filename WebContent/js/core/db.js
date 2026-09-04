@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 10) {
+  constructor(name = 'ai_agent_db', version = 11) {
     this.name = name;
     this.version = version;
     this.db = null;
@@ -75,6 +75,13 @@ class AgentDB {
         // хранится дублем: он совпадает с mcpServer у tools этого сервера.
         if (!db.objectStoreNames.contains('mcp_servers')) {
           db.createObjectStore('mcp_servers', { keyPath: 'id' });
+        }
+        // Большие результаты инструментов, вынесенные из переписки
+        // (см. engines/artifacts-engine.js). Индекс по чату нужен и для
+        // перечня артефактов чата, и для удаления их вместе с чатом.
+        if (!db.objectStoreNames.contains('artifacts')) {
+          const s = db.createObjectStore('artifacts', { keyPath: 'id' });
+          s.createIndex('chatId', 'chatId');
         }
       };
       req.onsuccess = (e) => {

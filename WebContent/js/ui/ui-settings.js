@@ -91,6 +91,17 @@ Object.assign(UI.prototype, {
             Большой ответ вытесняет из контекста историю переписки и системный промпт.
           </div>
         </div>
+        <div class="form-group">
+          <label>Выносить результат в артефакт от, символов</label>
+          <input id="s_artifact_threshold" type="number" min="0" step="500" value="${this.limits.artifactThresholdChars}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Результат крупнее этого порога сохраняется отдельно, а модели уходит короткая
+            шапка с идентификатором: размер, структура, начало текста. Дочитывает она его
+            сама — инструментами <code>artifact_read</code> и <code>artifact_grep</code>.
+            Так один большой ответ перестаёт занимать контекст до конца чата.
+            0 — выключить и передавать результаты целиком, как раньше.
+          </div>
+        </div>
         </div>
       </div>
 
@@ -364,6 +375,7 @@ Object.assign(UI.prototype, {
         toolTimeoutSeconds: Math.max(0, parseInt(document.getElementById('s_tool_timeout_sec').value) || 0),
         maxToolCallsPerTurn: Math.max(0, parseInt(document.getElementById('s_max_calls').value) || 0),
         maxToolResponseChars: Math.max(500, parseInt(document.getElementById('s_max_resp_chars').value) || 20000),
+        artifactThresholdChars: Math.max(0, parseInt(document.getElementById('s_artifact_threshold').value) || 0),
       };
       this.limits = limits;
       await this.agent.db.put('settings', { key: 'limits', ...limits });

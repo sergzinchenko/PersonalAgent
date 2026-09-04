@@ -28,6 +28,10 @@ class UI {
       // отдельная настройка у MCP, отдельная у прокси и зашитые 4000 в
       // http_fetch, — хотя смысл везде один и тот же.
       maxToolResponseChars: 20000,
+      // Начиная с какого размера результат инструмента выносится из
+      // переписки в артефакт (см. engines/artifacts-engine.js). 0 —
+      // выключить и класть всё в контекст, как было раньше.
+      artifactThresholdChars: 2000,
     };
 
     // Степень детализации вывода вызовов инструментов в чат:
@@ -113,6 +117,10 @@ class UI {
     document.getElementById('chat-messages').addEventListener('click', (e) => {
       const btn = e.target.closest('.code-copy-btn');
       if (btn) this._copyCodeBlock(btn);
+      // Тот же приём для просмотра полного результата инструмента,
+      // вынесенного в артефакт: блоки вызовов появляются по ходу работы.
+      const af = e.target.closest('[data-artifact]');
+      if (af) this.showArtifact(af.dataset.artifact);
     });
     document.getElementById('add-tool-btn').addEventListener('click', () => this.showAddToolModal());
     document.getElementById('add-mcp-server-btn').addEventListener('click', () => this.showAddMCPServerModal());

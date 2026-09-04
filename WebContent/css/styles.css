@@ -722,6 +722,13 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   font-size: 11px;
 }
 
+/* Кнопка просмотра полного результата, вынесенного в артефакт.
+   В кратком режиме .tool-compact обрезает текст по трём строкам —
+   кнопка идёт ПОСЛЕ него, отдельным блоком, иначе попала бы под
+   обрезку вместе с текстом результата. */
+.message.tool-call .tool-artifact { margin-top: 6px; }
+.message.tool-call [data-artifact] { font-size: 11px; padding: 3px 8px; }
+
 .stats-table {
   width: 100%;
   border-collapse: collapse;

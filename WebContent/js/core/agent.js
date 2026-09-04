@@ -10,6 +10,7 @@ class AIAgent {
     this.prompts = null;
     this.folders = null;
     this.files = null;
+    this.artifacts = null;
     this.security = null;
     this.models = null;
     this.ui = null;
@@ -25,9 +26,11 @@ class AIAgent {
     this.prompts = new PromptsLibrary(this.db);
     this.folders = new FoldersEngine(this.db);
     this.files = new FilesEngine(this.db);
+    this.artifacts = new ArtifactsEngine(this.db);
     this.security = new SecurityEngine();
     this.tools.folders = this.folders;
     this.tools.files = this.files;   // доступ к файлам из инструментов
+    this.tools.artifacts = this.artifacts; // чтение больших результатов вне контекста
     this.tools.skills = this.skills; // связь «навык ↔ инструменты» из tools
     this.tools.security = this.security; // единая точка проверки операций
 

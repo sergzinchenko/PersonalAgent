@@ -4,6 +4,11 @@
 //
 // Ядро диалога: отправка сообщения, цикл tool-calling с лимитами, прерывание, копирование кода, голосовой ввод.
 
+// Инструменты чтения артефактов: их собственный результат в артефакт НЕ
+// выносится, даже если он большой. Иначе чтение куска артефакта плодило
+// бы новый артефакт, и модель ходила бы по матрёшке вместо данных.
+const ARTIFACT_TOOLS = new Set(['artifact_read', 'artifact_grep', 'artifact_list']);
+
 Object.assign(UI.prototype, {
 
 
@@ -105,6 +110,9 @@ Object.assign(UI.prototype, {
     // Техническая статистика живёт в отдельном store — чистим и её,
     // иначе останется «сирота» с токенами удалённого чата.
     await this.agent.db.delete('chat_stats', chatId);
+    // То же для больших результатов инструментов: они и по объёму
+    // крупнее всего остального, что оставил бы после себя чат.
+    try { await this.agent.artifacts?.removeByChat(chatId); } catch (_) {}
 
     if (this.currentChatId === chatId) {
       this.currentChatId = null;
@@ -117,7 +125,14 @@ Object.assign(UI.prototype, {
 
   _renderMessage(msg) {
     if (msg.role === 'tool') {
-      return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${this._escHtml(typeof msg.content === 'string' ? msg.content.substring(0, 200) : JSON.stringify(msg.content).substring(0, 200))}</div>`;
+      const body = this._escHtml(typeof msg.content === 'string'
+        ? msg.content.substring(0, 200) : JSON.stringify(msg.content).substring(0, 200));
+      // Полный результат вынесен из переписки — даём его открыть, иначе
+      // при перезагрузке чата от большого ответа осталась бы только шапка.
+      const more = msg.artifactId
+        ? ` <button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(msg.artifactId)}">📄 полностью</button>`
+        : '';
+      return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}</div>`;
     }
     if (msg.role === 'system') {
       // Отметка смены модели — самостоятельный тип записи, показываем целиком
@@ -848,15 +863,40 @@ Object.assign(UI.prototype, {
             { timeoutMs: (L.toolTimeoutSeconds || 0) * 1000 }
           );
           const elapsedMs = Math.round(performance.now() - startedAt);
-          const resultStr = JSON.stringify(toolResult);
           const isError = !!(toolResult && toolResult.error);
+
+          // ── Большой результат уходит в артефакт, а не в переписку ──
+          // Полный текст сохраняется отдельной записью, а в историю (и
+          // значит — в КАЖДЫЙ следующий запрос этого хода) попадает
+          // только шапка с идентификатором. Модель дочитывает нужное
+          // через artifact_read/artifact_grep. См. artifacts-engine.js.
+          let resultStr = JSON.stringify(toolResult);
+          let artifactId = null;
+          const artifactThreshold = this.limits.artifactThresholdChars | 0;
+          if (!isError && artifactThreshold > 0 && resultStr.length > artifactThreshold
+              && this.agent.artifacts && !ARTIFACT_TOOLS.has(tc.function.name)) {
+            try {
+              const rec = await this.agent.artifacts.store({
+                chatId,
+                toolName: tc.function.name,
+                args: tc.function.arguments,
+                result: toolResult,
+              });
+              artifactId = rec.id;
+              resultStr = JSON.stringify(this.agent.artifacts.digest(rec));
+            } catch (e) {
+              // Не смогли сохранить (например, кончилось место) — это не
+              // повод терять результат: отдаём как раньше, целиком.
+              console.error('Артефакт не сохранён, результат уходит в контекст целиком', e);
+            }
+          }
 
           await this._recordToolCall(chatId, tc.function.name, elapsedMs, isError);
           if (chatId === this.currentChatId) this.updateChatToolbar();
 
           if (toolResultDiv && toolResultDiv.isConnected) {
             toolResultDiv.innerHTML = this._renderToolCallBlock(
-              tc.function.name, tc.function.arguments, resultStr, elapsedMs, isError
+              tc.function.name, tc.function.arguments, resultStr, elapsedMs, isError, artifactId
             );
             const c = dom();
             if (c) c.scrollTop = c.scrollHeight;
@@ -872,6 +912,10 @@ Object.assign(UI.prototype, {
             timestamp: Date.now(),
             durationMs: elapsedMs,
             isError,
+            // Ссылка на полный результат, если он вынесен из переписки.
+            // Нужна интерфейсу (кнопка «показать полностью») — модели
+            // идентификатор и так виден в самом content.
+            artifactId,
           };
           await this.agent.db.put('messages', toolMsg);
         }
@@ -990,8 +1034,14 @@ Object.assign(UI.prototype, {
 
 
   // Разметка блока вызова инструмента с учётом выбранной детализации.
-  _renderToolCallBlock(name, argsRaw, resultStr, elapsedMs, isError) {
+  // artifactId — если полный результат вынесен из переписки: показываем
+  // кнопку просмотра, иначе пользователь видел бы только шапку и не мог
+  // проверить, что именно получил агент.
+  _renderToolCallBlock(name, argsRaw, resultStr, elapsedMs, isError, artifactId = null) {
     const icon = isError ? '❌' : '🔧';
+    const artifactBtn = artifactId
+      ? `<div class="tool-artifact"><button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(artifactId)}">📄 Показать полный результат</button></div>`
+      : '';
     if (this.toolVerbosity === 'detailed') {
       let argsPretty = argsRaw;
       try { argsPretty = JSON.stringify(JSON.parse(argsRaw), null, 2); } catch (_) {}
@@ -1003,12 +1053,44 @@ Object.assign(UI.prototype, {
         <pre class="tool-pre">${this._escHtml(argsPretty)}</pre>
         <div class="tool-section">Результат:</div>
         <pre class="tool-pre">${this._escHtml(resPretty)}</pre>
+        ${artifactBtn}
       `;
     }
     // compact
     return `<div class="tool-compact">${icon} ${this._escHtml(name)} → ` +
            `${this._escHtml(resultStr.substring(0, 300))}${resultStr.length > 300 ? '…' : ''}</div>` +
-           `<span class="tool-meta">${elapsedMs} мс</span>`;
+           `<span class="tool-meta">${elapsedMs} мс</span>` + artifactBtn;
+  },
+
+
+  // Полный текст артефакта по кнопке из блока вызова инструмента.
+  // Показываем окном по 100 000 символов: в модалку большего смысла не
+  // помещать, а листать длинный текст удобнее кнопкой «дальше».
+  async showArtifact(artifactId, offset = 0) {
+    const rec = await this.agent.artifacts?.get(artifactId);
+    if (!rec) {
+      this._showModal('📄 Результат недоступен',
+        '<p style="font-size:13px;">Полный результат не найден: возможно, чат с ним удалён.</p>');
+      return;
+    }
+    const PAGE = 100000;
+    const chunk = rec.text.slice(offset, offset + PAGE);
+    const end = offset + chunk.length;
+    const hasMore = end < rec.chars;
+    const btnId = 'af_more_' + uid();
+    this._showModal(`📄 ${this._escHtml(rec.toolName)} — полный результат`, `
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+        ${rec.chars.toLocaleString('ru-RU')} символов, ${rec.lines.toLocaleString('ru-RU')} строк · ${this._escHtml(rec.outline)}<br>
+        Показано ${offset.toLocaleString('ru-RU')}–${end.toLocaleString('ru-RU')}. Идентификатор: ${this._escHtml(rec.id)}
+      </div>
+      <pre class="tool-pre" style="max-height:60vh;">${this._escHtml(chunk)}</pre>
+      ${hasMore ? `<button class="btn btn-secondary btn-sm" id="${btnId}" style="margin-top:8px;">▼ Показать следующие ${PAGE.toLocaleString('ru-RU')} символов</button>` : ''}
+    `, null, null, { wide: true });
+    if (hasMore) {
+      // Следующее окно просто заменяет текущее: _showModal переписывает
+      // контейнер #modals целиком, отдельно закрывать нечего.
+      document.getElementById(btnId)?.addEventListener('click', () => this.showArtifact(artifactId, end));
+    }
   },
 
 

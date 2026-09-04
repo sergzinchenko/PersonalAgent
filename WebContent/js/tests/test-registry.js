@@ -25,7 +25,7 @@ sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 const load = (f, ...n) => vm.runInContext(
-  fs.readFileSync('/home/claude/app/' + f, 'utf8') +
+  fs.readFileSync(require('path').join(__dirname, '..', f), 'utf8') +
   (n.length ? '\n' + n.map(x => `globalThis.${x} = ${x};`).join('\n') : ''), sandbox, { filename: f });
 
 load('llm/llm-registry.js', 'LLMRegistry');

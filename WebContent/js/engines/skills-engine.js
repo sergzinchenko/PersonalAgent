@@ -75,6 +75,13 @@ class SkillsEngine {
 	          'отбрасывается — это штатная работа, а не твоя забывчивость. Если начало разговора ' +
 	          'потеряно, скажи об этом прямо и предложи начать новый чат.\n\n' +
 
+	          'БОЛЬШИЕ РЕЗУЛЬТАТЫ. Крупный ответ инструмента не попадает в переписку целиком: ' +
+	          'вместо него ты получаешь шапку с полем artifact_id, размером и началом текста. ' +
+	          'Содержимое НЕ потеряно — читай его порциями (artifact_read) или ищи в нём нужное ' +
+	          '(artifact_grep), перечень — artifact_list. Бери только то, что нужно для задачи: ' +
+	          'вычитывать весь артефакт подряд — то же самое, что тащить его в контекст целиком. ' +
+	          'Никогда не выдумывай содержимое, которого не прочитал.\n\n' +
+
 	          'МОДЕЛЬ. Смена модели действует со СЛЕДУЮЩЕГО запроса: текущий ответ дописывает ' +
 	          'та модель, которая его начала. Не утверждай обратное.\n\n' +
 
@@ -95,7 +102,8 @@ class SkillsEngine {
 	        locked: true,
 	        icon: '⚙️',
 	        category: 'system',
-	        toolIds: ['builtin_memory', 'builtin_ask_user', 'builtin_explain_agent', 'builtin_diagnose'],
+	        toolIds: ['builtin_memory', 'builtin_ask_user', 'builtin_explain_agent', 'builtin_diagnose',
+	                  'builtin_artifact_read', 'builtin_artifact_grep', 'builtin_artifact_list'],
 	      },
 	      {
 	        id: 'skill_coder',
@@ -440,12 +448,23 @@ class SkillsEngine {
 	    // Выключить его нельзя, поэтому состояние выправляется на каждой
 	    // загрузке: в базе, заведённой до его появления, записи просто не
 	    // было, а выключить её могли до того, как запрет появился.
-	    const lockedIds = new Set(defs.filter(d => d.locked).map(d => d.id));
+	    // Заодно его СОДЕРЖИМОЕ приводится к текущему определению в коде:
+	    // редактировать системный навык пользователь не может (в интерфейсе
+	    // у него только «Посмотреть»), поэтому запись в базе обязана быть
+	    // точной копией определения. Без этого база, заведённая раньше,
+	    // навсегда осталась бы с промптом той версии, в которой её создали:
+	    // механизм, добавленный позже (например, артефакты), работал бы, а
+	    // объяснения ему в промпте не было бы.
+	    const lockedDefs = new Map(defs.filter(d => d.locked).map(d => [d.id, d]));
 	    let relocked = 0;
 	    for (const s of existing) {
-	      if (!lockedIds.has(s.id) || (s.locked === true && s.enabled === true)) continue;
-	      s.locked = true;
-	      s.enabled = true;
+	      const def = lockedDefs.get(s.id);
+	      if (!def) continue;
+	      const stale = s.locked !== true || s.enabled !== true ||
+	        s.systemPrompt !== def.systemPrompt || s.description !== def.description ||
+	        (s.toolIds || []).join(',') !== (def.toolIds || []).join(',');
+	      if (!stale) continue;
+	      Object.assign(s, def, { locked: true, enabled: true });
 	      await this.db.put('skills', s);
 	      relocked++;
 	    }

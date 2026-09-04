@@ -37,7 +37,7 @@ sandbox.URL.revokeObjectURL = () => {};
 vm.createContext(sandbox);
 
 const load = (f, ...names) => vm.runInContext(
-  fs.readFileSync('/home/claude/app/' + f, 'utf8') +
+  fs.readFileSync(require('path').join(__dirname, '..', f), 'utf8') +
   (names.length ? '\n' + names.map(n => `globalThis.${n} = ${n};`).join('\n') : ''),
   sandbox, { filename: f });
 

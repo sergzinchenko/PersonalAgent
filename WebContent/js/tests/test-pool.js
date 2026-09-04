@@ -38,7 +38,7 @@ vm.createContext(sandbox);
 // class на верхнем уровне скрипта VM создаёт лексическую привязку, а не
 // свойство globalThis — вытаскиваем классы явным присваиванием.
 const load = (f, ...names) => vm.runInContext(
-  fs.readFileSync('/home/claude/app/' + f, 'utf8') +
+  fs.readFileSync(require('path').join(__dirname, '..', f), 'utf8') +
   '\n' + names.map(n => `globalThis.${n} = ${n};`).join('\n'),
   sandbox, { filename: f });
 load('llm-pool.js', 'LLMPool');

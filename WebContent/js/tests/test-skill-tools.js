@@ -279,7 +279,7 @@ const { SkillsEngine, ToolsEngine } = sandbox;
     ok('системный навык заведён', !!sys);
     ok('он включён и помечен как неотключаемый', sys.enabled === true && sys.locked === true);
     ok('к нему привязаны системные инструменты',
-       sk4.toolIdsOf(sys).length === 4 && sk4.toolIdsOf(sys).includes('builtin_memory'),
+       sk4.toolIdsOf(sys).includes('builtin_memory') && sk4.toolIdsOf(sys).includes('builtin_artifact_read'),
        JSON.stringify(sk4.toolIdsOf(sys)));
 
     const prompt4 = await sk4.buildSystemPrompt();
