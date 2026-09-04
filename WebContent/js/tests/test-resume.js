@@ -204,6 +204,36 @@ class FakeDB {
   await sending2;
   await tick();
 
+  console.log('\n── Ход, идущий в другой вкладке ──');
+  // Свежая запись «выполняется» принадлежит вкладке, которая работает
+  // прямо сейчас. Объявить такой ход прерванным значит починить его
+  // цепочку и предложить продолжить работу, которая не прерывалась.
+  await db.put('chats', { id: 'c9', title: 'Другая вкладка', modelRef: 'conn::a', modelRefs: ['conn::a'], createdAt: 3, updatedAt: 3 });
+  await db.put('messages', {
+    id: 'm_live', chatId: 'c9', role: 'assistant', content: '',
+    tool_calls: [{ id: 'live_1', function: { name: 'read_file', arguments: '{}' } }],
+    timestamp: 12000,
+  });
+  await db.put('runs', {
+    chatId: 'c9', status: 'running', startedAt: Date.now() - 20000, updatedAt: Date.now(),
+    stage: 'шаг 3', partialContent: 'пишется прямо сейчас',
+  });
+  const touched = await ui.checkInterruptedRuns();
+  ok('живой ход другой вкладки не тронут', touched === 0, String(touched));
+  ok('его статус остался «выполняется»', (await db.get('runs', 'c9')).status === 'running');
+  ok('его незакрытый вызов не помечен прерванным',
+     !(await db.getAllByIndex('messages', 'chatId', 'c9')).some(m => m.tool_call_id === 'live_1'));
+  ok('его недописанный ответ не задвоен в переписке',
+     !(await db.getAllByIndex('messages', 'chatId', 'c9')).some(m => m.content === 'пишется прямо сейчас'));
+
+  // А та же запись, замолчавшая надолго, — уже брошенная.
+  await db.put('runs', {
+    chatId: 'c9', status: 'running', startedAt: Date.now() - 300000,
+    updatedAt: Date.now() - 5 * 60 * 1000, stage: 'шаг 3',
+  });
+  ok('замолчавший надолго ход считается прерванным', (await ui.checkInterruptedRuns()) === 1);
+  await ui._runJournalClear('c9');
+
   console.log('\n── Чат без прерванного хода ──');
   await db.put('chats', { id: 'c2', title: 'Чистый', modelRef: 'conn::a', modelRefs: ['conn::a'], createdAt: 2, updatedAt: 2 });
   await ui.loadChat('c2');

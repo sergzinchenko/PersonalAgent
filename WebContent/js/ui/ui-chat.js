@@ -343,6 +343,9 @@ Object.assign(UI.prototype, {
       turnUserMsgId: userMsg.id, partialContent: '', toolCalls: 0,
       model: this.agent.llm.model,
     });
+    // Пока ход идёт, запись регулярно обновляется — иначе другая вкладка
+    // приняла бы его за оборвавшийся (см. ui-resume.js).
+    this._startHeartbeat(chatId);
     if (chatId === this.currentChatId) this._setBusy(true);
     this.refreshSidebar(); // сразу показать индикатор у чата в списке
 

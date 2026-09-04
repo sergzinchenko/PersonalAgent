@@ -23,6 +23,13 @@
 // открытия страницы — верный способ потратить деньги на ход, который
 // уже не нужен, и повторить действие, из-за которого всё и упало.
 
+// Как часто ход подтверждает, что он жив, и через сколько молчания
+// запись считается брошенной. Разрыв между значениями большой намеренно:
+// вкладка могла подтормаживать, а ложное «ход прерван» дороже, чем
+// лишняя минута ожидания перед предложением продолжить.
+UI.RUN_HEARTBEAT_MS = 5000;
+UI.RUN_STALE_MS = 60000;
+
 Object.assign(UI.prototype, {
 
   // ── Журнал ──
@@ -59,7 +66,29 @@ Object.assign(UI.prototype, {
     await this._runJournalPut(chatId, { partialContent: text });
   },
 
+  // ── Признак жизни ──
+  // Ход может надолго уйти в один вызов инструмента, ничего не записывая.
+  // Чтобы отличить «работает прямо сейчас» от «оборвался», запись
+  // регулярно обновляется, пока ход идёт. Без этого вторая открытая
+  // вкладка объявляла бы живой ход первой прерванным — и чинила бы его
+  // цепочку прямо под ней.
+  _startHeartbeat(chatId) {
+    this._heartbeats = this._heartbeats || new Map();
+    this._stopHeartbeat(chatId);
+    const timer = setInterval(() => {
+      if (!this._chatRuns.has(chatId)) return this._stopHeartbeat(chatId);
+      this._runJournalPut(chatId, {});
+    }, UI.RUN_HEARTBEAT_MS);
+    this._heartbeats.set(chatId, timer);
+  },
+
+  _stopHeartbeat(chatId) {
+    const timer = this._heartbeats && this._heartbeats.get(chatId);
+    if (timer) { clearInterval(timer); this._heartbeats.delete(chatId); }
+  },
+
   async _runJournalClear(chatId) {
+    this._stopHeartbeat(chatId);
     if (!chatId || !this.agent.db) return;
     try { await this.agent.db.delete('runs', chatId); } catch (_) {}
   },
@@ -108,7 +137,13 @@ Object.assign(UI.prototype, {
     let records = [];
     try { records = await this.agent.db.getAll('runs'); } catch (_) { return 0; }
 
-    const stale = records.filter(r => r.status === 'running');
+    // Запись, обновлённая только что, принадлежит ходу, который идёт
+    // ПРЯМО СЕЙЧАС — в другой вкладке. Трогать её нельзя: мы бы сохранили
+    // её недописанный ответ, закрыли её незавершённые вызовы отметкой
+    // «прервано» и предложили продолжить работу, которая не прерывалась.
+    const now = Date.now();
+    const stale = records.filter(r =>
+      r.status === 'running' && (now - (r.updatedAt || 0)) > UI.RUN_STALE_MS);
     if (!stale.length) return 0;
 
     for (const rec of stale) {
@@ -223,6 +258,7 @@ Object.assign(UI.prototype, {
     };
     this._chatRuns.set(chatId, run);
     await this._runJournalPut(chatId, { status: 'running', resumed: true, stage: 'возобновление' });
+    this._startHeartbeat(chatId);
 
     if (chatId === this.currentChatId) {
       this._setBusy(true);
