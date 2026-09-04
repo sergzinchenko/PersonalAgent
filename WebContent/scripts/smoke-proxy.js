@@ -39,6 +39,107 @@ const request = (url, { method = 'GET', headers = {}, body = null } = {}) =>
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ── Доверие к сертификатам ──
+// Самая частая причина 502 у внутренних серверов. Проверяем на НАСТОЯЩЕМ
+// самоподписанном сертификате: он выпускается тут же, на время прогона, и
+// нигде не сохраняется — держать в репозитории приватный ключ, пусть и
+// тестовый, не стоит. Если openssl недоступен, блок пропускается: это
+// проверка сборки, а не повод уронить её на чужой машине.
+async function checkTls() {
+  const https = require('https');
+  const { spawnSync } = require('child_process');
+  console.log('\n── TLS: доверие к сертификату ──');
+
+  const probe = spawnSync('openssl', ['version'], { windowsHide: true });
+  if (probe.error || probe.status !== 0) {
+    console.log('  ⚠ openssl недоступен — проверка TLS пропущена');
+    return;
+  }
+
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'smoke-tls-'));
+  const keyPath = path.join(dir, 'key.pem');
+  const certPath = path.join(dir, 'cert.pem');
+  const gen = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', keyPath, '-out', certPath, '-days', '1',
+    '-subj', '/CN=localhost',
+    '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+  ], { windowsHide: true });
+  if (gen.status !== 0 || !fs.existsSync(certPath)) {
+    console.log('  ⚠ не удалось выпустить тестовый сертификат — проверка пропущена');
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  }
+
+  const TLS_TARGET_PORT = 39919;
+  const tlsTarget = https.createServer(
+    { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) },
+    (req, res) => { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('secure-ok'); });
+  await new Promise((r) => tlsTarget.listen(TLS_TARGET_PORT, r));
+  const targetUrl = `https://localhost:${TLS_TARGET_PORT}/x`;
+
+  // Поднимает прокси со своим config.js и делает один запрос.
+  const through = async (tls, port) => {
+    const d = fs.mkdtempSync(path.join(require('os').tmpdir(), 'smoke-p-'));
+    fs.copyFileSync(PROXY_JS, path.join(d, 'proxy.js'));
+    fs.writeFileSync(path.join(d, 'config.js'),
+      `module.exports = { port: ${port}, allowedMethods: ['GET'], allowlist: [], ` +
+      `maxRequestBodyBytes: 1048576, maxLogBytes: 200, noColor: true, tls: ${JSON.stringify(tls)} };\n`);
+    const ch = spawn(process.execPath, ['proxy.js'], { cwd: d, windowsHide: true });
+    let log = '';
+    ch.stdout.on('data', (c) => { log += c; });
+    ch.stderr.on('data', (c) => { log += c; });
+    for (let i = 0; i < 50 && !/Proxy started/.test(log); i++) await wait(100);
+    let res;
+    try {
+      res = await request(`http://127.0.0.1:${port}/?url=` + encodeURIComponent(targetUrl));
+    } catch (e) {
+      res = { status: 0, body: e.message };
+    }
+    ch.kill();
+    await wait(150);
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+    return { res, log };
+  };
+
+  try {
+    // 1. По умолчанию — сертификат неизвестен, но ошибка должна быть внятной.
+    const strict = await through({}, 39920);
+    ok('неизвестный сертификат отвергается', strict.res.status === 502, String(strict.res.status));
+    let body = {};
+    try { body = JSON.parse(strict.res.body); } catch (_) {}
+    ok('502 объясняет, что дело в сертификате', body.tlsError === true, strict.res.body.slice(0, 160));
+    ok('назван код ошибки TLS', /SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET/.test(body.code || ''), String(body.code));
+    ok('предложены варианты решения', Array.isArray(body.howToFix) && body.howToFix.length === 3);
+    ok('первым предложен CA-файл, а не отключение проверки',
+       /caFile/.test((body.howToFix || [])[0] || ''), (body.howToFix || [])[0]);
+
+    // 2. Правильный путь: свой CA — проверка остаётся включённой.
+    const withCa = await through({ caFile: certPath }, 39921);
+    ok('с указанным CA запрос проходит', withCa.res.status === 200 && withCa.res.body === 'secure-ok',
+       `${withCa.res.status} ${withCa.res.body.slice(0, 80)}`);
+    ok('о загрузке CA сказано при старте', /CA-файл загружен/.test(withCa.log), withCa.log.slice(0, 200));
+
+    // 3. Компромисс: исключение для одного хоста.
+    const perHost = await through({ insecureHosts: ['localhost'] }, 39922);
+    ok('исключение для хоста снимает проверку', perHost.res.status === 200, String(perHost.res.status));
+    ok('прокси предупреждает о снятой проверке', /Проверка TLS отключена для хостов/.test(perHost.log));
+
+    // Хост вне списка при этом остаётся защищённым.
+    const otherHost = await through({ insecureHosts: ['example.com'] }, 39923);
+    ok('чужой хост в списке не открывает дверь этому', otherHost.res.status === 502, String(otherHost.res.status));
+
+    // 4. Крайний случай: отключение проверки везде + громкое предупреждение.
+    const insecure = await through({ insecure: true }, 39924);
+    ok('глобальное отключение работает', insecure.res.status === 200, String(insecure.res.status));
+    ok('и сопровождается предупреждением в консоли',
+       /отключена для ВСЕХ адресов/.test(insecure.log), insecure.log.slice(0, 200));
+  } finally {
+    tlsTarget.close();
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
 (async () => {
   if (!fs.existsSync(PROXY_JS)) {
     console.error('Нет dist/proxy/proxy.js — сначала «npm run build».');
@@ -127,6 +228,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   } finally {
     cleanup();
   }
+
+  await checkTls();
 
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);

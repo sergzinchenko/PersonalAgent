@@ -27,6 +27,11 @@ const DEFAULT_CONFIG = {
   maxRequestBodyBytes: 10 * 1024 * 1024,
   maxLogBytes: 4096,
   noColor: false,
+  tls: {
+    caFile: '',
+    insecureHosts: [],
+    insecure: false,
+  },
   sso: {
     curlBin: process.platform === 'win32' ? 'curl.exe' : 'curl',
     useNtlm: true,
@@ -39,6 +44,7 @@ const DEFAULT_CONFIG = {
 config = {
   ...DEFAULT_CONFIG,
   ...config,
+  tls: { ...DEFAULT_CONFIG.tls, ...(config.tls || {}) },
   sso: { ...DEFAULT_CONFIG.sso, ...(config.sso || {}) },
 };
 
@@ -78,6 +84,78 @@ const CURL_USE_NEGOTIATE = !!config.sso.useNegotiate;
 const CURL_INSECURE = !!config.sso.insecure; // -k, для корпоративных self-signed сертификатов
 const CURL_TIMEOUT_SEC = Number(config.sso.timeoutSec || 0);
 const MAX_CURL_RESPONSE_BYTES = config.sso.maxResponseBytes; // ответ curl буферизуется целиком в память
+
+// ---- TLS: доверие к сертификатам целевых серверов ----
+// Node проверяет сертификаты по списку публичных удостоверяющих центров.
+// У внутреннего сервера сертификат обычно выпущен корпоративным CA, которого
+// в этом списке нет, — соединение падает, и раньше пользователь видел только
+// безликое 502. Здесь три уровня, от правильного к крайнему: подсунуть свой
+// CA (проверка остаётся), снять проверку у конкретных хостов, снять везде.
+const TLS_INSECURE_ALL = !!config.tls.insecure;
+const TLS_INSECURE_HOSTS = (config.tls.insecureHosts || [])
+  .map((h) => String(h).trim().toLowerCase()).filter(Boolean);
+
+let CA_CERT = null;       // Buffer с PEM для http/https-пути
+let CA_CERT_PATH = null;  // тот же файл путём — для curl (--cacert)
+const CA_FILE = String(config.tls.caFile || '').trim();
+if (CA_FILE) {
+  const caPath = path.isAbsolute(CA_FILE) ? CA_FILE : path.join(__dirname, CA_FILE);
+  try {
+    CA_CERT = fs.readFileSync(caPath);
+    CA_CERT_PATH = caPath;   // curl принимает путь, а не содержимое
+    console.log(paint(`CA-файл загружен: ${caPath}`, COLORS.green));
+  } catch (e) {
+    // Не падаем: без CA прокси остаётся полезен для обычных адресов, а
+    // молчать нельзя — иначе пользователь будет думать, что CA применён.
+    console.log(paint(`Внимание: не удалось прочитать CA-файл ${caPath} (${e.message}). ` +
+      'Проверка сертификатов пойдёт по стандартному списку.', COLORS.yellow));
+  }
+}
+if (TLS_INSECURE_ALL) {
+  console.log(paint('ВНИМАНИЕ: проверка TLS-сертификатов отключена для ВСЕХ адресов (tls.insecure). ' +
+    'Подменённый сервер станет неотличим от настоящего. Так стоит работать только временно.', COLORS.red));
+} else if (TLS_INSECURE_HOSTS.length) {
+  console.log(paint(`Проверка TLS отключена для хостов: ${TLS_INSECURE_HOSTS.join(', ')}`, COLORS.yellow));
+}
+
+// 'corp.local' покрывает и сам домен, и его поддомены.
+function hostInList(list, host) {
+  const h = String(host || '').toLowerCase();
+  return list.some((entry) => h === entry || h.endsWith('.' + entry));
+}
+
+function tlsSkipsVerification(hostname) {
+  return TLS_INSECURE_ALL || hostInList(TLS_INSECURE_HOSTS, hostname);
+}
+
+// Ошибки TLS Node отдаёт кодами вроде UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+// Без расшифровки они выглядят как случайный сбой сети, и пользователь ищет
+// проблему не там — поэтому переводим их в понятный текст с готовым решением.
+const TLS_ERROR_HINTS = {
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'сертификат выпущен неизвестным удостоверяющим центром',
+  UNABLE_TO_GET_ISSUER_CERT: 'не найден сертификат удостоверяющего центра',
+  UNABLE_TO_GET_ISSUER_CERT_LOCALLY: 'сертификат выпущен центром, которого нет в списке доверенных',
+  SELF_SIGNED_CERT_IN_CHAIN: 'в цепочке есть самоподписанный сертификат',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'сертификат самоподписанный',
+  CERT_HAS_EXPIRED: 'срок действия сертификата истёк',
+  CERT_NOT_YET_VALID: 'срок действия сертификата ещё не начался',
+  ERR_TLS_CERT_ALTNAME_INVALID: 'имя в сертификате не совпадает с адресом, по которому к нему обратились',
+};
+
+function describeTlsError(err, hostname) {
+  const reason = TLS_ERROR_HINTS[err.code];
+  if (!reason) return null;
+  return {
+    error: `Не удалось проверить TLS-сертификат ${hostname}: ${reason} (${err.code}).`,
+    tlsError: true,
+    code: err.code,
+    howToFix: [
+      `Лучше всего: указать свой корпоративный CA в config.js — tls.caFile: 'путь/к/ca.pem'. Проверка при этом остаётся включённой.`,
+      `Если до CA-файла не добраться: tls.insecureHosts: ['${hostname}'] — проверка снимается только для этого адреса.`,
+      'Крайний случай: tls.insecure: true — проверка снимается для всех адресов, включая внешние.',
+    ],
+  };
+}
 
 // Проверка при старте: есть ли curl.exe на этой машине (не блокирует запуск, только предупреждает).
 (function checkCurlAvailable() {
@@ -243,14 +321,19 @@ function parseCurlHeaderDump(dump) {
 }
 
 // ---- Выполняет запрос через curl.exe с NTLM/Negotiate SSO (-u : => текущий пользователь Windows) ----
-function runCurlRequest({ method, url, headers, body }) {
+function runCurlRequest({ method, url, headers, body, hostname }) {
   return new Promise((resolve, reject) => {
     const tmpHeaderFile = path.join(os.tmpdir(), `proxy-sso-headers-${crypto.randomUUID()}.txt`);
     const cleanup = () => fs.unlink(tmpHeaderFile, () => {});
 
     const args = ['-s', '-S', '--http1.1', '-D', tmpHeaderFile, '-o', '-', '-X', method];
 
-    if (CURL_INSECURE) args.push('-k');
+    // Те же три уровня доверия, что и на обычном пути, иначе настройка
+    // работала бы только наполовину: обычный запрос проходит, а тот же
+    // адрес через SSO — нет. sso.insecure оставлен для совместимости со
+    // старыми config.js и означает то же, что tls.insecure.
+    if (CA_CERT_PATH) args.push('--cacert', CA_CERT_PATH);
+    if (CURL_INSECURE || tlsSkipsVerification(hostname)) args.push('-k');
     if (CURL_TIMEOUT_SEC) args.push('--max-time', String(CURL_TIMEOUT_SEC));
 
     const authMechanisms = [];
@@ -411,7 +494,9 @@ const server = http.createServer(async (req, res) => {
   if (useSso) {
     // ---- Путь через curl.exe (NTLM/Negotiate SSO текущего пользователя Windows) ----
     try {
-      const upstreamResp = await runCurlRequest({ method: req.method, url: target, headers, body });
+      const upstreamResp = await runCurlRequest({
+        method: req.method, url: target, headers, body, hostname: parsed.hostname,
+      });
 
       section('RESPONSE (curl SSO)');
       console.log(
@@ -452,6 +537,15 @@ const server = http.createServer(async (req, res) => {
     headers,
   };
 
+  // Доверие к сертификату настраивается только для https — у http его нет.
+  if (parsed.protocol === 'https:') {
+    if (CA_CERT) options.ca = CA_CERT;
+    if (tlsSkipsVerification(parsed.hostname)) {
+      options.rejectUnauthorized = false;
+      console.log(paint(`  TLS: проверка сертификата отключена для ${parsed.hostname}`, COLORS.yellow));
+    }
+  }
+
   const upstream = lib.request(options, (upRes) => {
     const code = upRes.statusCode || 502;
     const statusLine = `HTTP/${upRes.httpVersion} ${code} ${upRes.statusMessage || ''}`;
@@ -470,6 +564,25 @@ const server = http.createServer(async (req, res) => {
 
   upstream.on('error', (err) => {
     section('ERROR');
+
+    // Сбой проверки сертификата — самая частая причина 502 при работе с
+    // внутренними серверами. Отвечаем не кодом ошибки Node, а объяснением
+    // и готовыми вариантами: иначе по «502 Error contacting the target
+    // server: unable to verify the first certificate» непонятно ни что
+    // сломалось, ни что править.
+    const tls = describeTlsError(err, parsed.hostname);
+    if (tls) {
+      console.log(paint(tls.error, COLORS.red));
+      tls.howToFix.forEach((line) => console.log(paint('  → ' + line, COLORS.yellow)));
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(tls));
+      } else {
+        res.destroy();
+      }
+      return;
+    }
+
     console.log(paint(`Error contacting target: ${err.message}`, COLORS.red));
     sendError(res, 502, `Error contacting the target server: ${err.message}`);
   });

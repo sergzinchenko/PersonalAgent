@@ -196,6 +196,35 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
      !!down.error && /не удалось связаться с прокси/i.test(down.error), JSON.stringify(down));
   ok('и сказано, что делать', /node proxy\/proxy\.js/.test(down.hint || ''));
 
+  console.log('\n── Сбой проверки сертификата ──');
+  // Прокси отвечает 502 с разобранным описанием — инструмент обязан
+  // донести его как ошибку с готовым решением, а не как обычное тело.
+  nextResponse = {
+    status: 502, statusText: 'Bad Gateway', contentType: 'application/json',
+    body: JSON.stringify({
+      error: 'Не удалось проверить TLS-сертификат intranet.corp.local: сертификат самоподписанный (DEPTH_ZERO_SELF_SIGNED_CERT).',
+      tlsError: true,
+      code: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+      howToFix: ['caFile', 'insecureHosts', 'insecure'],
+    }),
+  };
+  const tlsFail = await call({ url: 'https://intranet.corp.local/x' });
+  ok('ошибка сертификата возвращается как ошибка, а не как тело ответа',
+     !!tlsFail.error && tlsFail.tlsError === true, JSON.stringify(tlsFail).slice(0, 160));
+  ok('код ошибки TLS сохранён', tlsFail.code === 'DEPTH_ZERO_SELF_SIGNED_CERT');
+  ok('варианты решения переданы модели', Array.isArray(tlsFail.howToFix) && tlsFail.howToFix.length === 3);
+  ok('в подсказке сказано, что чинится это в настройках прокси',
+     /config\.js/.test(tlsFail.hint || ''), tlsFail.hint);
+  ok('и что менять инструмент бессмысленно',
+     /не повод пробовать другой инструмент/.test(tlsFail.hint || ''));
+
+  // Обычный 502 (сервер недоступен) остаётся обычным ответом со статусом.
+  nextResponse = { status: 502, statusText: 'Bad Gateway', contentType: 'text/plain', body: 'upstream down' };
+  const plain502 = await call({ url: 'https://example.com/x' });
+  ok('прочий 502 не выдаётся за ошибку сертификата',
+     plain502.status === 502 && !plain502.tlsError, JSON.stringify(plain502).slice(0, 120));
+  nextResponse = { status: 200, statusText: 'OK', body: 'ok', contentType: 'text/plain' };
+
   console.log('\n── SSO: настройка ──');
   const ssoOff = await call({ url: 'https://intranet.corp.local/x', sso: true });
   ok('SSO запрещён, пока не разрешён в настройках',

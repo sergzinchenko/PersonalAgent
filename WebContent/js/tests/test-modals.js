@@ -238,6 +238,26 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ok('комментарии сохранены — файл предназначен для правки руками',
        /Белый список хостов/.test(cfgText));
 
+    // TLS-раздел: без него сгенерированный config.js не даст справиться с
+    // корпоративным сертификатом, а это самая частая причина 502.
+    const tlsCfg = (() => {
+      const text = ui._buildProxyConfigJs({
+        port: 3000, methods: ['GET'], allowlist: [], bodyMb: 10, curlBin: 'curl',
+        useNtlm: true, useNegotiate: true, insecure: false, ssoTimeout: 60, ssoMb: 20,
+        caFile: 'C:\\corp\\ca.pem', tlsInsecureHosts: ['intranet.corp.local'], tlsInsecure: false,
+      });
+      const m = { exports: {} };
+      new Function('module', 'exports', text)(m, m.exports);
+      return { cfg: m.exports, text };
+    })();
+    ok('в config.js есть раздел tls', !!tlsCfg.cfg.tls);
+    ok('путь к CA перенесён без потери слэшей', tlsCfg.cfg.tls.caFile === 'C:\\corp\\ca.pem', tlsCfg.cfg.tls.caFile);
+    ok('исключения по хостам перенесены',
+       tlsCfg.cfg.tls.insecureHosts.join(',') === 'intranet.corp.local');
+    ok('глобальное отключение по умолчанию выключено', tlsCfg.cfg.tls.insecure === false);
+    ok('в комментариях CA назван лучшим вариантом', /ЛУЧШИЙ ВАРИАНТ/.test(tlsCfg.text));
+    ok('а отключение проверки — крайним', /КРАЙНИЙ СЛУЧАЙ/.test(tlsCfg.text));
+
     const bat = ui._buildProxyLauncher('bat');
     ok('bat переходит в свою папку', /cd \/d "%~dp0"/.test(bat));
     ok('bat проверяет наличие node', /where node/.test(bat));

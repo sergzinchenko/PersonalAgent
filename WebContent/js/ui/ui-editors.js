@@ -250,6 +250,37 @@ Object.assign(UI.prototype, {
       </div>
 
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:6px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:4px;">TLS-сертификаты</div>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;">
+          У внутренних серверов сертификат обычно выпущен корпоративным центром,
+          которого нет в списке доверенных, — без настройки такой запрос падает с 502.
+          Варианты ниже идут от правильного к крайнему; берите первый, который применим.
+        </div>
+        <div class="form-group">
+          <label>Путь к CA-файлу (PEM) — рекомендуется</label>
+          <input id="pg_ca" placeholder="ca.pem или C:\\corp\\ca.pem — пусто = не использовать">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Проверка при этом ОСТАЁТСЯ включённой: прокси просто узнаёт про ваш
+            удостоверяющий центр. Подменённый сертификат по-прежнему будет отвергнут.
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Не проверять сертификат у хостов</label>
+          <input id="pg_tls_hosts" placeholder="intranet.corp.local — пусто = проверять у всех">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Компромисс, когда до CA-файла не добраться. <code>corp.local</code> покрывает и поддомены.
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400;">
+          <input type="checkbox" id="pg_tls_insecure" style="width:auto;"> Не проверять сертификаты вообще нигде
+        </label>
+        <div style="font-size:11px;color:var(--danger);margin:2px 0 8px 22px;line-height:1.5;">
+          Крайний случай. Снимает защиту от подмены сервера на ВСЕХ адресах, включая внешние:
+          перехватчик трафика станет неотличим от настоящего сервера. Только на время разбирательства.
+        </div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:6px;">
         <div style="font-weight:600;font-size:13px;margin-bottom:4px;">SSO (доменная аутентификация)</div>
         <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;">
           Включается не здесь, а в каждом запросе отдельно (<code>sso: true</code>). Эти значения
@@ -299,6 +330,10 @@ Object.assign(UI.prototype, {
 
       const opts = {
         port: num('pg_port', 3000),
+        caFile: (document.getElementById('pg_ca')?.value || '').trim(),
+        tlsInsecureHosts: (document.getElementById('pg_tls_hosts')?.value || '')
+          .split(/[\s,;]+/).map(h => h.trim()).filter(Boolean),
+        tlsInsecure: !!document.getElementById('pg_tls_insecure')?.checked,
         methods: methods.length ? methods : ['GET'],
         allowlist,
         bodyMb: num('pg_body_mb', 10),
@@ -381,6 +416,23 @@ module.exports = {
 
   // Отключить цветной (ANSI) вывод — удобно, если логи пишутся в файл.
   noColor: false,
+
+  // ---- TLS: доверие к сертификатам целевых серверов ----
+  // Варианты от правильного к крайнему — берите первый, который применим.
+  tls: {
+    // 1. ЛУЧШИЙ ВАРИАНТ: PEM с сертификатом вашего удостоверяющего центра.
+    //    Проверка ОСТАЁТСЯ включённой, просто Node узнаёт про ваш CA.
+    //    Путь абсолютный или относительно папки с proxy.js.
+    caFile: ${q(o.caFile || '')},
+
+    // 2. КОМПРОМИСС: не проверять сертификат только у этих хостов.
+    //    'corp.local' покрывает и 'intranet.corp.local'.
+    insecureHosts: [${(o.tlsInsecureHosts || []).map(q).join(', ')}],
+
+    // 3. КРАЙНИЙ СЛУЧАЙ: не проверять ни у кого. Отключает защиту от
+    //    подмены сервера на ВСЕХ адресах, включая внешние.
+    insecure: ${!!o.tlsInsecure},
+  },
 
   // ---- SSO: аутентификация к целевому серверу через curl (NTLM/Negotiate) ----
   // Включается на конкретный запрос заголовком X-Use-Sso: 1 или ?sso=1 —
