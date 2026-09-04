@@ -193,6 +193,88 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ── Подключение к вики (Confluence / xWiki) ──
+  // Форму открывает инструмент *_configure, но заполняет её пользователь, и
+  // секрет уходит отсюда прямо в шифрованное хранилище. Через модель он не
+  // проходит: собери агент токен через ask_user — тот стал бы результатом
+  // вызова инструмента, то есть частью истории диалога, которая уходит
+  // провайдеру при каждом следующем запросе.
+  //
+  // Возвращает промис: инструмент ждёт, чем кончилось, чтобы ответить
+  // модели «настроено» или «пользователь закрыл форму».
+  showWikiConfigModal(kind) {
+    const isConfluence = kind === 'confluence';
+    const title = isConfluence ? 'Confluence (On-Premise)' : 'xWiki (On-Premise)';
+
+    return new Promise(async (resolve) => {
+      let settled = false;
+      const saved = await this.agent.db.get('settings',
+        isConfluence ? 'wiki_confluence' : 'wiki_xwiki').catch(() => null);
+
+      this._showModal(`🔗 ${title}`, `
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+          ${isConfluence
+            ? 'Персональный токен доступа (PAT) создаётся в самом Confluence: профиль → Personal Access Tokens.'
+            : 'Учётная запись xWiki — та же, под которой вы входите в вики (Basic-авторизация).'}
+          Данные сохранятся до следующего изменения: заново спрашивать их агент не будет.
+        </div>
+
+        <div class="form-group">
+          <label>Адрес сервера</label>
+          <input id="wk_url" value="${this._escHtml(saved?.baseUrl || '')}"
+                 placeholder="${isConfluence ? 'https://confluence.corp.local' : 'https://xwiki.corp.local'}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Без «/rest» на конце — путь инструмент добавит сам.
+          </div>
+        </div>
+
+        ${isConfluence ? '' : `
+        <div class="form-group">
+          <label>Имя учётной записи</label>
+          <input id="wk_user" value="${this._escHtml(saved?.user || '')}" placeholder="ivanov">
+        </div>`}
+
+        <div class="form-group">
+          <label>${isConfluence ? 'Персональный токен' : 'Пароль'}</label>
+          <input id="wk_secret" type="password"
+                 placeholder="${saved?.secret ? 'Сохранён — оставьте пустым, чтобы не менять' : ''}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Хранится в браузере в зашифрованном виде (AES-GCM), как ключи провайдеров.
+            Модели не передаётся и в переписке не появляется.
+          </div>
+        </div>
+
+        ${saved ? `<label class="check-row">
+          <input type="checkbox" id="wk_forget"> Забыть это подключение
+        </label>` : ''}
+      `, async () => {
+        settled = true;
+        if (document.getElementById('wk_forget')?.checked) {
+          await this.agent.tools._wikiForget(kind);
+          this.renderTools?.();
+          return resolve({ forgotten: true });
+        }
+
+        const baseUrl = (document.getElementById('wk_url')?.value || '').trim();
+        const user = (document.getElementById('wk_user')?.value || '').trim();
+        const secret = document.getElementById('wk_secret')?.value || '';
+
+        if (!baseUrl) return resolve({ cancelled: true, reason: 'не указан адрес' });
+        // Пустое поле секрета при уже сохранённом — «не менять»: заставлять
+        // вводить токен заново ради смены адреса незачем.
+        const keepOld = !secret && saved?.secret;
+        const res = await this.agent.tools._wikiSaveConfig(kind, {
+          baseUrl,
+          user: user || saved?.user || '',
+          secret: keepOld ? await SecretsVault.decrypt(this.agent.db, saved.secret) : secret,
+        });
+        this.renderTools?.();
+        resolve({ baseUrl: res.baseUrl, user: res.user });
+      }, () => { if (!settled) resolve({ cancelled: true }); });
+    });
+  },
+
+
   // ── Генератор файлов локального прокси ──
   // Прокси — отдельный Node-процесс, и до сих пор его нужно было добыть
   // самому. Здесь его комплект собирается по заполненной форме: config.js

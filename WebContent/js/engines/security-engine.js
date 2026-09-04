@@ -96,12 +96,21 @@ class SecurityEngine {
     ask_user: 'read', explain_agent: 'read', diagnose: 'read',
     search_chats: 'read', list_files: 'read', read_file: 'read',
     search_files: 'read',
+    // Вики: адрес задан пользователем в настройках и модели неподконтролен,
+    // поэтому это не 'network' (та категория существует ради случая, когда
+    // хост выбирает модель — см. http_fetch). Чтение читает, запись пишет.
+    confluence_status: 'read', confluence_search: 'read', confluence_get_page: 'read',
+    confluence_list_spaces: 'read',
+    xwiki_status: 'read', xwiki_search: 'read', xwiki_get_page: 'read',
+    xwiki_list_spaces: 'read',
 
     // Запись
     create_folder: 'write', rename_folder: 'write', move_folder: 'write',
     move_item: 'write', move_chat: 'write', chat_folder: 'write',
     create_prompt: 'write', update_prompt: 'write',
     create_skill: 'write', update_skill: 'write', link_skill_tools: 'write',
+    confluence_configure: 'write', confluence_create_page: 'write', confluence_update_page: 'write',
+    xwiki_configure: 'write', xwiki_create_page: 'write', xwiki_update_page: 'write',
     persistent_memory: 'write', export_chat: 'write', export_chats: 'write',
 
     // Разрушительное
