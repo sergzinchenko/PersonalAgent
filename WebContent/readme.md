@@ -35,6 +35,7 @@
 ```
 index.html
 css/styles.css
+js/core/changelog.js
 js/core/db.js
 js/core/crypto-utils.js
 js/core/markdown.js
@@ -52,6 +53,7 @@ js/tools/tools-wiki.js
 js/tools/tools-artifacts.js
 js/tools/tools-subtask.js
 js/tools/tools-tasks.js
+js/tools/tools-about.js
 js/engines/skills-engine.js
 js/engines/prompts-library.js
 js/engines/folders-engine.js
@@ -59,7 +61,9 @@ js/engines/files-engine.js
 js/engines/artifacts-engine.js
 js/engines/tasks-engine.js
 js/engines/security-engine.js
+js/engines/about-engine.js
 js/ui/ui-core.js
+js/ui/ui-about.js
 js/ui/ui-navigation.js
 js/ui/ui-chat.js
 js/ui/ui-subtask.js
