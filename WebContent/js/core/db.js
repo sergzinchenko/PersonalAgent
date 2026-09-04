@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 11) {
+  constructor(name = 'ai_agent_db', version = 12) {
     this.name = name;
     this.version = version;
     this.db = null;
@@ -89,6 +89,12 @@ class AgentDB {
         if (!db.objectStoreNames.contains('tasks')) {
           const s = db.createObjectStore('tasks', { keyPath: 'id' });
           s.createIndex('chatId', 'chatId');
+        }
+        // Журнал активного хода (см. ui/ui-resume.js). Запись живёт
+        // только пока ход идёт: оставшаяся после запуска означает, что
+        // вкладка не дожила до конца работы, и её можно продолжить.
+        if (!db.objectStoreNames.contains('runs')) {
+          db.createObjectStore('runs', { keyPath: 'chatId' });
         }
       };
       req.onsuccess = (e) => {

@@ -773,6 +773,10 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   overflow: auto;
 }
 .message.system.context-summary [data-summary-toggle] { margin-left: 6px; font-size: 11px; padding: 2px 8px; }
+
+/* Предложение продолжить прерванный ход. Заметное, но не тревожное:
+   работа не потеряна, решение продолжать — за пользователем. */
+.message.system.resume-offer { border-left: 2px solid var(--warning); }
 .message.tool-call [data-artifact] { font-size: 11px; padding: 3px 8px; }
 
 .stats-table {

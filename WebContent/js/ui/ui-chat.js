@@ -60,6 +60,10 @@ Object.assign(UI.prototype, {
     // в основной разговор можно было бы только через другой чат.
     await this._renderSubtaskBanner(chatId, container);
 
+    // Ход в этом чате мог оборваться в прошлый раз (закрытая вкладка,
+    // сбой) — предложим продолжить с места остановки.
+    await this.renderResumeOffer(chatId);
+
     // ── Восстановление визуализации, если чат всё ещё генерирует ответ ──
     // Пока мы смотрели на другой чат, этот мог продолжать работать в
     // фоне: сообщения, уже завершённые к этому моменту, только что
@@ -255,6 +259,12 @@ Object.assign(UI.prototype, {
     input.value = '';
     input.style.height = 'auto';
 
+    // Прошлый ход мог оборваться посреди цепочки инструментов и оставить
+    // вызов без результата. Такой запрос провайдер отвергает целиком —
+    // чат оказался бы нерабочим навсегда, поэтому чиним перед отправкой.
+    document.getElementById('resume-offer')?.remove();
+    await this.repairDanglingToolCalls(chatId);
+
     const chat = await this.agent.db.get('chats', chatId);
     // Пока идут await ниже, пользователь мог уйти в другой чат — каждое
     // обращение к DOM берёт контейнер заново и только если chatId всё ещё
@@ -325,6 +335,14 @@ Object.assign(UI.prototype, {
       statusTimer: null,
     };
     this._chatRuns.set(chatId, run);
+    // Журнал хода: с этого момента обрыв (закрытая вкладка, сбой,
+    // перезагрузка) будет виден при следующем запуске, и работу можно
+    // будет продолжить с места остановки — см. ui-resume.js.
+    await this._runJournalPut(chatId, {
+      status: 'running', startedAt: run.startedAt, stage: 'начало хода',
+      turnUserMsgId: userMsg.id, partialContent: '', toolCalls: 0,
+      model: this.agent.llm.model,
+    });
     if (chatId === this.currentChatId) this._setBusy(true);
     this.refreshSidebar(); // сразу показать индикатор у чата в списке
 
@@ -426,6 +444,10 @@ Object.assign(UI.prototype, {
     const run = this._chatRuns.get(chatId);
     if (run) clearInterval(run.statusTimer);
     this._chatRuns.delete(chatId);
+    // Ход закончился штатно — журналу больше нечего сторожить. Запись
+    // удаляем именно здесь: она означает «ход идёт», и оставленная
+    // после завершения, предложила бы продолжить уже законченное.
+    this._runJournalClear(chatId);
     if (chatId === this.currentChatId) {
       this._setBusy(false);
       document.getElementById('agent-status')?.remove();
@@ -711,6 +733,10 @@ Object.assign(UI.prototype, {
       depth === 0 ? 'Отправляю запрос модели…' : `Продолжаю работу (шаг ${depth + 1})…`,
       this.agent.llm.model ? '🧠 ' + this.agent.llm.model : ''
     );
+    await this._runJournalPut(chatId, {
+      stage: `шаг ${depth + 1}`, depth, toolCalls: run.turnToolCalls,
+      model: this.agent.llm.model, partialContent: '',
+    });
 
     // AbortController прерывает сам HTTP-запрос к LLM — и по таймауту хода,
     // и по кнопке «⏹» (stopAgent() вызывает abort() через run.abortCtl).
@@ -855,6 +881,10 @@ Object.assign(UI.prototype, {
         signal: abortCtl.signal,
         onChunk: (chunk) => {
           run.partialContent += chunk;
+          // Не чаще раза в полторы секунды: иначе закрытая посреди
+          // ответа вкладка унесла бы уже написанный текст, а запись на
+          // каждый токен тормозила бы отрисовку.
+          this._runJournalStream(chatId, run.partialContent);
           if (!firstChunkSeen) {
             firstChunkSeen = true;
             this._showStatus(chatId, 'Модель отвечает…', '');
@@ -1024,6 +1054,9 @@ Object.assign(UI.prototype, {
             subChatId,
           };
           await this.agent.db.put('messages', toolMsg);
+          await this._runJournalPut(chatId, {
+            stage: 'после ' + tc.function.name, toolCalls: run.turnToolCalls, partialContent: '',
+          });
         }
 
         clearTimeout(turnTimer);

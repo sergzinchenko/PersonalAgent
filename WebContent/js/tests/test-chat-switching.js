@@ -77,6 +77,7 @@ class FakeDB {
     'js/ui/ui-chat.js',
     'js/ui/ui-subtask.js',
     'js/ui/ui-compaction.js',
+    'js/ui/ui-resume.js',
     'js/ui/ui-metrics.js',
     'js/ui/ui-settings.js',
     'js/ui/ui-connections.js',

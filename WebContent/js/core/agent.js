@@ -147,6 +147,18 @@ class AIAgent {
       this.ui.updateChatToolbar();
     }
 
+    // Предупреждение при закрытии вкладки во время работы агента и
+    // разбор ходов, оборвавшихся в прошлый раз (см. ui/ui-resume.js).
+    // Именно здесь, в самом конце: нужен уже открытый чат, чтобы
+    // предложение продолжить появилось там, где работа и оборвалась.
+    this.ui._bindUnloadGuard();
+    try {
+      const interrupted = await this.ui.checkInterruptedRuns();
+      if (interrupted) console.warn('Прерванных ходов найдено:', interrupted);
+    } catch (e) {
+      console.error('Не удалось разобрать прерванные ходы', e);
+    }
+
     console.log('🚀 AI Agent initialized');
   }
 }
