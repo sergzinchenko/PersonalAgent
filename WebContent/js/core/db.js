@@ -83,6 +83,13 @@ class AgentDB {
           const s = db.createObjectStore('artifacts', { keyPath: 'id' });
           s.createIndex('chatId', 'chatId');
         }
+        // Планы задач (см. engines/tasks-engine.js): состояние длинной
+        // работы, которое не должно зависеть от переписки и переживает
+        // и подрезку контекста, и перезагрузку страницы.
+        if (!db.objectStoreNames.contains('tasks')) {
+          const s = db.createObjectStore('tasks', { keyPath: 'id' });
+          s.createIndex('chatId', 'chatId');
+        }
       };
       req.onsuccess = (e) => {
         this.db = e.target.result;

@@ -11,6 +11,7 @@ class AIAgent {
     this.folders = null;
     this.files = null;
     this.artifacts = null;
+    this.tasks = null;
     this.security = null;
     this.models = null;
     this.ui = null;
@@ -27,10 +28,12 @@ class AIAgent {
     this.folders = new FoldersEngine(this.db);
     this.files = new FilesEngine(this.db);
     this.artifacts = new ArtifactsEngine(this.db);
+    this.tasks = new TasksEngine(this.db);
     this.security = new SecurityEngine();
     this.tools.folders = this.folders;
     this.tools.files = this.files;   // доступ к файлам из инструментов
     this.tools.artifacts = this.artifacts; // чтение больших результатов вне контекста
+    this.tools.tasks = this.tasks;         // план задачи, живущий вне переписки
     this.tools.skills = this.skills; // связь «навык ↔ инструменты» из tools
     this.tools.security = this.security; // единая точка проверки операций
 

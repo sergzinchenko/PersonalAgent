@@ -273,6 +273,22 @@ Object.assign(UI.prototype, {
       contextChip = `<span class="chip stat-chip muted" title="Окно контекста выбранной модели">📐 окно ${this._fmtLimit(ctxLimit)}</span>`;
     }
 
+    // ── План задачи ──
+    // Пока агент ведёт план, пользователь должен видеть то же, что видит
+    // модель: на каком шаге работа и сколько осталось. Иначе длинная
+    // задача выглядит как молчание с редкими сообщениями.
+    let planChip = '';
+    try {
+      const plan = this.currentChatId ? await this.agent.tasks?.active(this.currentChatId) : null;
+      const sum = plan ? this.agent.tasks.summary(plan) : null;
+      if (sum) {
+        const hint = 'Цель: ' + sum.goal + (sum.current ? '\nСейчас: ' + sum.current : '');
+        planChip = `<span class="chip stat-chip plan-chip" id="task-plan-chip"
+          title="${this._escHtml(hint)}">` +
+          `🗂 план ${sum.done}/${sum.total}${sum.current ? ' · ' + this._escHtml(sum.current.slice(0, 40)) : ''}</span>`;
+      }
+    } catch (_) { /* панель не должна падать из-за плана */ }
+
     const toolsChip = stats && stats.toolCalls
       ? `<span class="chip stat-chip" id="tool-stats-chip" title="Нажмите для подробной статистики">🔧 ${fmt(stats.toolCalls)} вызовов${stats.toolErrors ? ` · ${fmt(stats.toolErrors)} ошибок` : ''}</span>`
       : `<span class="chip stat-chip muted">🔧 нет вызовов</span>`;
@@ -318,6 +334,7 @@ Object.assign(UI.prototype, {
         ${tokensChip}
         ${contextChip}
         ${toolsChip}
+        ${planChip}
       </div>
     `;
 
@@ -378,6 +395,56 @@ Object.assign(UI.prototype, {
     document.getElementById('model-add-btn')?.addEventListener('click', () => this.showChatModelPicker());
 
     document.getElementById('tool-stats-chip')?.addEventListener('click', () => this.showChatStatsModal());
+    document.getElementById('task-plan-chip')?.addEventListener('click', () => this.showTaskPlanModal());
+  },
+
+
+  // ── План задачи целиком ──
+  // Тот же текст, что видит модель, только в человеческом виде: агент и
+  // пользователь должны смотреть на одно и то же состояние работы.
+  // Отсюда же план можно прекратить — если он больше не нужен, а агент
+  // продолжает на него опираться.
+  async showTaskPlanModal() {
+    const plan = this.currentChatId ? await this.agent.tasks?.active(this.currentChatId) : null;
+    if (!plan) {
+      return this._showModal('🗂 План задачи',
+        '<p style="color:var(--text-secondary);font-size:13px;">Активного плана нет.</p>', null);
+    }
+
+    const mark = { done: '✔', doing: '▶', failed: '✖', todo: '·' };
+    const rows = plan.steps.map(s => `
+      <div class="plan-step plan-${s.status}">
+        <span class="plan-mark">${mark[s.status] || '·'}</span>
+        <span class="plan-title">${s.n}. ${this._escHtml(s.title)}</span>
+        ${s.note ? `<div class="plan-note">${this._escHtml(s.note)}</div>` : ''}
+      </div>`).join('');
+
+    const done = plan.steps.filter(s => s.status === 'done').length;
+    this._showModal('🗂 План задачи', `
+      <div class="form-group">
+        <label>Цель</label>
+        <div style="font-size:13px;">${this._escHtml(plan.goal)}</div>
+      </div>
+      <div class="form-group">
+        <label>Шаги — готово ${done} из ${plan.steps.length}</label>
+        <div class="plan-list">${rows}</div>
+      </div>
+      ${plan.facts.length ? `<div class="form-group">
+        <label>Выяснено по ходу работы</label>
+        <ul class="sec-risks">${plan.facts.map(f => `<li>${this._escHtml(f)}</li>`).join('')}</ul>
+      </div>` : ''}
+      <div style="font-size:11px;color:var(--text-muted);">
+        План хранится отдельно от переписки, поэтому переживает подрезку контекста
+        и перезагрузку страницы. Кнопка ниже закрывает его: агент перестанет
+        получать эту сводку в каждом запросе.
+      </div>
+    `, async () => { await this.agent.tasks.finish(this.currentChatId, 'cancelled'); this.updateChatToolbar(); },
+      null, { wide: true });
+
+    // Кнопка «Сохранить» здесь означает «прекратить план» — подписываем
+    // её честно, иначе пользователь нажмёт её, ожидая сохранения.
+    const save = document.querySelector('#modals .btn-primary');
+    if (save) save.textContent = 'Прекратить план';
   },
 
 

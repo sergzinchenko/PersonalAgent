@@ -126,6 +126,8 @@ Object.assign(UI.prototype, {
     // То же для больших результатов инструментов: они и по объёму
     // крупнее всего остального, что оставил бы после себя чат.
     try { await this.agent.artifacts?.removeByChat(chatId); } catch (_) {}
+    // И для планов задач этого чата — они тоже привязаны только к нему.
+    try { await this.agent.tasks?.removeByChat(chatId); } catch (_) {}
 
     if (this.currentChatId === chatId) {
       this.currentChatId = null;
@@ -718,6 +720,18 @@ Object.assign(UI.prototype, {
       allMsgs.sort((a, b) => a.timestamp - b.timestamp);
 
       let systemPrompt = await this.agent.skills.buildSystemPrompt();
+
+      // ── План задачи ──
+      // Состояние длинной работы живёт в отдельной записи, а не в
+      // переписке (см. engines/tasks-engine.js), и подставляется в
+      // системный промпт при каждом запросе. Поэтому «что уже сделано и
+      // что осталось» переживает и подрезку истории, и перезагрузку
+      // страницы: сводка занимает десяток строк, а обсуждение плана,
+      // которое она заменяет, занимало бы всю переписку.
+      try {
+        const plan = await this.agent.tasks?.active(chatId);
+        if (plan) systemPrompt += this.agent.tasks.digest(plan);
+      } catch (_) { /* план не критичен для ответа */ }
 
       // ── Упоминание файлов в системном промпте ──
       // Раньше сюда безусловно вставлялся ПЕРЕЧЕНЬ всех файлов. Само его
