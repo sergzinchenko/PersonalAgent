@@ -55,9 +55,11 @@ try {
   load('tools/tools-defs.js');
   load('tools/tools-mcp.js');
   load('tools/tools-llm-router.js');
-  ok('все семь модулей загрузились без ошибок', true);
+  load('tools/tools-artifacts.js');
+  load('tools/tools-subtask.js');
+  ok('все модули загрузились без ошибок', true);
 } catch (e) {
-  ok('все семь модулей загрузились без ошибок', false, e.message);
+  ok('все модули загрузились без ошибок', false, e.message);
   process.exit(1);
 }
 
@@ -262,6 +264,28 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
     tool.enabled = true;
     await db.put('tools', tool);
     engine.security = savedSecurity;
+  }
+
+  {
+    console.log('\n── Инструменты экономии контекста ──');
+    const defs = engine._allBuiltinDefs();
+    const byName = new Map(defs.map(d => [d.name, d]));
+    for (const n of ['artifact_read', 'artifact_grep', 'artifact_list', 'run_subtask']) {
+      const d = byName.get(n);
+      ok(`${n} описан, включён и неотключаем`, !!d && d.enabled === true && d.locked === true,
+         d ? JSON.stringify({ enabled: d.enabled, locked: d.locked }) : 'нет описания');
+    }
+    ok('run_subtask объясняет, что промежуточные вызовы не попадают в разговор',
+       /НЕ попадают/.test(byName.get('run_subtask').description));
+
+    // Подзадача выполняется в интерфейсе: без него инструмент обязан
+    // объяснить отказ, а не упасть.
+    const savedUi = engine.ui;
+    engine.ui = null;
+    const noUi = await engine.executeTool('run_subtask', { goal: 'x' }, {});
+    ok('без интерфейса run_subtask отвечает понятной ошибкой', /недоступны/.test(noUi.error || ''),
+       JSON.stringify(noUi));
+    engine.ui = savedUi;
   }
 
   console.log('\n' + '='.repeat(46));

@@ -727,6 +727,19 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
    кнопка идёт ПОСЛЕ него, отдельным блоком, иначе попала бы под
    обрезку вместе с текстом результата. */
 .message.tool-call .tool-artifact { margin-top: 6px; }
+
+/* Итог подзадачи — не технический вывод, а связный текст, который
+   заменил собой всю её работу: читается как обычный ответ. */
+.message.tool-call .subtask-result {
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--bg-primary);
+  border-left: 2px solid var(--accent, var(--border));
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.message.system.subtask-banner { border-left: 2px solid var(--accent, var(--border)); }
 .message.tool-call [data-artifact] { font-size: 11px; padding: 3px 8px; }
 
 .stats-table {

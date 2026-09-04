@@ -32,6 +32,10 @@ class UI {
       // переписки в артефакт (см. engines/artifacts-engine.js). 0 —
       // выключить и класть всё в контекст, как было раньше.
       artifactThresholdChars: 2000,
+      // Потолок итераций внутри ОДНОЙ подзадачи (run_subtask). Отдельный
+      // от maxToolSteps: подзадача — это часть хода, и ей нужен свой,
+      // более тесный бюджет, иначе одна такая часть съест весь ход.
+      subtaskMaxSteps: 10,
     };
 
     // Степень детализации вывода вызовов инструментов в чат:
@@ -121,6 +125,8 @@ class UI {
       // вынесенного в артефакт: блоки вызовов появляются по ходу работы.
       const af = e.target.closest('[data-artifact]');
       if (af) this.showArtifact(af.dataset.artifact);
+      const sub = e.target.closest('[data-subchat]');
+      if (sub) this.openSubtaskChat(sub.dataset.subchat);
     });
     document.getElementById('add-tool-btn').addEventListener('click', () => this.showAddToolModal());
     document.getElementById('add-mcp-server-btn').addEventListener('click', () => this.showAddMCPServerModal());

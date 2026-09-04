@@ -55,6 +55,11 @@ Object.assign(UI.prototype, {
       container.scrollTop = container.scrollHeight;
     }
 
+    // Переписки подзадач в списке чатов не показываются, поэтому у них
+    // нужен собственный выход обратно — иначе, открыв подзадачу, вернуться
+    // в основной разговор можно было бы только через другой чат.
+    await this._renderSubtaskBanner(chatId, container);
+
     // ── Восстановление визуализации, если чат всё ещё генерирует ответ ──
     // Пока мы смотрели на другой чат, этот мог продолжать работать в
     // фоне: сообщения, уже завершённые к этому моменту, только что
@@ -99,8 +104,16 @@ Object.assign(UI.prototype, {
     if (run) {
       run.stopRequested = true;
       try { run.abortCtl?.abort(); } catch (_) {}
+      try { run.subtaskAbort?.abort(); } catch (_) {}
       clearInterval(run.statusTimer);
       this._chatRuns.delete(chatId);
+    }
+
+    // Переписки подзадач этого чата — его часть: они не показываются
+    // в списке отдельно, и без этого остались бы недостижимым мусором.
+    const allChats = await this.agent.db.getAll('chats');
+    for (const c of allChats) {
+      if (c.subtaskOf === chatId) await this.deleteChat(c.id);
     }
 
     await this.agent.db.delete('chats', chatId);
@@ -132,6 +145,17 @@ Object.assign(UI.prototype, {
       const more = msg.artifactId
         ? ` <button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(msg.artifactId)}">📄 полностью</button>`
         : '';
+      // Подзадача: её итог и вход в переписку — см. _renderToolCallBlock.
+      if (msg.subChatId) {
+        let parsed = null;
+        try { parsed = JSON.parse(msg.content); } catch (_) {}
+        if (parsed) {
+          return `<div class="message tool-call">` +
+            this._renderToolCallBlock(msg.name, '{}', msg.content, msg.durationMs || 0,
+                                      !!msg.isError, msg.artifactId || null, msg.subChatId) +
+            `</div>`;
+        }
+      }
       return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}</div>`;
     }
     if (msg.role === 'system') {
@@ -290,6 +314,9 @@ Object.assign(UI.prototype, {
       turnUserMsgId: userMsg.id,
       stopRequested: false,
       abortCtl: null,
+      // Контроллер запроса подзадачи, пока она выполняется: «⏹» должен
+      // рвать и его, а не только запрос родительского хода.
+      subtaskAbort: null,
       statusTimer: null,
     };
     this._chatRuns.set(chatId, run);
@@ -864,6 +891,9 @@ Object.assign(UI.prototype, {
           );
           const elapsedMs = Math.round(performance.now() - startedAt);
           const isError = !!(toolResult && toolResult.error);
+          // Переписка подзадачи скрыта из списка чатов — единственный
+          // вход в неё ведёт отсюда, из блока её вызова.
+          const subChatId = (toolResult && toolResult.subtask_chat_id) || null;
 
           // ── Большой результат уходит в артефакт, а не в переписку ──
           // Полный текст сохраняется отдельной записью, а в историю (и
@@ -896,7 +926,7 @@ Object.assign(UI.prototype, {
 
           if (toolResultDiv && toolResultDiv.isConnected) {
             toolResultDiv.innerHTML = this._renderToolCallBlock(
-              tc.function.name, tc.function.arguments, resultStr, elapsedMs, isError, artifactId
+              tc.function.name, tc.function.arguments, resultStr, elapsedMs, isError, artifactId, subChatId
             );
             const c = dom();
             if (c) c.scrollTop = c.scrollHeight;
@@ -916,6 +946,8 @@ Object.assign(UI.prototype, {
             // Нужна интерфейсу (кнопка «показать полностью») — модели
             // идентификатор и так виден в самом content.
             artifactId,
+            // То же для подзадачи: ссылка на её переписку.
+            subChatId,
           };
           await this.agent.db.put('messages', toolMsg);
         }
@@ -1037,11 +1069,34 @@ Object.assign(UI.prototype, {
   // artifactId — если полный результат вынесен из переписки: показываем
   // кнопку просмотра, иначе пользователь видел бы только шапку и не мог
   // проверить, что именно получил агент.
-  _renderToolCallBlock(name, argsRaw, resultStr, elapsedMs, isError, artifactId = null) {
+  _renderToolCallBlock(name, argsRaw, resultStr, elapsedMs, isError, artifactId = null, subChatId = null) {
     const icon = isError ? '❌' : '🔧';
     const artifactBtn = artifactId
       ? `<div class="tool-artifact"><button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(artifactId)}">📄 Показать полный результат</button></div>`
       : '';
+    const subBtn = subChatId
+      ? `<div class="tool-artifact"><button class="btn btn-secondary btn-sm" data-subchat="${this._escHtml(subChatId)}">👁 Открыть переписку подзадачи</button></div>`
+      : '';
+
+    // ── Подзадача показывается по-своему ──
+    // Её результат — не технический JSON, а связный текст, который
+    // заменил собой всю работу: пользователь должен видеть именно его,
+    // иначе самая содержательная часть хода выглядит как «{ok:true,…}».
+    if (subChatId) {
+      let parsed = null;
+      try { parsed = JSON.parse(resultStr); } catch (_) {}
+      if (parsed) {
+        const head = parsed.ok
+          ? `🤖 Подзадача выполнена — ${parsed.steps} шаг(ов), ${parsed.tool_calls} вызов(ов) инструментов`
+          : `🤖 Подзадача не завершена: ${this._escHtml(parsed.error || '')}`;
+        const body = parsed.result || '';
+        return `
+          <div><strong>${head}</strong> <span class="tool-meta">${this._fmtDuration(parsed.elapsed_ms || elapsedMs)}</span></div>
+          <div class="tool-section">${this._escHtml(parsed.goal || '')}</div>
+          ${body ? `<div class="subtask-result">${renderMarkdown(body)}</div>` : ''}
+          ${subBtn}`;
+      }
+    }
     if (this.toolVerbosity === 'detailed') {
       let argsPretty = argsRaw;
       try { argsPretty = JSON.stringify(JSON.parse(argsRaw), null, 2); } catch (_) {}
@@ -1053,13 +1108,13 @@ Object.assign(UI.prototype, {
         <pre class="tool-pre">${this._escHtml(argsPretty)}</pre>
         <div class="tool-section">Результат:</div>
         <pre class="tool-pre">${this._escHtml(resPretty)}</pre>
-        ${artifactBtn}
+        ${artifactBtn}${subBtn}
       `;
     }
     // compact
     return `<div class="tool-compact">${icon} ${this._escHtml(name)} → ` +
            `${this._escHtml(resultStr.substring(0, 300))}${resultStr.length > 300 ? '…' : ''}</div>` +
-           `<span class="tool-meta">${elapsedMs} мс</span>` + artifactBtn;
+           `<span class="tool-meta">${elapsedMs} мс</span>` + artifactBtn + subBtn;
   },
 
 
@@ -1103,6 +1158,10 @@ Object.assign(UI.prototype, {
     if (!run) return;
     run.stopRequested = true;
     try { run.abortCtl?.abort(); } catch (_) {}
+    // Ход мог остановиться внутри подзадачи — её запрос к модели ведётся
+    // своим контроллером, и без этого «⏹» не прервал бы саму подзадачу,
+    // а лишь запретил бы следующий шаг родителя после её завершения.
+    try { run.subtaskAbort?.abort(); } catch (_) {}
 
     // Прячем кнопку сразу: команда принята, повторные нажатия смысла не
     // имеют. Кнопку «Отправить» при этом НЕ разблокируем — цепочка ещё

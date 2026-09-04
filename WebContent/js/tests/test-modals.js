@@ -41,6 +41,7 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     'js/ui/ui-core.js',
     'js/ui/ui-navigation.js',
     'js/ui/ui-chat.js',
+    'js/ui/ui-subtask.js',
     'js/ui/ui-metrics.js',
     'js/ui/ui-settings.js',
     'js/ui/ui-connections.js',

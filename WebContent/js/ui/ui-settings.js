@@ -92,6 +92,15 @@ Object.assign(UI.prototype, {
           </div>
         </div>
         <div class="form-group">
+          <label>Максимум шагов внутри подзадачи</label>
+          <input id="s_subtask_steps" type="number" min="1" max="30" value="${this.limits.subtaskMaxSteps}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Подзадача (<code>run_subtask</code>) — часть работы, выполняемая отдельным ходом
+            с чистым контекстом: в основную переписку возвращается только итог.
+            Здесь её собственный потолок итераций; агент может запросить меньший.
+          </div>
+        </div>
+        <div class="form-group">
           <label>Выносить результат в артефакт от, символов</label>
           <input id="s_artifact_threshold" type="number" min="0" step="500" value="${this.limits.artifactThresholdChars}">
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
@@ -376,6 +385,7 @@ Object.assign(UI.prototype, {
         maxToolCallsPerTurn: Math.max(0, parseInt(document.getElementById('s_max_calls').value) || 0),
         maxToolResponseChars: Math.max(500, parseInt(document.getElementById('s_max_resp_chars').value) || 20000),
         artifactThresholdChars: Math.max(0, parseInt(document.getElementById('s_artifact_threshold').value) || 0),
+        subtaskMaxSteps: Math.min(30, Math.max(1, parseInt(document.getElementById('s_subtask_steps').value) || 10)),
       };
       this.limits = limits;
       await this.agent.db.put('settings', { key: 'limits', ...limits });

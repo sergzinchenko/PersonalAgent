@@ -42,7 +42,11 @@ Object.assign(UI.prototype, {
       ? new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '';
 
-    const matches = (c) => !search || (c.title || '').toLowerCase().includes(search);
+    // Переписки подзадач (run_subtask) в общем списке не показываем: их
+    // заводит сам агент десятками, и вперемешку с разговорами
+    // пользователя список стал бы нечитаемым. Открываются они кнопкой из
+    // результата подзадачи в родительском чате — см. ui-subtask.js.
+    const matches = (c) => !c.subtaskOf && (!search || (c.title || '').toLowerCase().includes(search));
 
     const renderChats = (parentKey) => {
       const items = (chatsByParent[parentKey] || [])
