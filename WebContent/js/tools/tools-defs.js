@@ -434,7 +434,8 @@ Object.assign(ToolsEngine.prototype, {
 	            'и handlerCode — ТЕЛО JS-функции, которая получает объект params и возвращает результат ' +
 	            '(можно async, доступен только аргумент params, никаких this/db/import). ' +
 	            'Код исполняется в ПЕСОЧНИЦЕ: доступны JSON, Math, Date, crypto, DOMParser и fetch; ' +
-	            'нет localStorage, indexedDB, XMLHttpRequest и доступа к странице приложения. ' +
+	            'нет localStorage, indexedDB, XMLHttpRequest, выбора файла с диска и доступа к странице приложения ' +
+	            '(файлы пользователя — это list_files и read_file, отдельный инструмент для них не нужен). ' +
 	            'fetch проходит проверку адреса и возвращает упрощённый ответ: ok, status, headers.get(), text(), json(). ' +
 	            'Результат — обычный объект; при ошибке верни { error: "..." }. ' +
 	            'ВАЖНО: инструмент ВСЕГДА создаётся выключенным (enabled:false) — это осознанное ' +

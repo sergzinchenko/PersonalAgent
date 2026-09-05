@@ -137,6 +137,14 @@ class FakeDB {
 
     const ss = await probe('n5', 'sessionStorage.setItem("a","b")');
     ok('sessionStorage обезврежен', ss.value.err && /недоступен/.test(ss.value.err));
+
+    // Выбор файла с диска в песочнице невозможен — важно, чтобы это было
+    // сказано словами, а не «undefined is not a function».
+    const picker = await probe('n6', 'showOpenFilePicker()');
+    ok('выбор файла с диска объяснён, а не падает молча',
+       picker.value.err && /недоступен/.test(picker.value.err), JSON.stringify(picker.value));
+    ok('и указано, чем работать с файлами вместо него',
+       /list_files|read_file|Файлы/.test(picker.value.err));
   }
 
   console.log('\n── Рантайм: мост fetch ──');
@@ -321,6 +329,43 @@ class FakeDB {
        tools.security.auditLog.some(e => e.tool === 'sandbox_fetch' && e.decision === 'blocked'));
     const allowed = await tools._sandboxFetch({ url: 'https://corp.example/x', init: {} });
     ok('адрес из белого списка проходит', allowed.ok === true);
+  }
+
+  console.log('\n── Документ кадра исполняется на самом деле ──');
+  {
+    // Эта проверка появилась после настоящей ошибки: код кадра был
+    // МЕТОДОМ класса, и toString() отдавал сокращённую запись
+    // «_runtime(bootstrap) { … }» — не выражение-функцию. Подставленная
+    // в «(…)()», она давала синтаксическую ошибку: кадр молча не
+    // запускался, а наружу выходило «песочница не запустилась».
+    // Все прочие тесты этого не ловили — они звали _runtime напрямую,
+    // минуя сериализацию. Поэтому здесь исполняется именно тот текст,
+    // который уходит в srcdoc.
+    const doc = X.ToolSandbox.frameSource();
+    ok('в документ кадра подставлено выражение-функция', /<script>\(function\s*\(/.test(doc), doc.slice(0, 80));
+
+    const code = doc.replace(/^[\s\S]*?<script>/, '').replace(/<\/script>$/, '');
+    let parses = true, parseErr = '';
+    try { new (require('vm').Script)(code); } catch (e) { parses = false; parseErr = e.message; }
+    ok('документ кадра разбирается как JS', parses, parseErr);
+
+    // Отдельное окно: рантайм обезвреживает глобальные объекты, и делать
+    // это в окне остальных проверок нельзя.
+    const frameDom = new JSDOM('<!doctype html><body></body>', { runScripts: 'dangerously', pretendToBeVisual: true });
+    const w = frameDom.window;
+    const got = [];
+    w.addEventListener('message', (e) => got.push(e.data));
+    let ran = true, runErr = '';
+    try { w.eval(code); } catch (e) { ran = false; runErr = e.message; }
+    await tick(10);
+    ok('код кадра выполняется без ошибок', ran, runErr);
+    ok('и сообщает о готовности', got.some(m => m && m.type === 'ready'));
+
+    w.postMessage({ __ts: 1, type: 'run', id: 'z1', code: 'return { doubled: params.n * 2 };', params: { n: 21 } }, '*');
+    await tick(20);
+    ok('и выполняет задание, пришедшее сообщением',
+       got.some(m => m && m.id === 'z1' && m.value && m.value.doubled === 42),
+       JSON.stringify(got));
   }
 
   console.log('\n── Исполнитель отдаёт код песочнице ──');

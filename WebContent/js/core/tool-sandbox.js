@@ -63,9 +63,16 @@ class ToolSandbox {
   static READY_TIMEOUT_MS = 3000;
 
   // ── Код, который живёт внутри кадра ──
-  // Пишется как обычная функция и сериализуется в srcdoc. Внутри нет
-  // доступа ни к чему из этого файла: она выполняется в другом origin.
-  static _runtime(bootstrap) {
+  // Сериализуется в srcdoc через toString(). Внутри нет доступа ни к чему
+  // из этого файла: код выполняется в другом origin.
+  //
+  // ВАЖНО, ПОЧЕМУ ЭТО ПОЛЕ, А НЕ МЕТОД. У метода класса toString() отдаёт
+  // сокращённую запись — «_runtime(bootstrap) { … }», — и она НЕ является
+  // выражением-функцией: подставленная в «(…)()», она даёт синтаксическую
+  // ошибку, кадр молча не запускается, а наружу выходит невнятное
+  // «песочница не запустилась». Функция-выражение сериализуется в
+  // «function (bootstrap) { … }» и подставляется корректно.
+  static _runtime = function (bootstrap) {
     const g = bootstrap && bootstrap.global ? bootstrap.global : self;
     const post = (bootstrap && bootstrap.post) ? bootstrap.post
       : (msg) => g.parent.postMessage(msg, '*');
@@ -107,6 +114,17 @@ class ToolSandbox {
     kill('sessionStorage', 'Для памяти между вызовами есть инструмент persistent_memory.');
     kill('indexedDB', 'Данные агента песочнице недоступны.');
     try { if (g.navigator && g.navigator.sendBeacon) g.navigator.sendBeacon = deny('sendBeacon'); } catch (_) {}
+
+    // Выбор файла с диска в песочнице невозможен в принципе: File System
+    // Access API требует того самого доступа к origin страницы, которого
+    // здесь намеренно нет. Без этой подмены код упал бы на «undefined is
+    // not a function» — и выглядело бы это как поломка, а не как граница.
+    // Работа с файлами у агента и так своя: вкладка «Файлы» и инструменты
+    // list_files / read_file, которым песочница не нужна.
+    const filesHint = 'Файлы у агента берутся со вкладки «Файлы»: перечень — list_files, чтение — read_file.';
+    kill('showOpenFilePicker', filesHint);
+    kill('showSaveFilePicker', filesHint);
+    kill('showDirectoryPicker', filesHint);
 
     // ── Мост fetch ──
     // Возвращает объект, похожий на Response настолько, насколько нужно
@@ -197,7 +215,7 @@ class ToolSandbox {
     post({ __ts: 1, type: 'ready' });
 
     return { handle, makeResponse };   // для теста; в кадре не используется
-  }
+  };
 
   // Содержимое srcdoc. Отдельным методом — чтобы тест мог проверить сам
   // документ (что в нём нет ничего лишнего), не создавая кадра.
