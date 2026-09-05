@@ -581,25 +581,134 @@ class ApiImportEngine {
   //  ГЕНЕРАЦИЯ КОМПЛЕКТА
   // ══════════════════════════════════════════════
 
+  // ── Имена инструментов ──
+  //
+  // ПРАВИЛО: имя должно называть ОРИГИНАЛЬНУЮ операцию, а не пересказывать
+  // её. Поэтому:
+  //   • берётся собственное имя операции из описания (operationId, имя
+  //     SOAP-операции) — как есть, включая регистр: getPetById читается,
+  //     getpetbyid — уже хуже, а get_pet_by_id — это уже наш пересказ;
+  //   • если своего имени нет (Postman, HAR, Insomnia — там у запроса
+  //     человеческое название, часто русское), имя собирается из МЕТОДА и
+  //     ПУТИ: адрес всегда латиницей и всегда точен;
+  //   • транслитерация остаётся последним средством — только когда нет ни
+  //     имени операции, ни пути. Раньше она применялась ко всему подряд, и
+  //     «Список клиентов» превращался в spisok_klientov: имя, которое не
+  //     совпадает ни с чем в документации сервиса.
+  //
+  // Служебные слова адреса и пути, ничего не говорящие об операции.
+  static STOP_SEGMENTS = new Set([
+    'api', 'apis', 'rest', 'restapi', 'service', 'services', 'srv', 'public', 'open',
+    'www', 'web', 'app', 'server', 'gateway', 'gw', 'endpoint', 'endpoints',
+    'com', 'net', 'org', 'ru', 'io', 'dev', 'local', 'localhost', 'test', 'stage', 'prod',
+  ]);
+
+  static _isVersion(seg) {
+    return /^v\d+(\.\d+)*$/i.test(seg);
+  }
+
+  // Короткий префикс набора. Берётся из АДРЕСА сервиса, а не из названия:
+  // адрес латиницей и называет сервис так же, как его называют в
+  // документации («api.pets.example» → pets). Название набора бывает
+  // русским, и префикс из него — это ровно та транслитерация, от которой
+  // мы уходим. Она остаётся крайним случаем: адреса может не быть вовсе.
+  static bundlePrefix(name, baseUrl) {
+    // Префикс — начало имени функции, а имя не может начинаться с цифры:
+    // ведущие цифры отбрасываем здесь, а не подпираем костылём в toolName.
+    const clip = (s, n) => String(s || '').toLowerCase()
+      .replace(/[^a-z0-9]/g, '').replace(/^\d+/, '').slice(0, n);
+
+    try {
+      if (baseUrl) {
+        const host = new URL(baseUrl).hostname.toLowerCase();
+        const labels = host.split('.')
+          .filter(l => l && !ApiImportEngine.STOP_SEGMENTS.has(l) && !/^\d+$/.test(l) && l.length > 2);
+        if (labels.length && clip(labels[0], 10)) return clip(labels[0], 10);
+      }
+    } catch (_) { /* адрес может быть относительным или кривым */ }
+
+    // Разбиваем по разделителям, а не по «не-латинице»: иначе русское
+    // название распадается в пустоту и до запасного пути дело не доходит.
+    const words = String(name || '').split(/[\s\-_/.,:;()[\]«»"']+/).filter(Boolean);
+    const latin = words.find(w => /^[A-Za-z]/.test(w) && !ApiImportEngine.STOP_SEGMENTS.has(w.toLowerCase()));
+    if (latin && clip(latin, 10)) return clip(latin, 10);
+
+    // Ни адреса, ни латинского слова — вот здесь транслитерация уместна:
+    // это метка набора, а не имя операции, и она нужна короткой.
+    return clip(ApiImportEngine.translit(words[0] || 'api'), 6) || 'api';
+  }
+
+  static translit(text) {
+    const map = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',
+      н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',
+      э:'e',ю:'yu',я:'ya' };
+    return String(text || '').toLowerCase().replace(/[а-яё]/g, ch => map[ch] ?? '');
+  }
+
+  // Имя самой операции — без префикса набора.
+  static operationSlug(endpoint) {
+    const clean = (s) => String(s || '')
+      .replace(/[^A-Za-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .replace(/_{2,}/g, '_');
+
+    // 1. Собственное имя операции. Регистр сохраняем: это и есть то имя,
+    //    по которому операцию ищут в документации сервиса.
+    const own = clean(endpoint.opId);
+    if (own && /[A-Za-z]/.test(own)) return own;
+
+    // 2. Метод и путь. Из пути выбрасываем служебные сегменты (api, rest,
+    //    версии) и берём последние — «конечное имя» операции, а не всю
+    //    дорогу до неё. Имена параметров сохраняем: getOrders_orderId
+    //    отличает выборку одного заказа от списка.
+    let raw = endpoint.path || endpoint.url || '';
+    if (!endpoint.path) {
+      try { raw = new URL(raw).pathname; } catch (_) { /* не абсолютный адрес — берём как есть */ }
+    }
+    const segs = raw.split('/')
+      .map(x => x.replace(/^[{:]+/, '').replace(/[}]+$/, '').trim())
+      .filter(Boolean)
+      .filter(x => !ApiImportEngine.STOP_SEGMENTS.has(x.toLowerCase()) && !ApiImportEngine._isVersion(x))
+      .map(clean)
+      .filter(Boolean)
+      .slice(-3);
+
+    if (segs.length) {
+      const method = String(endpoint.method || 'GET').toLowerCase();
+      return clean(method + '_' + segs.join('_'));
+    }
+
+    // 3. Ни имени, ни пути — остаётся человеческое название запроса.
+    //    Латинское берём как есть, кириллицу транслитерируем: это
+    //    последнее средство, а не правило.
+    const named = clean(endpoint.name);
+    if (named && /[A-Za-z]/.test(named)) return named;
+    const t = clean(ApiImportEngine.translit(endpoint.name));
+    return t || clean(String(endpoint.method || 'GET').toLowerCase() + '_op');
+  }
+
   // Имя инструмента должно пройти проверку API моделей и быть уникальным
   // среди ВСЕХ инструментов: столкновение имён — это молча вызванный не тот
   // инструмент.
   static toolName(prefix, endpoint, taken) {
-    const src = endpoint.opId || endpoint.name || (endpoint.method + ' ' + (endpoint.path || endpoint.url));
-    const translit = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',
-      н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',
-      э:'e',ю:'yu',я:'ya' };
-    let slug = String(src).toLowerCase()
-      .replace(/[а-яё]/g, ch => translit[ch] ?? '')
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .replace(/_{2,}/g, '_');
-    if (!slug) slug = 'op';
-    let base = (prefix ? prefix + '_' : '') + slug;
-    if (!/^[a-zA-Z_]/.test(base)) base = 'api_' + base;
-    base = base.slice(0, 60);
+    const core = ApiImportEngine.operationSlug(endpoint) || 'op';
+    const p = String(prefix || '').toLowerCase();
+
+    // Префикс не повторяем: у operationId вида «petsList» набор уже назван
+    // внутри имени, и «pets_petsList» — это шум, а не уточнение.
+    let base = (!p || core.toLowerCase().startsWith(p)) ? core : p + '_' + core;
+    if (!/^[A-Za-z_]/.test(base)) base = 'op_' + base;
+
+    // Предел имени функции в API — 64 символа. Режем ХВОСТ имени операции,
+    // а не префикс: без префикса имя перестаёт указывать на свой набор.
+    if (base.length > 64) base = base.slice(0, 64).replace(/_+$/, '');
+
     let name = base, n = 2;
-    while (taken.has(name)) { name = (base.slice(0, 57) + '_' + n).slice(0, 64); n++; }
+    while (taken.has(name)) {
+      const suffix = '_' + n;
+      name = base.slice(0, 64 - suffix.length) + suffix;
+      n++;
+    }
     taken.add(name);
     return name;
   }
@@ -656,7 +765,11 @@ class ApiImportEngine {
   // сетевых вызовов остаётся решением пользователя.
   async createBundle({ spec, name, endpoints, folders, skills, transport = 'direct', existingBundle = null }) {
     const bundleName = String(name || spec.name || 'API').slice(0, 60);
-    const prefix = ApiImportEngine.toolName('', { name: bundleName }, new Set()).slice(0, 18);
+    // Префикс общий для всего набора и берётся один раз: при дозагрузке он
+    // обязан совпасть с прежним, иначе половина инструментов набора будет
+    // называться иначе, чем вторая.
+    const prefix = ApiImportEngine.bundlePrefix(
+      bundleName, (existingBundle && existingBundle.baseUrl) || spec.baseUrl);
 
     // Папка инструментов, соответствующая навыку. Одна на комплект: набор
     // из сорока вызовов, рассыпанный по корню, невозможно ни включить

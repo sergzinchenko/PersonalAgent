@@ -305,20 +305,55 @@ const GRAPHQL = JSON.stringify({
      /query user\(id: ID!\)/.test(gql.endpoints[0].description) && /mutation createUser/.test(gql.endpoints[0].description));
 
   // ══════════════════════════════════════════════
-  console.log('\n── Имена инструментов ──');
+  console.log('\n── Префикс набора ──');
+  const P = X.ApiImportEngine.bundlePrefix;
+  ok('префикс берётся из адреса сервиса', P('Питомцы', 'https://api.pets.example/v1') === 'pets');
+  ok('служебные части адреса пропускаются', P('CRM', 'https://api.crm.example.com') === 'crm');
+  ok('без адреса берётся латинское слово названия', P('Pet Store API', '') === 'pet');
+  ok('служебные слова названия пропускаются', P('API Gateway Orders', '') === 'orders');
+  ok('транслитерация — только когда больше нечего взять', P('Питомцы', '') === 'pitomc');
+  ok('и она короткая', P('Служба доставки заказов', '').length <= 6);
+  ok('префикс всегда пригоден для имени функции',
+     ['pets', P('', ''), P('Питомцы', ''), P('123', '')].every(x => /^[a-z][a-z0-9]*$/.test(x)));
+
+  console.log('\n── Имена инструментов: оригинал, а не пересказ ──');
   const taken = new Set();
-  const n1 = X.ApiImportEngine.toolName('pets', { opId: 'listPets' }, taken);
-  ok('имя приводится к snake_case', n1 === 'pets_listpets', n1);
-  const n2 = X.ApiImportEngine.toolName('pets', { opId: 'listPets' }, taken);
-  ok('повтор получает свой суффикс', n2 !== n1 && /_2$/.test(n2), n2);
-  const n3 = X.ApiImportEngine.toolName('', { name: 'Список клиентов' }, taken);
-  ok('кириллица транслитерируется', /^[a-z_0-9]+$/.test(n3), n3);
-  const n4 = X.ApiImportEngine.toolName('', { name: '123 старт' }, taken);
+  const nm = (prefix, ep) => X.ApiImportEngine.toolName(prefix, ep, taken);
+
+  const n1 = nm('pets', { opId: 'listPets', method: 'GET', path: '/pets' });
+  ok('operationId сохраняется как есть, вместе с регистром', n1 === 'pets_listPets', n1);
+  const nById = nm('pets', { opId: 'getPetById', method: 'GET', path: '/pets/{petId}' });
+  ok('и не разбивается на слова', nById === 'pets_getPetById', nById);
+  const nSoap = nm('bank', { opId: 'GetBalance', method: 'POST', url: 'https://bank.example/ws' });
+  ok('имя SOAP-операции сохраняется', nSoap === 'bank_GetBalance', nSoap);
+
+  const nDup = nm('pets', { opId: 'petsList', method: 'GET', path: '/pets' });
+  ok('префикс не повторяется, если имя с него и начинается', nDup === 'petsList', nDup);
+
+  const nRu = nm('crm', { name: 'Клиенты / Список клиентов', method: 'GET', url: 'https://crm.example/api/v1/clients' });
+  ok('русское название запроса НЕ транслитерируется — берётся путь',
+     nRu === 'crm_get_clients', nRu);
+  ok('служебные сегменты пути выброшены', !/_api_|_v1_/.test(nRu));
+  const nRuId = nm('crm', { name: 'Клиент по id', method: 'GET', url: 'https://crm.example/clients/:clientId' });
+  ok('параметр пути сохраняет своё имя', nRuId === 'crm_get_clients_clientId', nRuId);
+  const nDel = nm('crm', { name: 'Удалить клиента', method: 'DELETE', url: 'https://crm.example/clients/:clientId' });
+  ok('метод различает операции на одном пути', nDel === 'crm_delete_clients_clientId', nDel);
+
+  const nLong = nm('app', { name: 'Что-то', method: 'GET', url: 'https://app.example/api/v2/reports/daily/summary/details' });
+  ok('от длинного пути берётся хвост, а не вся дорога',
+     nLong === 'app_get_daily_summary_details', nLong);
+
+  const n3 = nm('', { name: 'Список клиентов', method: 'GET' });
+  ok('без пути и латиницы остаётся транслитерация', /^[a-z_0-9]+$/.test(n3), n3);
+  const n4 = nm('', { name: '123 старт', method: 'GET' });
   ok('имя не начинается с цифры', /^[a-zA-Z_]/.test(n4), n4);
-  const n5 = X.ApiImportEngine.toolName('x'.repeat(40), { name: 'y'.repeat(60) }, taken);
+  const n5 = nm('x'.repeat(40), { opId: 'y'.repeat(60) });
   ok('длина ограничена 64 символами', n5.length <= 64, String(n5.length));
+  const n2 = nm('pets', { opId: 'listPets', method: 'GET', path: '/pets' });
+  ok('повтор получает свой суффикс', n2 !== n1 && /_2$/.test(n2), n2);
   ok('все имена проходят проверку API моделей',
-     [n1, n2, n3, n4, n5].every(n => /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(n)));
+     [n1, n2, n3, n4, n5, nById, nSoap, nDup, nRu, nRuId, nDel, nLong]
+       .every(n => /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(n)));
 
   // ══════════════════════════════════════════════
   console.log('\n── Сборка комплекта ──');
@@ -351,7 +386,8 @@ const GRAPHQL = JSON.stringify({
   ok('создан навык набора', !!bundleSkill && bundleSkill.enabled === false);
   ok('навык связан со всеми инструментами набора', bundleSkill.toolIds.length === 4);
   ok('в навыке есть правила работы с сервисом', /Авторизацию подставляет приложение/.test(bundleSkill.systemPrompt));
-  ok('в навыке перечислены операции', /pitomcy_listpets|listpets/i.test(bundleSkill.systemPrompt));
+  ok('в навыке перечислены операции по их настоящим именам',
+     /pets_listPets/.test(bundleSkill.systemPrompt), bundleSkill.systemPrompt.slice(-300));
   ok('импорт вернул план тестирования', Array.isArray(imp.testPlan) && imp.testPlan.length >= 3);
   ok('план начинается с чтения', /чтени/i.test(imp.testPlan[0]));
   ok('план отдельно упоминает изменяющие операции', imp.testPlan.some(s => /тестовом контуре|откатить/i.test(s)));
