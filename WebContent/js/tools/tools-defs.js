@@ -433,6 +433,9 @@ Object.assign(ToolsEngine.prototype, {
 	            'Передай name (snake_case), description, parameters (JSON Schema с type:"object") ' +
 	            'и handlerCode — ТЕЛО JS-функции, которая получает объект params и возвращает результат ' +
 	            '(можно async, доступен только аргумент params, никаких this/db/import). ' +
+	            'Код исполняется в ПЕСОЧНИЦЕ: доступны JSON, Math, Date, crypto, DOMParser и fetch; ' +
+	            'нет localStorage, indexedDB, XMLHttpRequest и доступа к странице приложения. ' +
+	            'fetch проходит проверку адреса и возвращает упрощённый ответ: ok, status, headers.get(), text(), json(). ' +
 	            'Результат — обычный объект; при ошибке верни { error: "..." }. ' +
 	            'ВАЖНО: инструмент ВСЕГДА создаётся выключенным (enabled:false) — это осознанное ' +
 	            'ограничение безопасности, обойти его нельзя. Он не станет доступен для вызова, ' +

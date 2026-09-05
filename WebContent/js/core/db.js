@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 12) {
+  constructor(name = 'ai_agent_db', version = 13) {
     this.name = name;
     this.version = version;
     this.db = null;
@@ -89,6 +89,16 @@ class AgentDB {
         if (!db.objectStoreNames.contains('tasks')) {
           const s = db.createObjectStore('tasks', { keyPath: 'id' });
           s.createIndex('chatId', 'chatId');
+        }
+        // Журнал решений политики безопасности (см. engines/security-engine.js).
+        // Отдельное хранилище, а не запись в settings: записей тысячи, они
+        // дописываются по одной и читаются с конца — для этого нужен
+        // индекс по времени, которого у key-value записи быть не может.
+        // Аргументы вызовов сюда НЕ пишутся: журнал должен переживать
+        // выгрузку наружу, а в аргументах бывают и секреты.
+        if (!db.objectStoreNames.contains('security_log')) {
+          const s = db.createObjectStore('security_log', { keyPath: 'id' });
+          s.createIndex('at', 'at');
         }
         // Журнал активного хода (см. ui/ui-resume.js). Запись живёт
         // только пока ход идёт: оставшаяся после запуска означает, что

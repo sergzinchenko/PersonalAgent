@@ -70,7 +70,36 @@ Object.assign(ToolsEngine.prototype, {
 	      relocked++;
 	    }
 
-	    const all = (missing.length || relocked) ? await this.db.getAll('tools') : existing;
+	    // ── Целостность встроенных инструментов ──
+	    // description и parameters — это не украшение карточки, а то, ПО ЧЕМУ
+	    // модель решает, когда вызвать инструмент. Подменённое описание —
+	    // незаметный способ управлять агентом: сам вызов выглядит штатно,
+	    // а делает он не то, что написано. Поле handlerCode у встроенного
+	    // инструмента не должно существовать вовсе: исполнитель проверяет
+	    // его РАНЬШЕ реестра, поэтому дописанный код подменил бы нативный
+	    // обработчик целиком. Всё это приводится к определению из кода на
+	    // каждой загрузке — правка записи в базе не переживает перезапуск.
+	    // Пользовательское состояние (enabled, папка) при этом не трогаем.
+	    const defById = new Map(defs.map(d => [d.id, d]));
+	    let restored = 0;
+	    for (const t of existing) {
+	      const def = defById.get(t.id);
+	      if (!def) continue;
+	      const drift = t.name !== def.name || t.description !== def.description ||
+	        JSON.stringify(t.parameters || null) !== JSON.stringify(def.parameters || null) ||
+	        t.handlerCode !== undefined || t.mcpServer !== undefined;
+	      if (!drift) continue;
+	      t.name = def.name;
+	      t.description = def.description;
+	      t.parameters = def.parameters;
+	      t.builtin = true;
+	      delete t.handlerCode;
+	      delete t.mcpServer;
+	      await this.db.put('tools', t);
+	      restored++;
+	    }
+
+	    const all = (missing.length || relocked || restored) ? await this.db.getAll('tools') : existing;
 
 	    // Единственное место, где известен актуальный состав папки
 	    // «Системные», — здесь. Отсюда он и уходит в защиту журнала:

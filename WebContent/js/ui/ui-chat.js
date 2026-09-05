@@ -687,7 +687,16 @@ Object.assign(UI.prototype, {
       const risks = (req.risks || []).map(r =>
         `<li>${this._escHtml(r)}</li>`).join('');
 
-      this._showModal('🛡 Подтвердите операцию', `
+      // Карантин — не рядовое подтверждение, и окно должно отличаться
+      // с первого взгляда: в этом ходе агент уже читал чужой текст,
+      // и именно он мог подсказать операцию.
+      this._showModal(req.quarantine ? '⚠️ Агент меняет сам себя после чтения внешних данных' : '🛡 Подтвердите операцию', `
+        ${req.quarantine ? `<div class="sec-quarantine">
+          Это самый частый сценарий скрытой атаки: во внешнем тексте — странице,
+          файле, странице вики — спрятана инструкция для модели, и агент выполняет её,
+          считая просьбой пользователя. Разрешайте, только если это изменение
+          заказывали вы сами.
+        </div>` : ''}
         <div class="sec-summary">
           <div class="sec-tool">${this._escHtml(req.toolName)}</div>
           <div class="sec-cat">${this._escHtml(catLabels[req.category] || req.category)}</div>

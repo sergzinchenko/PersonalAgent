@@ -59,6 +59,7 @@ class FakeDB {
   const files = [
     'js/core/markdown.js',
     'js/core/log-guard.js',
+    'js/core/tool-sandbox.js',
     'js/engines/folders-engine.js',
     'js/core/changelog.js',
     'js/engines/about-engine.js',
@@ -271,7 +272,7 @@ class FakeDB {
   await ui.showWhatsNewModal({ onlyUnread: true, markRead: true });
   await tick();
   const modalText = document.querySelector('.modal')?.textContent || '';
-  ok('окно показывает непрочитанные релизы', /Релиз 20/.test(modalText));
+  ok('окно показывает непрочитанные релизы', modalText.includes('Релиз ' + rel.length));
   ok('прочитанного в нём нет', !/Релиз 1 —/.test(modalText));
   document.querySelector('.modal-actions .btn-primary').click();
   await tick();
@@ -296,7 +297,9 @@ class FakeDB {
   await tick();
   ok('вернувшемуся окно показывается само', !!document.querySelector('.modal-overlay'));
   const backText = document.querySelector('.modal').textContent;
-  ok('и показывает только новое', /Релиз 20/.test(backText) && !/Релиз 17/.test(backText));
+  // Номера берём из самой истории: захардкоженные устаревают с каждым релизом.
+  ok('и показывает только новое',
+     backText.includes('Релиз ' + rel.length) && !backText.includes('Релиз ' + (rel.length - 3)));
   document.querySelector('.modal-actions .btn-primary').click();
   await tick();
   ok('после показа непрочитанного не остаётся (2)', (await about2.unread()).length === 0);

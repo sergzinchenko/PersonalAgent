@@ -362,14 +362,24 @@ Object.assign(UI.prototype, {
           <label>Журнал решений</label>
           <button class="btn btn-secondary btn-sm" id="sec-show-audit">📋 Показать журнал безопасности</button>
           <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-            Что агент запрашивал, что было разрешено и что заблокировано.
+            Что агент запрашивал, что было разрешено и что заблокировано. Журнал хранится
+            в базе и переживает перезагрузку; его можно выгрузить в файл или очистить.
+            Туда же попадают сетевые запросы инструментов — они идут через проверку адреса.
           </div>
         </div>
 
-        <div style="font-size:11px;color:var(--warning);margin-top:12px;line-height:1.5;">
-          ⚠️ Проверки касаются действий агента через инструменты. Они не изолируют код самого
-          инструмента: включённый инструмент выполняется в браузере и может обращаться к сети
-          напрямую. Поэтому инструменты, созданные моделью, всегда требуют ручного включения.
+        <div style="font-size:11px;color:var(--text-secondary);margin-top:12px;line-height:1.5;">
+          🧪 Код инструментов, написанных моделью, исполняется в <b>изолированном кадре</b>:
+          у него нет доступа ни к вашим ключам, ни к данным приложения, ни к странице.
+          Сеть ему доступна только через проверку адреса — те же запреты, что у http_fetch,
+          и запись в журнал. Хранилища браузера в песочнице нет: для памяти между вызовами
+          есть инструмент <code>persistent_memory</code>.
+        </div>
+        <div style="font-size:11px;color:var(--warning);margin-top:8px;line-height:1.5;">
+          ⚠️ Если в этом ответе агент уже читал внешние данные (страницу, файл, вики, MCP),
+          то создание и изменение инструментов и навыков подтверждается вручную —
+          независимо от выбранного режима. Это ровно тот случай, когда чужой текст
+          подсказывает агенту изменить самого себя.
         </div>
       </div>
 
@@ -626,31 +636,59 @@ Object.assign(UI.prototype, {
       </table>`, null, null, { wide: true });
   },
 
-  showSecurityAudit() {
-    const log = this.agent.security.auditLog || [];
+  async showSecurityAudit() {
+    const log = await this.agent.security.recent(300);
     const icon = { approved: '✅', denied: '🚫', blocked: '⛔', executed: '⚙️', switched: '🔀' };
     const label = {
       approved: 'разрешено', denied: 'отклонено вами', blocked: 'заблокировано режимом',
       executed: 'выполнено агентом', switched: 'переключение при отказе',
     };
 
+    // Дата, а не только время: журнал теперь живёт неделями, и «14:32»
+    // без числа не отвечает на вопрос «когда это было».
+    const when = (t) => new Date(t).toLocaleString('ru-RU',
+      { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
     const rows = log.length ? log.map(e => `
       <tr>
-        <td>${new Date(e.at).toLocaleTimeString('ru-RU')}</td>
-        <td>${this._escHtml(e.tool || '')}</td>
-        <td>${icon[e.decision] || ''} ${this._escHtml(label[e.decision] || e.decision)}</td>
+        <td style="white-space:nowrap;">${when(e.at)}</td>
+        <td>${this._escHtml(e.tool || '')}${e.host ? `<div style="font-size:10px;color:var(--text-muted);">${this._escHtml(e.host)}</div>` : ''}</td>
+        <td style="white-space:nowrap;">${icon[e.decision] || ''} ${this._escHtml(label[e.decision] || e.decision)}</td>
         <td>${this._escHtml((e.risks || []).join('; ') || e.reason || e.detail || '')}</td>
       </tr>`).join('')
       : '<tr><td colspan="4" style="color:var(--text-muted);">Записей пока нет.</td></tr>';
 
     this._showModal('🛡 Журнал безопасности', `
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
-        Последние ${log.length} решений. Журнал хранится в памяти и очищается при перезагрузке.
+        Показаны последние ${log.length} решений. Журнал хранится в базе и переживает
+        перезагрузку; старые записи вытесняются после ${this.agent.security.maxStored}.
+        Аргументы вызовов в него не пишутся — в них попадают и секреты.
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <button class="btn btn-secondary btn-sm" id="sec-log-export">⬇ Выгрузить в файл</button>
+        <button class="btn btn-danger btn-sm" id="sec-log-clear">🗑 Очистить журнал</button>
       </div>
       <table class="stats-table">
         <thead><tr><th>Время</th><th>Инструмент</th><th>Решение</th><th>Причина</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody id="sec-log-body">${rows}</tbody>
       </table>`, null, null, { wide: true });
+
+    setTimeout(() => {
+      document.getElementById('sec-log-export')?.addEventListener('click', () => {
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        this.agent.tools._downloadFile(
+          JSON.stringify({ exportedAt: Date.now(), entries: log }, null, 2),
+          `security-log-${stamp}.json`, 'application/json');
+      });
+      document.getElementById('sec-log-clear')?.addEventListener('click', async () => {
+        const yes = await this._confirm(
+          'Очистить журнал безопасности? Записи о решениях будут удалены безвозвратно.',
+          { title: 'Очистка журнала', danger: true });
+        if (!yes) return;
+        await this.agent.security.clearLog();
+        this.showSecurityAudit();
+      });
+    }, 50);
   }
 
 });

@@ -49,6 +49,7 @@ try {
   load('llm/llm-registry.js', 'LLMRegistry');
   load('engines/security-engine.js', 'SecurityEngine');
   load('core/log-guard.js', 'LogGuard');
+  load('core/tool-sandbox.js', 'ToolSandbox');
   load('engines/folders-engine.js', 'FoldersEngine');
   load('tools/tools-engine.js', 'ToolsEngine');
   load('tools/tools-registry.js');

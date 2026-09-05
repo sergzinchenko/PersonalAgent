@@ -29,9 +29,14 @@ Object.assign(ToolsEngine.prototype, {
 	    // проходит здесь. bypassSecurity ставится только для вызовов, которые
 	    // инициировал сам пользователь кнопкой интерфейса — переспрашивать
 	    // о том, что человек только что нажал, бессмысленно.
+	    // Запись инструмента нужна и политике, и отметке о внешних данных
+	    // ниже — читаем один раз.
+	    let toolRec = null;
+	    try {
+	      toolRec = (await this.loadTools()).find(t => t.name === toolName) || null;
+	    } catch (_) { /* загрузка списка не должна ронять вызов */ }
+
 	    if (this.security && !bypassSecurity) {
-	      const tools0 = await this.loadTools();
-	      const toolRec = tools0.find(t => t.name === toolName);
 	      let verdict;
 	      try {
 	        verdict = await this.security.check(toolName, parsedArgs, toolRec);
@@ -53,6 +58,11 @@ Object.assign(ToolsEngine.prototype, {
 	            risks: verdict.risks || [],
 	            args: parsedArgs,
 	            host: verdict.host,
+	            // Раньше эти два поля до окна не доходили: пометка «ответ не
+	            // запоминается» не показывалась даже там, где она и была
+	            // главным условием разрешения (SSO через прокси).
+	            noRemember: !!verdict.noRemember,
+	            quarantine: !!verdict.quarantine,
 	          });
 	          if (!answer || !answer.approved) {
 	            this.security.audit({ tool: toolName, decision: 'denied', risks: verdict.risks });
@@ -124,11 +134,17 @@ Object.assign(ToolsEngine.prototype, {
 	        result = { error: 'Инструмент "' + toolName + '" отключён и недоступен для вызова.' };
 	      } else if (tool.handlerCode) {
 	        // ← ИСТОЧНИК ИСТИНЫ: персистентный код редактируемого инструмента.
-	        //   Компилируется заново на каждый вызов из актуальной записи в БД,
-	        //   поэтому правки из UI применяются сразу, без перезагрузки страницы.
+	        //   Берётся из актуальной записи в БД на каждый вызов, поэтому
+	        //   правки из UI применяются сразу, без перезагрузки страницы.
+	        //
+	        //   Исполняется в ИЗОЛИРОВАННОМ КАДРЕ (core/tool-sandbox.js), а
+	        //   не здесь: код писала модель, и в контексте страницы ему были
+	        //   бы доступны ключи провайдеров в IndexedDB, DOM приложения и
+	        //   сеть с правами пользователя. Таймаут песочница обрабатывает
+	        //   сама — и, в отличие от прежнего AsyncFunction, действительно
+	        //   прерывает зависший код, снося кадр целиком.
 	        try {
-	          const fn = new AsyncFunction('params', tool.handlerCode);
-	          result = await withTimeout(Promise.resolve(fn(parsedArgs)));
+	          result = await this.sandbox.run(tool.handlerCode, parsedArgs, { timeoutMs });
 	        } catch (e) {
 	          result = { error: 'Execution error: ' + e.message };
 	        }
@@ -154,6 +170,16 @@ Object.assign(ToolsEngine.prototype, {
 	      // системного инструмента может нести его данные.
 	      console.error('🔧 TOOL ENGINE ERROR:', toolName, silent ? e.message : e);
 	    } finally {
+	      // ── Отметка о внешних данных ──
+	      // Успешный вызов, принёсший в ход содержимое извне (страница,
+	      // файл, вики, MCP-сервер), переводит ход в карантин: дальнейшая
+	      // самомодификация в нём подтверждается вручную независимо от
+	      // режима (см. engines/security-engine.js). Именно так выглядит
+	      // сценарий инъекции: «прочитал страницу → создал инструмент».
+	      if (this.security && result && !result.error) {
+	        try { this.security.noteExternal(toolName, toolRec); } catch (_) {}
+	      }
+
 	      var elapsed = (performance.now() - t0).toFixed(0);
 	      if (logCall) {
 	      if (result && result.error) {
@@ -168,6 +194,68 @@ Object.assign(ToolsEngine.prototype, {
 	    }
 
 	    return result;
+	  },
+
+
+	  // ── Мост сети для песочницы ──
+	  // Код инструмента не ходит в сеть сам: его fetch подменён и уходит
+	  // сюда сообщением (см. core/tool-sandbox.js). Здесь — единственное
+	  // место, где решается, выпускать ли запрос. Проверки те же, что у
+	  // http_fetch, и по той же причине: адрес выбирает код, написанный
+	  // моделью, а значит — потенциально текст с внешней страницы.
+	  async _sandboxFetch({ url, init }) {
+	    let u;
+	    try { u = new URL(String(url)); }
+	    catch (_) { return { error: 'Некорректный URL: ' + url }; }
+
+	    if (!/^https?:$/.test(u.protocol)) {
+	      return { error: 'Из инструмента разрешены только http/https запросы' };
+	    }
+	    if (this._isBlockedFetchHost(u.hostname)) {
+	      return { error: 'Запрос к локальным/приватным/служебным адресам запрещён из соображений безопасности' };
+	    }
+
+	    // Максимальный режим: белый список сильнее всего остального.
+	    // Спрашивать подтверждение на каждый запрос здесь намеренно не
+	    // стали: инструмент вызывают ради работы, и десяток вопросов
+	    // подряд приучает нажимать «да», не читая. Вместо вопроса —
+	    // запись в журнале безопасности, которую видно постфактум.
+	    const sec = this.security;
+	    if (sec && sec.mode === 'maximum' && (sec.allowedHosts || []).length) {
+	      const host = u.hostname.toLowerCase();
+	      const ok = sec.allowedHosts.some(a => host === a || host.endsWith('.' + a));
+	      if (!ok) {
+	        sec.audit({ tool: 'sandbox_fetch', decision: 'blocked', host,
+	          reason: 'Адрес вне белого списка (максимальный режим)' });
+	        return { error: `Адрес ${host} не входит в список разрешённых` };
+	      }
+	    }
+
+	    const method = String((init && init.method) || 'GET').toUpperCase();
+	    try {
+	      const resp = await fetch(u.toString(), {
+	        method,
+	        headers: (init && init.headers) || undefined,
+	        body: (init && init.body !== undefined && method !== 'GET' && method !== 'HEAD') ? init.body : undefined,
+	      });
+	      const text = await resp.text();
+	      const limit = (await this._toolLimits()).maxResponseChars;
+	      const headers = {};
+	      try { resp.headers.forEach((v, k) => { headers[String(k).toLowerCase()] = v; }); } catch (_) {}
+
+	      sec && sec.audit({ tool: 'sandbox_fetch', decision: 'executed', host: u.hostname,
+	        detail: method + ' ' + u.origin + u.pathname + ' → ' + resp.status });
+
+	      return {
+	        ok: resp.ok, status: resp.status, statusText: resp.statusText,
+	        url: u.toString(), headers,
+	        body: text.length > limit ? text.slice(0, limit) : text,
+	      };
+	    } catch (e) {
+	      sec && sec.audit({ tool: 'sandbox_fetch', decision: 'blocked', host: u.hostname,
+	        reason: (e && e.message) || 'сетевая ошибка' });
+	      return { error: 'Запрос не выполнен: ' + ((e && e.message) || 'сетевая ошибка') };
+	    }
 	  },
 
 });

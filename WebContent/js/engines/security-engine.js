@@ -25,7 +25,15 @@ class SecurityEngine {
     this.maxAudit = 200;
 
     // Счётчики на один ход пользователя (сбрасываются в UI перед ходом).
-    this.turn = { writes: 0, network: 0, deletes: 0, mcp: 0 };
+    // external — источники внешнего содержимого, попавшего в ЭТОТ ход:
+    // страницы, файлы, вики, MCP-серверы. См. карантин в check().
+    this.turn = { writes: 0, network: 0, deletes: 0, mcp: 0, external: [] };
+
+    // Постоянный журнал решений (хранилище security_log). Ставится
+    // из agent.js; без него журнал живёт только в памяти, как раньше.
+    this.db = null;
+    this.maxStored = 2000;
+    this._sinceTrim = 0;
 
     // Домены, подтверждённые пользователем в этой сессии: повторно
     // спрашивать про тот же адрес — верный способ приучить нажимать «да».
@@ -78,8 +86,40 @@ class SecurityEngine {
   }
 
   resetTurn() {
-    this.turn = { writes: 0, network: 0, deletes: 0, mcp: 0 };
+    this.turn = { writes: 0, network: 0, deletes: 0, mcp: 0, external: [] };
     this.turnCalls.clear();
+  }
+
+  // ── Карантин после внешних данных ──
+  // Инструменты, приносящие в ход содержимое, которого пользователь не
+  // писал. Именно оно может нести инструкции для модели: страница, файл,
+  // страница вики, ответ MCP-сервера.
+  static EXTERNAL_SOURCES = new Set([
+    'http_fetch', 'proxy_fetch', 'sandbox_fetch', 'read_file', 'search_files',
+    'confluence_get_page', 'confluence_search',
+    'xwiki_get_page', 'xwiki_search',
+    'import_skill_from_text',
+    // Артефакт — сохранённый результат прежнего вызова: его содержимое
+    // пришло извне ровно так же, просто раньше.
+    'artifact_read', 'artifact_grep',
+  ]);
+
+  // Операции, которыми агент меняет самого себя. Их и накрывает карантин.
+  static SELF_MODIFYING = new Set([
+    'create_tool', 'update_tool', 'create_skill', 'update_skill',
+    'link_skill_tools', 'import_skill_from_text',
+  ]);
+
+  // Отмечается ПОСЛЕ успешного вызова (см. tools-executor.js): важен факт,
+  // что содержимое уже в ходе, а не намерение его получить.
+  noteExternal(toolName, tool) {
+    const isMcp = !!(tool && tool.mcpServer);
+    if (!isMcp && !SecurityEngine.EXTERNAL_SOURCES.has(toolName)) return;
+    const label = isMcp ? `${toolName} (MCP)` : toolName;
+    if (!this.turn.external.includes(label)) this.turn.external.push(label);
+    // Перечень нужен, чтобы назвать источники в вопросе, а не для учёта:
+    // десяти хватает, дальше он только удлиняет текст.
+    if (this.turn.external.length > 10) this.turn.external.shift();
   }
 
   // ── Классификация операций ──
@@ -185,6 +225,25 @@ class SecurityEngine {
           'Запрос уйдёт с доменными правами текущего пользователя Windows (SSO)',
           'Целевой адрес: ' + (ssoHost || '(не распознан)'),
           'Отвечающий сервер увидит вашу учётную запись — разрешайте только для внутренних серверов, которым доверяете',
+        ],
+      };
+    }
+
+    // ── Карантин: самомодификация после внешних данных ──
+    // Стоит ВЫШЕ режима, как и SSO выше: причина не в опасности самой
+    // операции, а в том, что в этом ходе уже побывал чужой текст, который
+    // мог эту операцию и подсказать. Классическая цепочка инъекции —
+    // «прочитал страницу → создал инструмент → включил» — рвётся ровно
+    // здесь, вопросом, который называет источник. Ответ не запоминается:
+    // одно разрешение = одна операция.
+    if (SecurityEngine.SELF_MODIFYING.has(toolName) && this.turn.external.length) {
+      return {
+        allow: true, confirm: true, category: 'execute', toolName, args,
+        noRemember: true, quarantine: true,
+        risks: [
+          'Агент меняет САМ СЕБЯ: ' + toolName,
+          'В этом ответе он уже получил данные извне: ' + this.turn.external.join(', '),
+          'Внешний текст мог содержать инструкции для модели — проверьте, что изменение действительно нужно вам',
         ],
       };
     }
@@ -462,11 +521,78 @@ class SecurityEngine {
     return { allow: true, confirm: true, category: cat, risks, toolName, args, host };
   }
 
-  // Фиксируем решения — пользователь должен иметь возможность посмотреть,
-  // что агент делал и что ему разрешали.
+  // ── Журнал решений ──
+  // Пользователь должен иметь возможность посмотреть, что агент делал и
+  // что ему разрешали. Запись идёт в двух местах:
+  //   в память — чтобы панель открывалась мгновенно и работала, даже
+  //     если хранилище недоступно;
+  //   в базу   — чтобы журнал пережил перезагрузку. Раньше он жил только
+  //     в памяти: инцидент, замеченный на следующий день, разбирать было
+  //     уже нечем — записи исчезали вместе со вкладкой.
+  // Аргументы вызова сюда НЕ попадают намеренно: журнал выгружают наружу,
+  // а в аргументах бывают адреса, тексты и, случайно, секреты.
   audit(entry) {
-    this.auditLog.unshift({ ...entry, at: Date.now() });
+    const rec = {
+      id: 'sec_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
+      at: Date.now(),
+      mode: this.mode,
+      tool: entry.tool || '',
+      decision: entry.decision || '',
+      category: entry.category || null,
+      host: entry.host || null,
+      risks: Array.isArray(entry.risks) ? entry.risks.slice(0, 6) : undefined,
+      reason: entry.reason || undefined,
+      detail: entry.detail || undefined,
+    };
+    this.auditLog.unshift(rec);
     if (this.auditLog.length > this.maxAudit) this.auditLog.length = this.maxAudit;
+    // Сбой записи не должен ронять сам вызов, ради которого решение и
+    // принималось: журнал важен, но не важнее работы.
+    if (this.db) {
+      this.db.put('security_log', rec)
+        .then(() => this._maybeTrim())
+        .catch(e => console.error('Журнал безопасности: запись не удалась', e));
+    }
+    return rec;
+  }
+
+  // Ротация: журнал не должен расти бесконечно в хранилище, которого и
+  // так немного. Проверяем не на каждой записи — полный перебор ради
+  // одной строки обошёлся бы дороже самой записи.
+  async _maybeTrim() {
+    if (!this.db) return 0;
+    if (++this._sinceTrim < 100) return 0;
+    this._sinceTrim = 0;
+    try {
+      const all = await this.db.getAll('security_log');
+      if (all.length <= this.maxStored) return 0;
+      const doomed = all.sort((a, b) => a.at - b.at).slice(0, all.length - this.maxStored);
+      await this.db.deleteAll('security_log', doomed.map(r => r.id));
+      return doomed.length;
+    } catch (e) {
+      console.error('Журнал безопасности: ротация не удалась', e);
+      return 0;
+    }
+  }
+
+  // Последние записи — из базы, а не из памяти: после перезагрузки в
+  // памяти пусто, а в базе лежит вся история.
+  async recent(limit = 300) {
+    if (!this.db) return this.auditLog.slice(0, limit);
+    try {
+      const all = await this.db.getAll('security_log');
+      return all.sort((a, b) => b.at - a.at).slice(0, limit);
+    } catch (_) {
+      return this.auditLog.slice(0, limit);
+    }
+  }
+
+  async clearLog() {
+    this.auditLog = [];
+    if (!this.db) return 0;
+    const all = await this.db.getAll('security_log');
+    await this.db.deleteAll('security_log', all.map(r => r.id));
+    return all.length;
   }
 
   static MODES = {

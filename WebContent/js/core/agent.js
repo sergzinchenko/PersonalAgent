@@ -31,6 +31,8 @@ class AIAgent {
     this.artifacts = new ArtifactsEngine(this.db);
     this.tasks = new TasksEngine(this.db);
     this.security = new SecurityEngine();
+    // Журнал решений теперь переживает перезагрузку: движку нужна база.
+    this.security.db = this.db;
     // Имя агента и история его доработок. Поднимается рано: имя уходит
     // в системный промпт, то есть нужно раньше первого запроса к модели.
     this.about = new AboutEngine(this.db);

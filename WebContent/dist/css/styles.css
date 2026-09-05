@@ -794,6 +794,20 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 .plan-step.plan-failed .plan-mark { color: var(--danger); }
 .chip.plan-chip { cursor: pointer; }
 
+/* Предупреждение о карантине в окне подтверждения: этот случай должен
+   отличаться от рядового вопроса до того, как текст прочитан. */
+.sec-quarantine {
+  border: 1px solid var(--warning);
+  border-left-width: 3px;
+  background: rgba(253,203,110,0.10);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+
 /* ── Панель плана справа ──
    Оглавление работы, а не часть переписки: поэтому вынесена из ленты
    в собственную колонку (см. #app.plan-open). */
