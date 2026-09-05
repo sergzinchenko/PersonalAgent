@@ -589,13 +589,26 @@ class SkillsEngine {
 	    // не защищает. В базе, заведённой раньше, этих полей просто нет.
 	    // Содержимое (текст, привязки) при этом НЕ трогаем: за него
 	    // отвечает обновление по версии определения ниже.
+	    // Заодно ТЕКСТ и привязки защищённого навыка приводятся к
+	    // определению в коде. Иначе защита была бы половинчатой: править
+	    // навык нельзя ни из интерфейса, ни инструментами, но правка через
+	    // DevTools или импорт чужого архива пережила бы перезапуск — а
+	    // ровно она и опасна, потому что незаметна.
+	    const defsById = new Map(defs.map(d => [d.id, d]));
 	    let secured = 0;
 	    for (const s of existing) {
 	      const place = SkillsEngine.placementOf(s.id);
 	      if (!place.protected) continue;
-	      if (s.protected === true && (s.parentId || null) === place.parentId) continue;
-	      s.protected = true;
-	      s.parentId = place.parentId;
+	      const def = defsById.get(s.id);
+	      const stale = s.protected !== true || (s.parentId || null) !== place.parentId ||
+	        (def && (s.systemPrompt !== def.systemPrompt ||
+	                 s.description !== def.description ||
+	                 s.name !== def.name ||
+	                 (s.toolIds || []).join(',') !== (def.toolIds || []).join(',')));
+	      if (!stale) continue;
+	      // enabled — выбор пользователя: защищённый навык он включает и
+	      // выключает сам, и восстановление текста этого выбора не отменяет.
+	      Object.assign(s, def || {}, { protected: true, parentId: place.parentId, enabled: s.enabled });
 	      await this.db.put('skills', s);
 	      secured++;
 	    }

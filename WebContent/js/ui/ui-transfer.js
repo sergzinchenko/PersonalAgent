@@ -637,6 +637,19 @@ Object.assign(UI.prototype, {
         for (const f of ordered) {
           const mappedParent = f.parentId ? (folderIdMap[f.parentId] || f.parentId) : null;
 
+          // ── Чужой архив не приносит системных папок ──
+          // Флаг system делает папку неприкосновенной, и принесённая
+          // архивом «системная» папка стала бы участком базы, который
+          // пользователь не может ни переименовать, ни удалить. Своя
+          // системная папка при этом уже существует — на неё просто
+          // отображаем входящую, ничего не перезаписывая.
+          if (FoldersEngine.isSeededId(f.id)) {
+            folderIdMap[f.id] = f.id;
+            foldersReused++;
+            continue;
+          }
+          delete f.system;
+
           // 1) Совпадение по id — та же самая папка, ничего не создаём.
           const sameId = existingFolders.find(e => e.id === f.id);
           if (sameId && mode !== 'overwrite') {
@@ -668,8 +681,30 @@ Object.assign(UI.prototype, {
         const existingItems = await this.agent.db.getAll(sectionKey);
         const existingIds = new Set(existingItems.map(i => i.id));
 
+        // Системные объекты этой базы: их не переписывает никакой архив.
+        const localProtected = new Set(existingItems
+          .filter(i => i.locked || i.protected)
+          .map(i => i.id));
+        // Системные папки этой базы — чтобы не принять в них содержимое.
+        const localSystemFolders = new Set((await this.agent.db.getAll('folders'))
+          .filter(f => f.system).map(f => f.id));
+
         for (const item of (block.items || [])) {
           const record = { ...item };
+
+          // ── Что архив не может принести ──
+          // 1. Признаки системности. Иначе достаточно было бы положить в
+          //    архив навык с locked:true, чтобы он попал в КАЖДЫЙ запрос
+          //    к модели и не выключался, — то есть чужой текст управлял бы
+          //    агентом, а пользователь не смог бы его снять.
+          delete record.locked;
+          delete record.protected;
+          // 2. Место в системной папке — по той же причине: содержимое
+          //    этой папки не переносится и не удаляется.
+          if (localSystemFolders.has(record.parentId)) record.parentId = null;
+          // 3. Подмену существующего системного объекта — даже в режиме
+          //    перезаписи и даже при совпадении id.
+          if (localProtected.has(record.id)) { skipped++; continue; }
           // parentId элемента перемаппим — иначе он указывал бы на id
           // папки из чужой базы, которую мы переиспользовали под другим id.
           if (record.parentId) {
