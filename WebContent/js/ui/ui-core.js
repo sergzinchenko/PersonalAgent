@@ -184,6 +184,16 @@ class UI {
 
     this._bindSidebarLayout();
 
+    // Копирование названий: одна точка на весь интерфейс — кнопки с
+    // data-copy-name есть и в дереве слева, и в карточках справа.
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-copy-name]');
+      if (!btn) return;
+      e.stopPropagation();
+      e.preventDefault();
+      this.copyName(btn.dataset.copyName, { label: btn.dataset.copyLabel || 'Название' });
+    });
+
     // Переключатель плотности — в шапке каждой панели, первым слева.
     document.querySelectorAll('[data-compact]').forEach(btn => {
       btn.addEventListener('click', () => this.togglePanelDensity(btn.dataset.compact));
@@ -344,6 +354,45 @@ class UI {
         }
       }, 50);
     });
+  }
+
+  // ── Копирование названия в буфер ──
+  // Названия чатов, папок, инструментов и файлов постоянно нужны в другом
+  // месте: чтобы сослаться на файл в сообщении, попросить включить
+  // инструмент по имени или назвать папку агенту. Перенабирать их руками
+  // — верный способ ошибиться в одной букве и потом искать, почему агент
+  // «не видит» объект.
+  //
+  // Обработчик один на всё приложение и делегированный: кнопки копирования
+  // живут в списках, которые перерисовываются целиком по любому чиху, и
+  // вешать слушатель на каждую заново было бы и дороже, и забывчивее.
+  async copyName(text, { label = 'Название' } = {}) {
+    const value = String(text ?? '');
+    if (!value) return false;
+    try {
+      // navigator.clipboard требует защищённого контекста (HTTPS/localhost);
+      // для http:// остаётся старый путь через скрытое поле.
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = value;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (!ok) throw new Error('execCommand отказал');
+      }
+      // Показываем ЧТО скопировано: при клике по мелкой кнопке в списке
+      // иначе не отличить успех от промаха мимо неё.
+      this._toast(`${label} скопировано: ${value.length > 60 ? value.slice(0, 60) + '…' : value}`, 2000);
+      return true;
+    } catch (e) {
+      this._toast('Не удалось скопировать: ' + (e && e.message || e));
+      return false;
+    }
   }
 
   // ── Короткое уведомление ──

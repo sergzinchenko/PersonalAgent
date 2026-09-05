@@ -295,6 +295,50 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 .sidebar-item:hover .delete-btn { opacity: 1; }
 
+/* ── Действия в строке чата ──
+   Появляются по наведению, как и кнопки папок: постоянно видимые три
+   значка в каждой строке превратили бы список чатов в панель кнопок. */
+.sidebar-item .item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: var(--transition);
+}
+.sidebar-item:hover .item-actions,
+.sidebar-item .item-actions:focus-within { opacity: 1; }
+.sidebar-item .item-actions button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 3px;
+  border-radius: 4px;
+  transition: var(--transition);
+}
+.sidebar-item .item-actions button:hover { color: var(--accent-light); background: var(--bg-hover); }
+.sidebar-item .item-actions .delete-btn { opacity: 1; color: var(--danger); font-size: 12px; }
+
+/* Кнопка копирования имени на карточках инструментов и файлов.
+   Тихая по умолчанию: она нужна изредка и не должна спорить за внимание
+   с названием, рядом с которым стоит. */
+.copy-name-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  opacity: 0.45;
+  flex-shrink: 0;
+  transition: var(--transition);
+}
+.copy-name-btn:hover { opacity: 1; color: var(--accent-light); background: var(--bg-hover); }
+.tool-card:hover .copy-name-btn, .file-card:hover .copy-name-btn { opacity: 0.85; }
+
 .sidebar-footer {
   padding: 12px;
   border-top: 1px solid var(--border);

@@ -63,7 +63,12 @@ Object.assign(UI.prototype, {
           ${busy ? '<span class="chat-busy-spinner" title="Генерирует ответ…"></span>' : ''}
           <span class="title">${this._escHtml(c.title)}</span>
           <span class="chat-time">${fmtTime(c.updatedAt || c.createdAt)}</span>
-          <button class="delete-btn" data-delete="${c.id}" title="Удалить">✕</button>
+          <span class="item-actions">
+            <button data-copy-name="${this._escHtml(c.title)}" data-copy-label="Название чата"
+                    title="Скопировать название">⧉</button>
+            <button data-rename-chat="${c.id}" title="Переименовать чат">✏</button>
+            <button class="delete-btn" data-delete="${c.id}" title="Удалить">✕</button>
+          </span>
         </div>`;
       }).join('');
     };
@@ -82,6 +87,8 @@ Object.assign(UI.prototype, {
               <span class="tw-toggle">${hasKids ? '▾' : '•'}</span>
               <span class="tw-name">📁 ${this._escHtml(f.name)}</span>
               <span class="tw-actions">
+                <button data-copy-name="${this._escHtml(f.name)}" data-copy-label="Название папки"
+                        title="Скопировать название">⧉</button>
                 <button data-add-sub="${f.id}" title="Подпапка">＋</button>
                 <button data-ren="${f.id}" title="Переименовать">✏</button>
                 <button data-del="${f.id}" title="Удалить">✕</button>
@@ -163,11 +170,20 @@ Object.assign(UI.prototype, {
       await this.refreshSidebar();
     }));
 
-    // --- Чаты: открытие и удаление ---
+    // --- Чаты: открытие, переименование, удаление ---
     list.querySelectorAll('.chat-item').forEach(item => {
       item.addEventListener('click', (e) => {
-        if (e.target.dataset.delete) return;
+        // Кнопки в строке — не «открыть чат»: раньше проверялась только
+        // кнопка удаления, и любая новая ловила бы клик дважды.
+        if (e.target.closest('.item-actions')) return;
         this.loadChat(item.dataset.id);
+      });
+    });
+
+    list.querySelectorAll('[data-rename-chat]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await this.renameChat(btn.dataset.renameChat);
       });
     });
     list.querySelectorAll('.delete-btn').forEach(btn => {
@@ -284,6 +300,8 @@ Object.assign(UI.prototype, {
               <span class="tw-name"${f.system ? ` title="${this._escHtml(f.note || 'Системная папка')}"` : ''}>${server ? '🧩' : (f.system ? '🔒' : '📁')} ${this._escHtml(label)}</span>
               ${toggle}
               <span class="tw-actions">
+                <button data-copy-name="${this._escHtml(label)}" data-copy-label="Название папки"
+                        title="Скопировать название">⧉</button>
                 ${f.system ? '' : `<button data-add-sub="${f.id}" title="Подпапка">＋</button>`}
                 ${server
                   ? `<button data-mcp-edit="${server.id}" title="Настроить сервер">✏</button>
@@ -631,6 +649,8 @@ Object.assign(UI.prototype, {
               ${editable ? `data-edit-tool="${t.id}"` : ''}>
           ${t.locked ? '🔒 ' : (t.mcpServerId ? '🧩 ' : '')}${this._escHtml(t.name)}
         </span>
+        <button class="copy-name-btn" data-copy-name="${this._escHtml(t.name)}"
+                data-copy-label="Имя инструмента" title="Скопировать имя">⧉</button>
         <label class="toggle-switch${t.locked ? ' locked' : ''}" ${t.locked ? `title="${lockTitle}"` : ''}>
           <input type="checkbox" ${t.enabled ? 'checked' : ''} ${t.locked ? 'disabled' : ''} data-toggle="${t.id}">
           <span class="toggle-slider"></span>
@@ -652,6 +672,8 @@ Object.assign(UI.prototype, {
       <div class="tool-card${t.locked ? ' tool-locked' : ''}" data-id="${t.id}">
         <div class="tool-header">
           <span class="tool-name">${t.locked ? '🔒 ' : (t.mcpServerId ? '🧩 ' : '')}${this._escHtml(t.name)}</span>
+          <button class="copy-name-btn" data-copy-name="${this._escHtml(t.name)}"
+                  data-copy-label="Имя инструмента" title="Скопировать имя">⧉</button>
           <label class="toggle-switch${t.locked ? ' locked' : ''}" ${t.locked ? `title="${lockTitle}"` : ''}>
             <input type="checkbox" ${t.enabled ? 'checked' : ''} ${t.locked ? 'disabled' : ''} data-toggle="${t.id}">
             <span class="toggle-slider"></span>
@@ -896,6 +918,8 @@ Object.assign(UI.prototype, {
         <div class="tool-card file-card" draggable="true" data-item-id="${f.id}">
           <div class="tool-header">
             <div class="tool-name">📎 ${this._escHtml(f.name)}</div>
+            <button class="copy-name-btn" data-copy-name="${this._escHtml(f.name)}"
+                    data-copy-label="Имя файла" title="Скопировать имя файла">⧉</button>
             ${state}
           </div>
           <div class="tool-desc">

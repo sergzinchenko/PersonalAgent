@@ -113,6 +113,31 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ── Переименование чата ──
+  // Заголовок чата до сих пор ставился только автоматически — по первому
+  // сообщению. Для короткого разговора это нормально, но список из
+  // двадцати чатов, названных первой фразой, перестаёт быть списком:
+  // «Привет, помоги разобраться…» ничем не отличается от соседнего такого же.
+  async renameChat(chatId) {
+    const chat = await this.agent.db.get('chats', chatId);
+    if (!chat) return null;
+
+    const title = await this._prompt('Переименование чата', chat.title || '', { label: 'Название чата' });
+    if (title === null) return null;                 // отмена — не трогаем
+    const next = String(title).replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!next || next === chat.title) return null;
+
+    chat.title = next;
+    // Отметка «название задал человек» уже используется автозаголовком:
+    // без неё следующее сообщение в чате переписало бы название обратно
+    // на первую фразу (см. sendMessage).
+    chat.titleSetByUser = true;
+    await this.agent.db.put('chats', chat);
+    await this.refreshSidebar();
+    return next;
+  },
+
+
   async deleteChat(chatId) {
     // Чат мог в этот момент генерировать ответ — останавливаем ход,
     // иначе он продолжит писать сообщения в уже удалённый чат.
