@@ -50,6 +50,7 @@ class FakeDB {
     'js/core/markdown.js',
     'js/core/log-guard.js',
     'js/core/tool-sandbox.js',
+    'js/core/binary-formats.js',
     'js/engines/folders-engine.js',
     'js/ui/ui-core.js',
     'js/ui/ui-navigation.js',

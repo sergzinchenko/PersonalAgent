@@ -163,9 +163,10 @@ class FilesEngine {
     return { granted, failed };
   }
 
-  // Читает файл. Возвращает { name, size, mime, text } либо { error }.
-  // Содержимое НЕ кэшируется: каждый раз берётся актуальная версия с диска.
-  async read(id, { maxBytes = 512 * 1024, asText = true } = {}) {
+  // Возвращает объект File по ссылке, разобравшись с разрешениями.
+  // Вынесено из read(): двоичные режимы читают байты, а не текст, но
+  // добираются до файла ровно так же — и ошибки у них те же.
+  async _openFile(id) {
     const record = await this.get(id);
     if (!record) return { error: 'Ссылка на файл не найдена' };
 
@@ -206,6 +207,84 @@ class FilesEngine {
       record.lastModified = file.lastModified;
       await this.db.put('files', record);
     }
+
+    return { record, file };
+  }
+
+  // Сырые байты файла (или его части). Отдельный метод: текстовое чтение
+  // здесь не подходит вовсе — TextDecoder на двоичных данных возвращает
+  // символы замены, из которых уже ничего не восстановить.
+  async readBytes(id, { offset = 0, length = 64 * 1024 } = {}) {
+    const opened = await this._openFile(id);
+    if (opened.error) return opened;
+    const { file } = opened;
+    const from = Math.max(0, Math.min(offset, file.size));
+    const to = Math.min(file.size, from + Math.max(1, length));
+    const buf = await file.slice(from, to).arrayBuffer();
+    return {
+      name: file.name, size: file.size, mime: file.type || '',
+      offset: from, bytes: new Uint8Array(buf),
+      eof: to >= file.size,
+    };
+  }
+
+  // Что это за файл: формат по сигнатуре, размеры изображения, состав
+  // архива. Расширению не верим — оно врёт чаще, чем первые байты.
+  async describe(id) {
+    const head = await this.readBytes(id, { offset: 0, length: 8192 });
+    if (head.error) return head;
+
+    const info = BinaryFormats.describe(head.bytes, { name: head.name, mime: head.mime, size: head.size });
+    const out = { name: head.name, size: head.size, mime: info.mime || head.mime, ...info };
+
+    // ZIP уточняем по содержимому: docx, xlsx, epub и jar — это всё ZIP,
+    // и разница между ними только внутри.
+    if (info.format === 'ZIP') {
+      const whole = await this.readBytes(id, { offset: 0, length: head.size });
+      if (!whole.error) {
+        const zip = BinaryFormats.zipEntries(whole.bytes);
+        if (!zip.error) {
+          const flavor = BinaryFormats.zipFlavor(zip.entries);
+          if (flavor) Object.assign(out, flavor);
+          out.entries = zip.entries.length;
+          out.contains = zip.entries.slice(0, 25).map(e => e.name);
+        }
+      }
+    }
+    out.textExtractable = BinaryFormats.TEXT_EXTRACTABLE.includes(out.format);
+    return out;
+  }
+
+  // Текст из двоичного документа: docx, xlsx, pptx, odt/ods, epub, pdf.
+  // Возвращает { text, approximate?, truncated? } либо { error }.
+  async extractText(id, { maxChars = 200000 } = {}) {
+    const info = await this.describe(id);
+    if (info.error) return info;
+
+    const whole = await this.readBytes(id, { offset: 0, length: info.size });
+    if (whole.error) return whole;
+
+    if (info.format === 'PDF') {
+      const res = await BinaryFormats.pdfText(whole.bytes, { maxChars });
+      return res.error ? res : { ...res, format: info.format, name: info.name };
+    }
+    if (['DOCX', 'XLSX', 'PPTX', 'ODF', 'EPUB'].includes(info.format)) {
+      const res = await BinaryFormats.officeText(whole.bytes, info.format, { maxChars });
+      return res.error ? res : { ...res, format: info.format, name: info.name };
+    }
+    return {
+      error: 'Из формата ' + info.format + ' текст извлекать нечем',
+      hint: 'Понимаются docx, xlsx, pptx, odt/ods, epub и pdf. Сырые байты можно посмотреть режимом hex.',
+      format: info.format,
+    };
+  }
+
+  // Читает файл. Возвращает { name, size, mime, text } либо { error }.
+  // Содержимое НЕ кэшируется: каждый раз берётся актуальная версия с диска.
+  async read(id, { maxBytes = 512 * 1024, asText = true } = {}) {
+    const opened = await this._openFile(id);
+    if (opened.error) return opened;
+    const { file } = opened;
 
     if (!asText) {
       return { name: file.name, size: file.size, mime: file.type || '', file };

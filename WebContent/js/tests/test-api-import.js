@@ -199,6 +199,7 @@ const GRAPHQL = JSON.stringify({
 
   const files = [
     'js/core/markdown.js', 'js/core/log-guard.js', 'js/core/tool-sandbox.js',
+    'js/core/binary-formats.js',
     'js/engines/folders-engine.js', 'js/engines/security-engine.js', 'js/engines/skills-engine.js',
     'js/engines/api-import-engine.js',
     'js/tools/tools-engine.js', 'js/tools/tools-registry.js', 'js/tools/tools-executor.js',

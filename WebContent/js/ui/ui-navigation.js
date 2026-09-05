@@ -870,10 +870,23 @@ Object.assign(UI.prototype, {
     // панель показывала только флаг из базы и вводила в заблуждение.
     const states = new Map();
     for (const f of files) states.set(f.id, await this.agent.files.statusOf(f));
+
+    // Формат по сигнатуре, а не по расширению: пользователю важно видеть,
+    // что это за файл на самом деле и можно ли из него достать текст.
+    // Спрашиваем только у доступных — у остальных читать нечего.
+    const formats = new Map();
+    for (const f of files) {
+      if (states.get(f.id) !== 'ready') continue;
+      try {
+        const info = await this.agent.files.describe(f.id);
+        if (!info.error) formats.set(f.id, info);
+      } catch (_) { /* описание — не повод ронять панель */ }
+    }
     const needPermission = files.filter(f => states.get(f.id) === 'needs-permission');
 
     const renderCard = (f) => {
       const st = states.get(f.id);
+      const fmt = formats.get(f.id);
       const state = st === 'ready'
         ? '<span class="file-state ok" title="Файл читается по сохранённому дескриптору">🔗 связан</span>'
         : st === 'needs-permission'
@@ -886,8 +899,12 @@ Object.assign(UI.prototype, {
             ${state}
           </div>
           <div class="tool-desc">
-            ${fmtSize(f.size)}${f.mime ? ' · ' + this._escHtml(f.mime) : ''}
+            ${fmtSize(f.size)}${fmt ? ' · ' + this._escHtml(fmt.format) : (f.mime ? ' · ' + this._escHtml(f.mime) : '')}
+            ${fmt && fmt.image ? ` · ${fmt.image.width}×${fmt.image.height}` : ''}
+            ${fmt && fmt.entries ? ` · ${fmt.entries} файлов внутри` : ''}
             ${f.lastModified ? ' · изменён ' + new Date(f.lastModified).toLocaleDateString('ru-RU') : ''}
+            ${fmt && fmt.textExtractable ? '<span class="file-state ok" title="Агент умеет достать из этого файла текст">📄 текст извлекается</span>' : ''}
+            ${fmt && fmt.binary && !fmt.textExtractable ? '<span class="file-state" title="Текста внутри нет — доступны сведения о формате, hex и base64">⬛ двоичный</span>' : ''}
           </div>
           ${f.note ? `<div class="tool-params">${this._escHtml(f.note)}</div>` : ''}
           <div class="tool-actions">

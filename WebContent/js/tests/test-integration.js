@@ -45,6 +45,7 @@ load('llm/llm-registry.js', 'LLMRegistry');
 load('engines/security-engine.js', 'SecurityEngine');
 load('core/log-guard.js', 'LogGuard');
   load('core/tool-sandbox.js', 'ToolSandbox');
+  load('core/binary-formats.js', 'BinaryFormats');
 load('engines/folders-engine.js', 'FoldersEngine');
 load('tools/tools-engine.js', 'ToolsEngine');
 ['tools-registry.js','tools-executor.js','tools-builtin.js','tools-defs.js','tools-mcp.js','tools-llm-router.js'].forEach(f => load('tools/' + f));

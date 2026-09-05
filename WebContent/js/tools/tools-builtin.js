@@ -9,6 +9,29 @@
 
 Object.assign(ToolsEngine.prototype, {
 
+  // Разбор отказов доступа к файлу. Разрешение браузер выдаёт только по
+  // жесту пользователя, поэтому модели важно сказать не «ошибка», а что
+  // именно попросить у человека.
+  _fileError(res, record) {
+    if (res.needsPermission) {
+      return {
+        error: 'Нет разрешения на чтение файла «' + record.name + '»',
+        hint: 'Браузер сбрасывает разрешения при перезапуске — это нормально, ссылка не потеряна. ' +
+              'Попроси пользователя открыть вкладку «Файлы» и нажать «Восстановить доступ» ' +
+              '(одна кнопка на все файлы). После этого повтори чтение. ' +
+              'Не пытайся обойти это другими инструментами.',
+        needsUserAction: true,
+      };
+    }
+    if (res.needsRelink) {
+      return {
+        error: res.error,
+        hint: 'Попроси пользователя нажать «Перевыбрать» у этого файла на вкладке «Файлы».',
+      };
+    }
+    return { error: res.error };
+  },
+
   _initBuiltinTools() {
     // Built-in: current_time
     this.registerHandler('builtin_time', async () => {
@@ -103,6 +126,8 @@ Object.assign(ToolsEngine.prototype, {
             points: [
               'Вы даёте ссылку на файл, само содержимое никуда не копируется.',
               'Агент читает файл в момент обращения — всегда актуальную версию.',
+              'Читаются не только текстовые файлы: из docx, xlsx, pptx, odt и pdf агент достаёт текст, у картинок и архивов показывает формат, размеры и состав, а любой файл может посмотреть побайтно.',
+              'Поиск по файлам заглядывает и внутрь документов.',
               'Работает в Chrome и Edge; в других браузерах ссылка живёт до перезагрузки страницы.',
               'Браузер может заново спросить разрешение на чтение — это нормально.',
             ],
@@ -431,29 +456,70 @@ Object.assign(ToolsEngine.prototype, {
 
         const maxBytes = Math.min(2 * 1024 * 1024,
           Math.max(1024, parseInt(params.maxBytes) || 256 * 1024));
+        const mode = String(params.mode || 'auto').toLowerCase();
+        const offset = Math.max(0, parseInt(params.offset, 10) || 0);
+
+        // ── Двоичные режимы ──
+        // Разбираются раньше обычного чтения: file.text() на картинке или
+        // docx возвращает символы замены, из которых уже ничего не
+        // восстановить, — и модель начинает рассуждать о мусоре.
+        if (mode !== 'text') {
+          const info = await this.files.describe(record.id);
+          if (info.error) return this._fileError(info, record);
+
+          if (mode === 'info') return { ...info, mode: 'info' };
+
+          if (mode === 'hex' || mode === 'base64') {
+            // Тут окно жёстче общего предела: hex раздувает файл в четыре
+            // раза, base64 — в полтора, и оба уезжают в контекст целиком.
+            const window_ = Math.min(mode === 'hex' ? 4096 : 48 * 1024,
+              Math.max(1, parseInt(params.maxBytes, 10) || (mode === 'hex' ? 1024 : 16 * 1024)));
+            const chunk = await this.files.readBytes(record.id, { offset, length: window_ });
+            if (chunk.error) return this._fileError(chunk, record);
+            const out = {
+              name: chunk.name, size: chunk.size, format: info.format,
+              mode, offset, returnedBytes: chunk.bytes.length, eof: chunk.eof,
+            };
+            out[mode === 'hex' ? 'hex' : 'base64'] = mode === 'hex'
+              ? BinaryFormats.hexDump(chunk.bytes, { offset })
+              : BinaryFormats.toBase64(chunk.bytes);
+            if (!chunk.eof) out.note = 'Прочитан кусок файла. Дальше — тот же вызов с offset=' +
+              (offset + chunk.bytes.length) + '.';
+            return out;
+          }
+
+          // auto: у документа достаём текст, у прочего двоичного —
+          // рассказываем, что это, и чем его можно посмотреть.
+          if (mode === 'extract' || (mode === 'auto' && info.binary)) {
+            if (info.textExtractable) {
+              const ex = await this.files.extractText(record.id, { maxChars: maxBytes });
+              if (ex.error) return { ...ex, name: info.name, format: info.format };
+              return {
+                name: info.name, size: info.size, format: info.format,
+                mode: 'extract', content: ex.text, truncated: !!ex.truncated,
+                approximate: ex.approximate || undefined,
+                note: ex.approximate
+                  ? 'Текст извлечён из PDF приблизительно: порядок слов сохранён, вёрстка — нет. ' +
+                    'Не выдавай его за точную копию документа.'
+                  : 'Текст извлечён из ' + info.format + ' — разметка и оформление опущены.',
+              };
+            }
+            if (mode === 'extract') {
+              return { error: 'Из формата ' + info.format + ' текст извлекать нечем', format: info.format,
+                hint: 'Понимаются docx, xlsx, pptx, odt/ods, epub, pdf. Иначе — режим hex или base64.' };
+            }
+            return {
+              ...info, mode: 'info',
+              note: 'Это двоичный файл, текстом его читать бессмысленно. ' +
+                'Смотри структуру режимом hex, содержимое целиком — base64 (порциями), ' +
+                'а для документов и таблиц есть режим extract.',
+            };
+          }
+        }
+
         const res = await this.files.read(record.id, { maxBytes });
 
-        if (res.error) {
-          // Разрешение можно запросить только из жеста пользователя,
-          // поэтому подсказываем модели, что именно сказать человеку.
-          if (res.needsPermission) {
-            return {
-              error: 'Нет разрешения на чтение файла «' + record.name + '»',
-              hint: 'Браузер сбрасывает разрешения при перезапуске — это нормально, ссылка не потеряна. ' +
-                    'Попроси пользователя открыть вкладку «Файлы» и нажать «Восстановить доступ» ' +
-                    '(одна кнопка на все файлы). После этого повтори чтение. ' +
-                    'Не пытайся обойти это другими инструментами.',
-              needsUserAction: true,
-            };
-          }
-          if (res.needsRelink) {
-            return {
-              error: res.error,
-              hint: 'Попроси пользователя нажать «Перевыбрать» у этого файла на вкладке «Файлы».',
-            };
-          }
-          return { error: res.error };
-        }
+        if (res.error) return this._fileError(res, record);
 
         return {
           name: res.name,
@@ -479,15 +545,31 @@ Object.assign(ToolsEngine.prototype, {
 
         const results = [];
         const skipped = [];
+        const includeDocs = params.includeDocuments !== false;
         for (const f of items) {
           if (results.length >= limit) break;
-          // Двоичные файлы пропускаем: искать текст в них бессмысленно.
-          if (f.mime && !/^text\/|json|xml|javascript|csv|markdown/.test(f.mime)) continue;
 
-          const res = await this.files.read(f.id, { maxBytes: 512 * 1024 });
-          if (res.error) { skipped.push({ name: f.name, reason: res.error }); continue; }
+          // Что читать: у документа (docx, xlsx, pdf…) — извлечённый
+          // текст, у текстового файла — его самого, у прочего двоичного —
+          // ничего: искать подстроку в картинке бессмысленно.
+          let raw = null;
+          const info = await this.files.describe(f.id);
+          if (info.error) { skipped.push({ name: f.name, reason: info.error }); continue; }
 
-          const raw = res.text || '';
+          if (info.binary && info.textExtractable) {
+            if (!includeDocs) { skipped.push({ name: f.name, reason: 'документ пропущен по настройке' }); continue; }
+            const ex = await this.files.extractText(f.id, { maxChars: 512 * 1024 });
+            if (ex.error) { skipped.push({ name: f.name, reason: ex.error }); continue; }
+            raw = ex.text || '';
+          } else if (info.binary) {
+            skipped.push({ name: f.name, reason: 'двоичный файл (' + info.format + ') — текста в нём нет' });
+            continue;
+          } else {
+            const res = await this.files.read(f.id, { maxBytes: 512 * 1024 });
+            if (res.error) { skipped.push({ name: f.name, reason: res.error }); continue; }
+            raw = res.text || '';
+          }
+
           const hay = params.caseSensitive ? raw : raw.toLowerCase();
           const at = hay.indexOf(needle);
           if (at === -1) continue;
@@ -497,6 +579,10 @@ Object.assign(ToolsEngine.prototype, {
           results.push({
             file: await this.files.pathOf(f, folders),
             id: f.id,
+            format: info.format,
+            // Для документа честно помечаем, что искали в извлечённом
+            // тексте: в нём нет ни вёрстки, ни колонтитулов, ни картинок.
+            extracted: !!info.binary || undefined,
             excerpt: (from > 0 ? '…' : '') + raw.slice(from, to) + (to < raw.length ? '…' : ''),
           });
         }

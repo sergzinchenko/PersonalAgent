@@ -1009,29 +1009,88 @@ module.exports = {
       }
     }
 
-    const res = await this.agent.files.read(id, { maxBytes: 200 * 1024 });
-    if (res.error) {
+    // Сначала выясняем, ЧТО это: показывать docx как текст бессмысленно
+    // (получится каша из ZIP), а картинку — тем более.
+    const info = await this.agent.files.describe(id);
+    if (info.error) {
       this._showModal('📎 ' + this._escHtml(record.name),
-        `<p style="color:var(--danger);font-size:13px;">${this._escHtml(res.error)}</p>` +
-        (res.needsRelink ? '<p style="font-size:12px;color:var(--text-muted);">Нажмите «Перевыбрать», чтобы указать файл заново.</p>' : ''),
+        `<p style="color:var(--danger);font-size:13px;">${this._escHtml(info.error)}</p>` +
+        (info.needsRelink ? '<p style="font-size:12px;color:var(--text-muted);">Нажмите «Перевыбрать», чтобы указать файл заново.</p>' : ''),
         null);
       return;
     }
 
-    const isImage = (res.mime || '').startsWith('image/');
-    const body = isImage
-      ? '<p style="color:var(--text-secondary);font-size:13px;">Двоичный файл — предпросмотр текста недоступен.</p>'
-      : `<pre class="tool-pre" style="max-height:50vh;">${this._escHtml(res.text || '')}</pre>`;
+    const head = [
+      this._fmtBytes(info.size),
+      info.format,
+      info.image ? `${info.image.width}×${info.image.height}` : '',
+      info.entries ? `${info.entries} файлов внутри` : '',
+    ].filter(Boolean).join(' · ');
+
+    let body = '';
+    let footer = 'Содержимое читается с диска при каждом обращении и нигде не сохраняется.';
+
+    if (info.kind === 'image') {
+      // Картинку показываем как есть — через временную ссылку на blob,
+      // которая живёт до закрытия окна: копии файла при этом не создаётся.
+      const opened = await this.agent.files._openFile(id);
+      if (opened.error) body = `<p style="color:var(--danger);">${this._escHtml(opened.error)}</p>`;
+      else {
+        const url = URL.createObjectURL(opened.file);
+        this._previewUrl = url;
+        body = `<div style="text-align:center;background:var(--bg-tertiary);border-radius:var(--radius);padding:8px;">
+          <img src="${url}" alt="${this._escHtml(record.name)}" style="max-width:100%;max-height:55vh;">
+        </div>`;
+      }
+    } else if (info.textExtractable) {
+      const ex = await this.agent.files.extractText(id, { maxChars: 100000 });
+      if (ex.error) {
+        body = `<p style="color:var(--text-secondary);font-size:13px;">${this._escHtml(ex.error)}` +
+          (ex.hint ? ' ' + this._escHtml(ex.hint) : '') + '</p>';
+      } else {
+        body = `<pre class="tool-pre" style="max-height:50vh;">${this._escHtml(ex.text)}</pre>`;
+        footer = (ex.approximate
+          ? 'Текст из PDF извлечён приблизительно: порядок слов сохранён, вёрстка — нет. '
+          : 'Показан извлечённый текст, без оформления. ') + footer;
+      }
+    } else if (info.binary) {
+      const chunk = await this.agent.files.readBytes(id, { offset: 0, length: 1024 });
+      body = chunk.error
+        ? `<p style="color:var(--danger);">${this._escHtml(chunk.error)}</p>`
+        : `<pre class="tool-pre" style="max-height:45vh;">${this._escHtml(BinaryFormats.hexDump(chunk.bytes))}</pre>`;
+      footer = 'Двоичный файл — показано начало в шестнадцатеричном виде. ' + footer;
+      if (info.contains && info.contains.length) {
+        body += `<div class="form-group" style="margin-top:10px;">
+          <label>Внутри архива</label>
+          <div class="tool-params">${this._escHtml(info.contains.join('\n'))}${info.entries > info.contains.length ? '\n…' : ''}</div>
+        </div>`;
+      }
+    } else {
+      const res = await this.agent.files.read(id, { maxBytes: 200 * 1024 });
+      if (res.error) {
+        body = `<p style="color:var(--danger);font-size:13px;">${this._escHtml(res.error)}</p>`;
+      } else {
+        body = `<pre class="tool-pre" style="max-height:50vh;">${this._escHtml(res.text || '')}</pre>`;
+        if (res.truncated) footer = 'Показано начало файла. ' + footer;
+      }
+    }
 
     this._showModal('📎 ' + this._escHtml(record.name), `
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
-        ${res.size} байт${res.mime ? ' · ' + this._escHtml(res.mime) : ''}
-        ${res.truncated ? ' · показано начало файла' : ''}
-      </div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">${this._escHtml(head)}</div>
       ${body}
-      <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
-        Содержимое читается с диска при каждом обращении и нигде не сохраняется.
-      </div>`, null, null, { wide: true });
+      <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">${this._escHtml(footer)}</div>`,
+      null,
+      // Ссылку на blob надо отпустить, иначе файл останется в памяти
+      // вкладки до перезагрузки.
+      () => { if (this._previewUrl) { URL.revokeObjectURL(this._previewUrl); this._previewUrl = null; } },
+      { wide: true });
+  },
+
+  _fmtBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' Б';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1).replace('.', ',') + ' КБ';
+    return (n / 1024 / 1024).toFixed(1).replace('.', ',') + ' МБ';
   }
 
 });

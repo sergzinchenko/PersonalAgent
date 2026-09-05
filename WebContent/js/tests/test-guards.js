@@ -64,6 +64,7 @@ class FakeDB {
     'js/core/changelog.js',
     'js/core/log-guard.js',
     'js/core/tool-sandbox.js',
+    'js/core/binary-formats.js',
     'js/engines/folders-engine.js',
     'js/engines/about-engine.js',
     'js/engines/tasks-engine.js',
