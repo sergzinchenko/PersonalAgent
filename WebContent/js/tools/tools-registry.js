@@ -40,7 +40,9 @@ Object.assign(ToolsEngine.prototype, {
 	    // Досеиваем встроенные tools, которых ещё нет в базе
 	    const missing = defs.filter(def => !existingIds.has(def.id));
 	    for (const def of missing) {
-	      await this.db.put('tools', def);
+	      await this.db.put('tools', def.locked
+	        ? { ...def, parentId: FoldersEngine.systemFolderId('tools') }
+	        : def);
 	    }
 
 	    // ── Системные инструменты ──
@@ -50,17 +52,31 @@ Object.assign(ToolsEngine.prototype, {
 	    // состояние выправляется на КАЖДОЙ загрузке, а не только при
 	    // досеивании: в базе, заведённой раньше, эти записи уже есть — и
 	    // могли быть выключены, пока запрета не существовало.
+	    // Заодно системные инструменты держатся в папке «Системные»: она
+	    // отвечает на вопрос «что здесь трогать нельзя» одним взглядом, а
+	    // не перебором карточек. Место — такая же неизменяемая часть
+	    // системного инструмента, как и его включённость: утащенный в
+	    // чужую папку, он выглядел бы обычным (см. engines/folders-engine.js).
+	    const systemFolder = FoldersEngine.systemFolderId('tools');
 	    const lockedIds = new Set(defs.filter(d => d.locked).map(d => d.id));
 	    let relocked = 0;
 	    for (const t of existing) {
-	      if (!lockedIds.has(t.id) || (t.locked === true && t.enabled === true)) continue;
+	      if (!lockedIds.has(t.id)) continue;
+	      if (t.locked === true && t.enabled === true && (t.parentId || null) === systemFolder) continue;
 	      t.locked = true;
 	      t.enabled = true;
+	      t.parentId = systemFolder;
 	      await this.db.put('tools', t);
 	      relocked++;
 	    }
 
 	    const all = (missing.length || relocked) ? await this.db.getAll('tools') : existing;
+
+	    // Единственное место, где известен актуальный состав папки
+	    // «Системные», — здесь. Отсюда он и уходит в защиту журнала:
+	    // вызовы этих инструментов в консоль не печатаются никогда
+	    // (см. core/log-guard.js).
+	    LogGuard.setSystemTools(all.filter(t => t.locked).map(t => t.name));
 
 	    // Восстанавливаем обработчики MCP-инструментов, не переживающие релоад (см. комментарий выше).
 	    for (const t of all) {

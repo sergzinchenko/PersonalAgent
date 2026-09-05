@@ -77,7 +77,16 @@ Object.assign(ToolsEngine.prototype, {
 	      this.security._count(this.security.categoryOf(toolName, toolRec), toolName);
 	    }
 
-	    if (this.debug) {
+	    // ── Что не журналируется никогда ──
+	    // Вызовы инструментов из папки «Системные» в консоль не попадают
+	    // ни в каком виде: через них проходят память агента, ответы
+	    // пользователя, тела артефактов и планы задач. Это не уровень
+	    // подробности, который можно поднять, — см. core/log-guard.js.
+	    const silent = LogGuard.isSystemTool(toolName);
+	    if (this.debug && silent) LogGuard.notice();
+	    const logCall = this.debug && !silent;
+
+	    if (logCall) {
 	    console.group('%c🔧 TOOL CALL', 'color:#f39c12;font-weight:bold;font-size:13px;');
 	    console.log('%cTool:', 'color:#888;', toolName);
 	    console.log('%cArguments:', 'color:#888;');
@@ -141,10 +150,12 @@ Object.assign(ToolsEngine.prototype, {
 	      result = { error: 'Tool engine error: ' + e.message };
 	      // Ошибку самого движка (не хендлера) логируем всегда, без this.debug —
 	      // это внутренний сбой, а не рутинный tool-вызов, полезно видеть сразу.
-	      console.error('🔧 TOOL ENGINE ERROR:', toolName, e);
+	      // Только имя и сообщение об ошибке: сам объект исключения у
+	      // системного инструмента может нести его данные.
+	      console.error('🔧 TOOL ENGINE ERROR:', toolName, silent ? e.message : e);
 	    } finally {
 	      var elapsed = (performance.now() - t0).toFixed(0);
-	      if (this.debug) {
+	      if (logCall) {
 	      if (result && result.error) {
 	        console.log('%c❌ Error:', 'color:#e74c3c;');
 	      } else {

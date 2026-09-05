@@ -91,6 +91,14 @@ class AIAgent {
     }
 
     // 4. Load tools (seed defaults if needed)
+    // Папки — раньше содержимого: загрузчики инструментов и навыков
+    // раскладывают системные записи по ним, и папка должна уже
+    // существовать (см. engines/folders-engine.js).
+    try {
+      await this.folders.ensureSeeded();
+    } catch (e) {
+      console.error('Не удалось завести системные папки', e);
+    }
     await this.tools.loadTools();
     await this.skills.loadSkills();
     await this.prompts.loadPrompts();
@@ -118,7 +126,9 @@ class AIAgent {
       if (display.toolVerbosity) this.ui.toolVerbosity = display.toolVerbosity;
       if (display.filesContextMode) this.ui.filesContextMode = display.filesContextMode;
       if (display.skillsPanelMode) this.ui.skillsPanelMode = display.skillsPanelMode;
+      if (display.panelCompact) this.ui.panelCompact = { ...this.ui.panelCompact, ...display.panelCompact };
     }
+    this.ui.applyPanelDensity();
     // Локальный прокси: форма настроек читает значения из this.ui.proxy.
     // Сам инструмент proxy_fetch берёт их напрямую из БД на каждый вызов —
     // здесь только то, что нужно интерфейсу.

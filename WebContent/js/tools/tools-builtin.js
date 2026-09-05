@@ -82,6 +82,8 @@ Object.assign(ToolsEngine.prototype, {
               'Привязка ничего не включает: инструмент доступен, только если включён его собственный тумблер. Привязанный, но выключенный инструмент агент видит как недоступный и не пытается вызвать.',
               'При включении навыка прямо в чате агент один раз спросит, включить ли выключенные инструменты этого навыка.',
               'Навык «Системный» выключить нельзя: он описывает устройство самого агента — память, подтверждение операций, судьбу выключенных инструментов, подрезку истории — и участвует в каждом запросе.',
+              'Навыки разложены по папкам: «Системные» управляют ядром агента (их можно включать и выключать, но не менять и не переносить), «Сервисные» наводят порядок в самом агенте, «Прикладные» — для ваших задач.',
+              'Устройство навыка «Системный» не показывается: это правила, которым подчиняется модель.',
             ],
           },
           tools: {
@@ -93,7 +95,7 @@ Object.assign(ToolsEngine.prototype, {
               'Можно подключить внешний MCP-сервер и получить его инструменты.',
               'Выключенный инструмент не передаётся модели и не выполняется, даже если его вызвать по имени.',
               'На карточке инструмента видно, к каким навыкам он привязан, и кнопкой «🧩 Навыки» этот список меняется; папку целиком можно включить или выключить одним переключателем в дереве.',
-              'Часть инструментов системные, и выключить их нельзя: persistent_memory (память), ask_user (вопрос пользователю), explain_agent, diagnose, agent_name (имя агента) и whats_new (что нового). На них держатся базовые механизмы агента.',
+              'Часть инструментов системные: они собраны в папке «Системные», включены всегда, и ни выключить, ни перенести их нельзя — на них держатся базовые механизмы агента (память, вопрос пользователю, объяснение устройства, самодиагностика, имя, история доработок, работа по частям).',
             ],
           },
           files: {
@@ -1315,6 +1317,7 @@ Object.assign(ToolsEngine.prototype, {
         // Саму запись создаёт FoldersEngine — единая точка правды для формата
         // папки (id/createdAt и т.д.), без дублирования здесь.
         const folder = await this.folders.create(type, name, parentId);
+        if (folder && folder.error) return folder;
         this._refreshUI(type);
         return { success: true, id: folder.id, name: folder.name, parentId: folder.parentId };
       } catch (e) { return { error: e.message }; }
@@ -1326,7 +1329,8 @@ Object.assign(ToolsEngine.prototype, {
         const type = String(params.kind || '').toLowerCase() + 's';
         const id = await this._resolveFolderId(type, params.folder);
         if (!id) return { error: 'Папка не найдена' };
-        await this.folders.rename(id, params.name);
+        const renamed = await this.folders.rename(id, params.name);
+        if (renamed && renamed.error) return renamed;
         const f = await this.db.get('folders', id);
         this._refreshUI(type);
         return { success: true, id, name: f.name };
@@ -1346,7 +1350,8 @@ Object.assign(ToolsEngine.prototype, {
         // папку в саму себя/потомка) — она просто тихо не применит изменение
         // в этом случае, поэтому сверяем parentId до/после, чтобы вернуть
         // модели понятную ошибку вместо молчаливого "success" без эффекта.
-        await this.folders.move(id, target);
+        const moved = await this.folders.move(id, target);
+        if (moved && moved.error) return moved;
         const after = await this.db.get('folders', id);
         if ((after.parentId || null) !== (target || null)) {
           return { error: 'Нельзя переместить папку в свою подпапку (цикл)' };
@@ -1373,7 +1378,8 @@ Object.assign(ToolsEngine.prototype, {
         const subsCount = (await this.db.getAll('folders')).filter(f => f.parentId === id).length;
         const itemsCount = (await this.db.getAll(type)).filter(it => (it.parentId || null) === id).length;
 
-        await this.folders.remove(id, type);
+        const removed = await this.folders.remove(id, type);
+        if (removed && removed.error) return removed;
         this._refreshUI(type);
         return { success: true, deleted: id, movedSubfolders: subsCount, movedItems: itemsCount };
       } catch (e) { return { error: e.message }; }
@@ -1390,7 +1396,20 @@ Object.assign(ToolsEngine.prototype, {
         let item = params.id ? items.find(i => i.id === params.id) : null;
         if (!item && params.name) item = items.find(i => (i.name || i.title) === params.name);
         if (!item) return { error: 'Элемент не найден (укажите id или точное name/title)' };
+
+        // Системные инструменты и навыки живут в папке «Системные» и
+        // остаются в ней: место — часть их защиты, а не украшение
+        // (см. engines/folders-engine.js).
+        const protectedItem = kind === 'tool' ? !!item.locked
+          : kind === 'skill' ? SkillsEngine.isProtected(item) : false;
+        if (protectedItem) {
+          return { error: 'Элемент «' + (item.name || item.title) + '» системный — он остаётся в папке «Системные».' };
+        }
+
         const target = await this._resolveFolderId(type, params.to, { createMissing: true });
+        if (this.folders && await this.folders.isSystem(target)) {
+          return { error: 'В системную папку нельзя ничего перемещать.' };
+        }
         item.parentId = target || null;
         await this.db.put(type, item);
         this._refreshUI(type);
@@ -1405,6 +1424,13 @@ Object.assign(ToolsEngine.prototype, {
         const name = String(params.name || '').trim();
         if (!name) return { error: 'Требуется name' };
         const parentId = await this._resolveFolderId('skills', params.folder, { createMissing: true });
+        // Папка «Системные» — не место для нового навыка: она означает
+        // «этим управляется ядро агента», и положить туда что угодно
+        // значило бы выдать своему навыку чужие полномочия в глазах
+        // пользователя.
+        if (this.folders && await this.folders.isSystem(parentId)) {
+          return { error: 'В папку «Системные» навыки не добавляются. Выбери другую папку — например «Прикладные».' };
+        }
 
         // Привязка к инструментам: имена или id вперемешку, неизвестные
         // не молчат, а возвращаются модели — иначе опечатка в имени
@@ -1446,18 +1472,25 @@ Object.assign(ToolsEngine.prototype, {
         // каждом запросе и стоит выше остальных навыков. Он не правится
         // вообще — ни выключением, ни текстом промпта: изменив его, модель
         // переписала бы правила, которым сама же и подчиняется.
-        if (skill.locked) {
+        if (SkillsEngine.isProtected(skill)) {
           return {
-            error: 'Навык «' + skill.name + '» системный: его нельзя изменить, выключить или удалить.',
-            hint: 'Он описывает устройство агента (память, подтверждения, инструменты, контекст), ' +
-                  'действует всегда и имеет приоритет над остальными навыками. ' +
-                  'Нужно другое поведение — создай отдельный навык: он применяется поверх, ' +
-                  'но не отменяет системный.',
+            error: skill.locked
+              ? 'Навык «' + skill.name + '» системный: его нельзя изменить, выключить или удалить.'
+              : 'Навык «' + skill.name + '» лежит в папке «Системные»: его настройки менять нельзя.',
+            hint: 'Навыки этой папки управляют ядром агента — правилами безопасности, тем, как он ' +
+                  'меняет сам себя и на чём работает. Пользователь может их включать и выключать, ' +
+                  'ты — нет. Нужно другое поведение: создай отдельный навык, он применяется поверх.',
           };
         }
         ['name', 'description', 'systemPrompt', 'icon', 'category'].forEach(k => { if (params[k] !== undefined) skill[k] = params[k]; });
         if (params.enabled !== undefined) skill.enabled = !!params.enabled;
-        if (params.folder !== undefined) skill.parentId = await this._resolveFolderId('skills', params.folder, { createMissing: true });
+        if (params.folder !== undefined) {
+          const target = await this._resolveFolderId('skills', params.folder, { createMissing: true });
+          if (this.folders && await this.folders.isSystem(target)) {
+            return { error: 'В папку «Системные» навыки не переносятся.' };
+          }
+          skill.parentId = target;
+        }
 
         // tools здесь — полная замена списка (как и любое другое поле в
         // update_*). Добавление и удаление по одному — link_skill_tools.
@@ -1503,9 +1536,9 @@ Object.assign(ToolsEngine.prototype, {
         // Состав системного навыка — часть описания механизмов агента,
         // а не пользовательская настройка (отвязав persistent_memory,
         // получили бы навык, который рассказывает про недоступную память).
-        if (skill.locked) {
+        if (SkillsEngine.isProtected(skill)) {
           return {
-            error: 'Навык «' + skill.name + '» системный: его набор инструментов менять нельзя.',
+            error: 'Навык «' + skill.name + '» из папки «Системные»: его набор инструментов менять нельзя.',
             hint: 'Посмотреть текущий состав можно этим же инструментом с action: "list".',
           };
         }
@@ -1592,6 +1625,12 @@ Object.assign(ToolsEngine.prototype, {
             hint: 'На нём держится один из базовых механизмов агента — память, вопрос пользователю, ' +
                   'объяснение устройства или самодиагностика.',
           };
+        }
+        // Место системного инструмента — тоже часть его защиты: в папке
+        // «Системные» видно, что трогать нельзя, а вынесенный оттуда он
+        // выглядел бы обычным.
+        if (t.locked && params.folder !== undefined) {
+          return { error: 'Инструмент "' + t.name + '" системный — он остаётся в папке «Системные».' };
         }
 
         if (params.newName !== undefined) {
@@ -2109,6 +2148,9 @@ _isBlockedProxyTarget(hostname) {
 					await this.db.put('folders', f);
 					return f;
 				})();
+			// Внутри системной папки создавать нельзя — движок вернёт отказ
+			// вместо записи, и продолжать разбор пути бессмысленно.
+			if (!found || found.error) return null;
 			folders.push(found);
 		}
 		parentId = found.id;

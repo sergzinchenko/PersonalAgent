@@ -58,6 +58,13 @@ class UI {
     // существенную часть экрана.
     this.skillsPanelMode = 'active';
 
+    // ── Плотность списков в панелях Tools/Skills/Промпты ──
+    // true — компактный вид: только название и переключатель. Настройка
+    // своя на каждый раздел (инструментов десятки, промптов единицы) и
+    // действует на любом уровне иерархии: панель показывает содержимое
+    // одной папки, и плотность — это свойство раздела, а не папки.
+    this.panelCompact = { tools: false, skills: false, prompts: false };
+
     this.recognition = null;   // экземпляр SpeechRecognition (голосовой ввод)
     this.isListening = false;
 
@@ -177,11 +184,45 @@ class UI {
 
     this._bindSidebarLayout();
 
+    // Переключатель плотности — в шапке каждой панели, первым слева.
+    document.querySelectorAll('[data-compact]').forEach(btn => {
+      btn.addEventListener('click', () => this.togglePanelDensity(btn.dataset.compact));
+    });
+
     document.querySelectorAll('.export-import-btn').forEach(btn => {
       btn.addEventListener('click', () => this.showSelectiveExportModal(btn.dataset.section));
     });
     document.querySelectorAll('.import-btn').forEach(btn => {
       btn.addEventListener('click', () => this.showImportModal(btn.dataset.section));
+    });
+  }
+
+
+  // Переключает плотность раздела и запоминает выбор: без сохранения
+  // компактный вид пришлось бы включать заново при каждом запуске —
+  // а нужен он именно тем, у кого объектов много.
+  async togglePanelDensity(type) {
+    if (!(type in this.panelCompact)) return;
+    this.panelCompact[type] = !this.panelCompact[type];
+    this.applyPanelDensity();
+    this._refreshPanel(type);
+    try {
+      const cur = (await this.agent.db.get('settings', 'display')) || { key: 'display' };
+      await this.agent.db.put('settings', { ...cur, key: 'display', panelCompact: { ...this.panelCompact } });
+    } catch (_) { /* плотность списка не та вещь, из-за которой стоит падать */ }
+  }
+
+  // Подписи кнопок отражают ТЕКУЩЕЕ состояние, а не действие: «Компактно»
+  // на кнопке, когда компактный вид уже включён, читается как «нажми, и
+  // станет компактно» — и пользователь жмёт её впустую.
+  applyPanelDensity() {
+    document.querySelectorAll('[data-compact]').forEach(btn => {
+      const on = !!this.panelCompact[btn.dataset.compact];
+      btn.textContent = on ? '▦ Подробно' : '▤ Компактно';
+      btn.classList.toggle('active', on);
+      btn.title = on
+        ? 'Сейчас компактно: только название и переключатель. Нажмите, чтобы вернуть подробные карточки'
+        : 'Сейчас подробно. Нажмите, чтобы показывать только название и переключатель';
     });
   }
 
@@ -303,6 +344,29 @@ class UI {
         }
       }, 50);
     });
+  }
+
+  // ── Короткое уведомление ──
+  // Для случаев, когда действие не выполнено, а решать пользователю
+  // нечего: перетащил защищённый навык — и ничего не произошло. Модальное
+  // окно тут перебор (оно требует ответа, которого нет), а молчание
+  // выглядит поломкой.
+  _toast(text, ms = 3600) {
+    let host = document.getElementById('toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toast-host';
+      document.body.appendChild(host);
+    }
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = text;
+    host.appendChild(el);
+    setTimeout(() => {
+      el.classList.add('leaving');
+      setTimeout(() => el.remove(), 300);
+    }, ms);
+    return null;
   }
 
   _confirm(message, { title = 'Подтверждение', danger = false } = {}) {

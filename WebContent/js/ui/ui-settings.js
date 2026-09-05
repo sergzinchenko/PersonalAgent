@@ -440,7 +440,16 @@ Object.assign(UI.prototype, {
       this.toolVerbosity = document.getElementById('s_tool_verbosity').value;
       this.filesContextMode = document.getElementById('s_files_ctx').value;
       this.skillsPanelMode = document.getElementById('s_skills_mode').value;
-      await this.agent.db.put('settings', { key: 'display', toolVerbosity: this.toolVerbosity, filesContextMode: this.filesContextMode, skillsPanelMode: this.skillsPanelMode });
+      // panelCompact сюда попадает, хотя формы для него нет: запись
+      // settings/display перезаписывается целиком, и без него сохранение
+      // настроек молча сбрасывало бы выбранную плотность списков.
+      await this.agent.db.put('settings', {
+        key: 'display',
+        toolVerbosity: this.toolVerbosity,
+        filesContextMode: this.filesContextMode,
+        skillsPanelMode: this.skillsPanelMode,
+        panelCompact: { ...this.panelCompact },
+      });
 
       // Политика безопасности.
       const secCfg = {

@@ -150,9 +150,9 @@ Object.assign(UI.prototype, {
     // была бы хуже отсутствия — она обещает то, чего не происходит.
     const rows = skills.map(s => `
       <label class="skill-tool-row${boundIds.has(s.id) ? ' bound' : ''}" data-filter-name="${this._escHtml(s.name.toLowerCase())}"
-             ${s.locked ? 'title="Системный навык — его состав не меняется"' : ''}>
-        <input type="checkbox" data-skill-of-tool="${s.id}" ${boundIds.has(s.id) ? 'checked' : ''} ${s.locked ? 'disabled' : ''}>
-        <span class="skill-tool-name">${s.locked ? '🔒 ' : ''}${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
+             ${SkillsEngine.isProtected(s) ? 'title="Навык из папки «Системные» — его состав не меняется"' : ''}>
+        <input type="checkbox" data-skill-of-tool="${s.id}" ${boundIds.has(s.id) ? 'checked' : ''} ${SkillsEngine.isProtected(s) ? 'disabled' : ''}>
+        <span class="skill-tool-name">${s.locked ? '🔒 ' : (s.protected ? '🛡 ' : '')}${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
         <span class="skill-tool-state${s.enabled ? ' on' : ''}">${s.enabled ? 'включён' : 'выключен'}</span>
       </label>`).join('');
 
@@ -598,13 +598,18 @@ module.exports = {
   // а здесь нужно объяснить, ПОЧЕМУ его не правят.
   async showSystemSkillModal(skill) {
     const tools = await this.agent.skills.toolsOfSkill(skill);
-    this._showModal(`🔒 ${this._escHtml(skill.icon)} ${this._escHtml(skill.name)}`, `
+    this._showModal(`${skill.locked ? '🔒' : '🛡'} ${this._escHtml(skill.icon)} ${this._escHtml(skill.name)}`, `
       <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
-        Системный навык описывает устройство самого агента — память, подтверждение
-        операций, судьбу выключенных инструментов, подрезку истории. Он участвует
-        в <b>каждом</b> запросе, идёт <b>перед</b> остальными навыками, и его правила
-        имеют приоритет над ними. Поэтому его нельзя выключить, удалить или изменить:
-        правка тихо поменяла бы основания, на которые опирается всё остальное поведение.
+        ${skill.locked
+          ? `Системный навык описывает устройство самого агента — память, подтверждение
+             операций, судьбу выключенных инструментов, подрезку истории. Он участвует
+             в <b>каждом</b> запросе, идёт <b>перед</b> остальными навыками, и его правила
+             имеют приоритет над ними. Поэтому его нельзя выключить, удалить или изменить:
+             правка тихо поменяла бы основания, на которые опирается всё остальное поведение.`
+          : `Навык из папки <b>«Системные»</b>: он управляет ядром агента — правилами
+             безопасности, тем, как агент меняет сам себя и на чём работает. Включать
+             и выключать его можно, изменять и переносить — нет: правка сняла бы
+             ограничения, ради которых он и написан.`}
       </div>
       <div class="form-group">
         <label>Описание</label>
@@ -619,10 +624,14 @@ module.exports = {
       </div>
       <div class="form-group">
         <label>System Prompt</label>
-        <div class="tool-params" style="white-space:pre-wrap;max-height:40vh;overflow:auto;">${this._escHtml(skill.systemPrompt)}</div>
+        ${skill.locked
+          ? `<div class="tool-params locked-note">Устройство системного навыка не показывается.
+               Это его правила, которым подчиняется модель, и знание точных формулировок
+               заметно облегчает их обход. Что он делает — сказано выше.</div>`
+          : `<div class="tool-params" style="white-space:pre-wrap;max-height:40vh;overflow:auto;">${this._escHtml(skill.systemPrompt)}</div>`}
       </div>
       <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
-        Нужно другое поведение — не меняйте системный навык, а добавьте свой:
+        Нужно другое поведение — не меняйте навык из папки «Системные», а добавьте свой:
         его указания применяются поверх, но не отменяют системные.
       </div>
     `, null, null, { wide: true });
@@ -637,7 +646,7 @@ module.exports = {
       // бы правила, на которые опирается всё остальное, — включая то, как
       // агент объясняет отказы политики и судьбу выключенных инструментов.
       // Показываем как есть, только на чтение.
-      if (skill?.locked) return this.showSystemSkillModal(skill);
+      if (SkillsEngine.isProtected(skill)) return this.showSystemSkillModal(skill);
 
       const title = skill ? 'Редактировать Skill' : 'Новый Skill';
 

@@ -22,7 +22,64 @@ class SkillsEngine {
     this.db = db;
   }
 
+  // ── Раскладка встроенных навыков по папкам ──
+  // Три группы, и это не про удобство поиска, а про то, чем навык
+  // распоряжается:
+  //   «Системные»  — управляют ядром агента: его правилами, тем, как он
+  //                  меняет сам себя и на чём работает. Менять их
+  //                  небезопасно, поэтому они защищены (protected):
+  //                  смотреть, включать и выключать можно, править и
+  //                  переносить — нет.
+  //   «Сервисные»  — управляют СОДЕРЖИМЫМ агента: наводят порядок,
+  //                  объясняют устройство, создают и переносят объекты.
+  //                  Обычные навыки, просто не про задачу пользователя.
+  //   «Прикладные» — всё остальное: работа над задачами.
+  //
+  // Список ведётся здесь, а не флагом в каждом определении: так видно
+  // границу целиком, и вопрос «почему этот навык защищён, а тот нет»
+  // решается одним взглядом на три строки, а не поиском по файлу.
+  static PLACEMENT = {
+    folder_skills_system: [
+      'skill_system',          // устройство агента и правила, действующие всегда
+      'skill_skill_importer',  // защита от чужих инструкций при переносе навыков
+      'skill_tool_dev',        // правила создания кода, исполняемого в браузере
+      'skill_llm_router',      // управление тем, на чём агент работает
+    ],
+    folder_skills_service: [
+      'skill_onboarding',
+      'skill_organizer',
+      'skill_agent_expert',
+    ],
+    // Остальные встроенные навыки — «Прикладные» (см. placementOf).
+  };
+
+  static DEFAULT_FOLDER = 'folder_skills_applied';
+
+  // Куда положить встроенный навык и защищён ли он. Защищённость выводится
+  // из папки, а не задаётся отдельно: два источника правды разошлись бы на
+  // первом же добавленном навыке.
+  static placementOf(id) {
+    for (const [folderId, ids] of Object.entries(SkillsEngine.PLACEMENT)) {
+      if (ids.includes(id)) return { parentId: folderId, protected: folderId === 'folder_skills_system' };
+    }
+    return { parentId: SkillsEngine.DEFAULT_FOLDER, protected: false };
+  }
+
+  // Навык, настройки которого менять нельзя: системный (locked) или
+  // лежащий в папке «Системные» (protected). Разница между ними одна и
+  // существенная: locked нельзя ещё и выключить и посмотреть.
+  static isProtected(skill) {
+    return !!(skill && (skill.locked || skill.protected));
+  }
+
   _defaultSkills() {
+    // Папка и защита проставляются здесь, одним проходом: держать их в
+    // каждом определении значило бы повторить одно и то же тринадцать раз
+    // и получить тринадцать мест, где можно ошибиться.
+    return this._defaultSkillDefs().map(def => ({ ...def, ...SkillsEngine.placementOf(def.id) }));
+  }
+
+  _defaultSkillDefs() {
 	    return [
 	      // ── Системный навык ──
 	      // Единственный, который нельзя выключить и удалить (locked). Он
@@ -65,11 +122,14 @@ class SkillsEngine {
 	          'ИНСТРУМЕНТЫ. Тебе передаются только включённые. Выключенный вызвать нельзя — ' +
 	          'вызов будет отклонён, даже если ты помнишь этот инструмент по началу диалога. ' +
 	          'Если для задачи нужен выключенный инструмент, назови его и попроси включить ' +
-	          'на вкладке Tools. Не выдумывай результат вызова, которого не было.\n\n' +
+	          'на вкладке Tools. Не выдумывай результат вызова, которого не было. ' +
+	          'Инструменты из папки «Системные» включены всегда, выключить и переместить их нельзя.\n\n' +
 
 	          'НАВЫКИ. Навык — это набор указаний, который пользователь включает и выключает. ' +
 	          'К навыку могут быть привязаны инструменты, которыми он пользуется; сама привязка ' +
-	          'ничего не включает.\n\n' +
+	          'ничего не включает. Навыки папки «Системные» управляют ядром агента: пользователь ' +
+	          'может их включать и выключать, а изменять и переносить их нельзя — ни тебе, ни ему. ' +
+	          'Не предлагай их правку как решение: нужное поведение добавляется отдельным навыком.\n\n' +
 
 	          'КОНТЕКСТ. Окно контекста ограничено. Когда история перестаёт помещаться, её начало ' +
 	          'СВОРАЧИВАЕТСЯ в резюме — оно приходит тебе системным сообщением «свёрнутая часть ' +
@@ -479,6 +539,10 @@ class SkillsEngine {
 	    ];
 	  }
 
+	  _isBuiltinId(id, defs) {
+	    return (defs || this._defaultSkills()).some(d => d.id === id);
+	  }
+
 	  async loadSkills() {
 	    const existing = await this.db.getAll('skills');
 	    const existingIds = new Set(existing.map(s => s.id));
@@ -509,11 +573,50 @@ class SkillsEngine {
 	      if (!def) continue;
 	      const stale = s.locked !== true || s.enabled !== true ||
 	        s.systemPrompt !== def.systemPrompt || s.description !== def.description ||
-	        (s.toolIds || []).join(',') !== (def.toolIds || []).join(',');
+	        (s.toolIds || []).join(',') !== (def.toolIds || []).join(',') ||
+	        (s.parentId || null) !== (def.parentId || null);
 	      if (!stale) continue;
 	      Object.assign(s, def, { locked: true, enabled: true });
 	      await this.db.put('skills', s);
 	      relocked++;
+	    }
+
+	    // ── Навыки папки «Системные» ──
+	    // Защита и место выправляются на КАЖДОЙ загрузке — по той же
+	    // причине, что и у системного навыка выше: и то, и другое можно
+	    // было бы обойти, отредактировав запись в базе или перетащив
+	    // навык мышью, а защита, которую снимают перетаскиванием, ничего
+	    // не защищает. В базе, заведённой раньше, этих полей просто нет.
+	    // Содержимое (текст, привязки) при этом НЕ трогаем: за него
+	    // отвечает обновление по версии определения ниже.
+	    let secured = 0;
+	    for (const s of existing) {
+	      const place = SkillsEngine.placementOf(s.id);
+	      if (!place.protected) continue;
+	      if (s.protected === true && (s.parentId || null) === place.parentId) continue;
+	      s.protected = true;
+	      s.parentId = place.parentId;
+	      await this.db.put('skills', s);
+	      secured++;
+	    }
+
+	    // ── Разовая раскладка встроенных навыков по папкам ──
+	    // Папки появились позже самих навыков: заведённые до них лежат в
+	    // корне. Раскладываем — но только те, что ДО СИХ ПОР в корне:
+	    // навык, уже убранный пользователем в свою папку, трогать нельзя,
+	    // иначе наведённый им порядок разъехался бы при обновлении.
+	    let placed = 0;
+	    for (const s of existing) {
+	      if ((s.parentId || null) !== null) continue;
+	      const place = SkillsEngine.placementOf(s.id);
+	      // placementOf отвечает и на незнакомый id (папка «Прикладные»),
+	      // поэтому раскладываем только встроенные — чужие навыки
+	      // пользователя остаются там, где он их оставил.
+	      if (!this._isBuiltinId(s.id, defs)) continue;
+	      s.parentId = place.parentId;
+	      if (place.protected) s.protected = true;
+	      await this.db.put('skills', s);
+	      placed++;
 	    }
 
 	    // ── Разовая миграция привязок к инструментам ──
@@ -553,7 +656,8 @@ class SkillsEngine {
 	      refreshed++;
 	    }
 
-	    return (missing.length || migrated || relocked || refreshed) ? await this.db.getAll('skills') : existing;
+	    return (missing.length || migrated || relocked || refreshed || secured || placed)
+	      ? await this.db.getAll('skills') : existing;
 	  }
   async getActiveSkills() {
     const skills = await this.loadSkills();
@@ -630,7 +734,7 @@ class SkillsEngine {
     const skills = await this.loadSkills();
     let changed = 0;
     for (const s of skills) {
-      if (s.locked) continue;   // состав системного навыка не редактируется
+      if (SkillsEngine.isProtected(s)) continue;   // состав навыков папки «Системные» не редактируется
       const ids = this.toolIdsOf(s);
       const has = ids.includes(toolId);
       const should = wanted.has(s.id);

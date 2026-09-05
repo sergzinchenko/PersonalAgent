@@ -51,6 +51,8 @@ console.log('\n── Загрузка модулей ──');
 try {
   load('engines/tasks-engine.js', 'TasksEngine');
   load('engines/security-engine.js', 'SecurityEngine');
+  load('core/log-guard.js', 'LogGuard');
+  load('engines/folders-engine.js', 'FoldersEngine');
   load('tools/tools-engine.js', 'ToolsEngine');
   load('tools/tools-registry.js');
   load('tools/tools-executor.js');

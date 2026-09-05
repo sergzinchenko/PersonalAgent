@@ -72,6 +72,8 @@ class FakeDB {
   // вызовами — один общий eval снимает вопрос целиком.
   const files = [
     'js/core/markdown.js',
+    'js/core/log-guard.js',
+    'js/engines/folders-engine.js',
     'js/ui/ui-core.js',
     'js/ui/ui-navigation.js',
     'js/ui/ui-chat.js',

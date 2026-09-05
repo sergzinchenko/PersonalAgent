@@ -38,6 +38,8 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
   // Один общий eval — см. пояснение в test-chat-switching.js.
   const files = [
     'js/core/markdown.js',
+    'js/core/log-guard.js',
+    'js/engines/folders-engine.js',
     'js/ui/ui-core.js',
     'js/ui/ui-navigation.js',
     'js/ui/ui-chat.js',

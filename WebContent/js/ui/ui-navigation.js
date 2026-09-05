@@ -279,17 +279,17 @@ Object.assign(UI.prototype, {
 
         html += `
           <div class="tree-node">
-            <div class="tree-node-row ${sel}" data-folder-id="${f.id}" ${server ? `data-mcp-server="${server.id}"` : ''}>
+            <div class="tree-node-row ${sel}${f.system ? ' system-folder' : ''}" data-folder-id="${f.id}" ${f.system ? 'data-system-folder="1"' : ''} ${server ? `data-mcp-server="${server.id}"` : ''}>
               <span class="tw-toggle">${hasKids ? '▾' : '•'}</span>
-              <span class="tw-name">${server ? '🧩' : '📁'} ${this._escHtml(label)}</span>
+              <span class="tw-name"${f.system ? ` title="${this._escHtml(f.note || 'Системная папка')}"` : ''}>${server ? '🧩' : (f.system ? '🔒' : '📁')} ${this._escHtml(label)}</span>
               ${toggle}
               <span class="tw-actions">
-                <button data-add-sub="${f.id}" title="Подпапка">＋</button>
+                ${f.system ? '' : `<button data-add-sub="${f.id}" title="Подпапка">＋</button>`}
                 ${server
                   ? `<button data-mcp-edit="${server.id}" title="Настроить сервер">✏</button>
                      <button data-mcp-del="${server.id}" title="Удалить сервер">✕</button>`
-                  : `<button data-ren="${f.id}" title="Переименовать">✏</button>
-                     <button data-del="${f.id}" title="Удалить">✕</button>`}
+                  : (f.system ? '' : `<button data-ren="${f.id}" title="Переименовать">✏</button>
+                     <button data-del="${f.id}" title="Удалить">✕</button>`)}
               </span>
             </div>
             ${build(f.id)}
@@ -348,6 +348,7 @@ Object.assign(UI.prototype, {
       const name = await this._prompt('Новая папка', '', { label: 'Название папки' });
       if (!name) return;
       const f = await this.agent.folders.create(type, name, b.dataset.addSub || null);
+      if (f && f.error) return this._toast(f.error);
       this.folderSelection[type] = f.id;
       await this.refreshSidebar();
       this._refreshPanel(type);
@@ -423,7 +424,7 @@ Object.assign(UI.prototype, {
       // Контейнер MCP-сервера не перетаскивается: он всегда лежит в корне
       // раздела Tools, а перемещение внутрь другой папки или другого
       // сервера не имеет смысла — сервер целиком, а не его часть.
-      if (fid && !row.hasAttribute('data-mcp-server')) {
+      if (fid && !row.hasAttribute('data-mcp-server') && !row.hasAttribute('data-system-folder')) {
         row.setAttribute('draggable', 'true');
         row.addEventListener('dragstart', (e) => {
           e.stopPropagation();
@@ -448,16 +449,29 @@ Object.assign(UI.prototype, {
         // см. постановку в connectMcpServer.
         const targetScope = await this._mcpScopeOf(type, target);
 
+        // Системная папка закрыта в обе стороны: и положить в неё, и
+        // забрать из неё нельзя. Иначе «системный» был бы просто ярлыком —
+        // достаточно вытащить элемент мышью, чтобы снять с него запреты.
+        if (await this.agent.folders.isSystem(target)) {
+          this._toast('В системную папку нельзя ничего перемещать.');
+          return;
+        }
+
         if (data.kind === 'item') {
           const rec = await this.agent.db.get(type, data.id);
           if (!rec) return;
+          if (this._isItemProtected(type, rec)) {
+            this._toast('Это системный элемент — он остаётся в папке «Системные».');
+            return;
+          }
           const sourceScope = await this._mcpScopeOf(type, rec.parentId || null);
           if (sourceScope !== targetScope) return;
           rec.parentId = target; await this.agent.db.put(type, rec);
         } else if (data.kind === 'folder') {
           const sourceScope = await this._mcpScopeOf(type, data.id);
           if (sourceScope !== targetScope) return;
-          await this.agent.folders.move(data.id, target);
+          const res = await this.agent.folders.move(data.id, target);
+          if (res && res.error) { this._toast(res.error); return; }
         }
         await this.refreshSidebar();
         this._refreshPanel(type);
@@ -499,6 +513,7 @@ Object.assign(UI.prototype, {
     const name = await this._prompt('Новая папка', '', { label: 'Название папки' });
     if (!name) return;
     const f = await this.agent.folders.create(type, name, this.folderSelection[type] || null);
+    if (f && f.error) return this._toast(f.error);
     this.folderSelection[type] = f.id;
     await this.refreshSidebar();
     this._refreshPanel(type);
@@ -524,17 +539,36 @@ Object.assign(UI.prototype, {
   },
 
 
+  // Элемент, который нельзя ни править, ни переносить. Один ответ на
+  // весь интерфейс: карточка, перетаскивание и меню обязаны понимать
+  // защиту одинаково, иначе запрет обходится тем способом, который
+  // забыли закрыть.
+  _isItemProtected(type, item) {
+    if (!item) return false;
+    if (type === 'tools') return !!item.locked;
+    if (type === 'skills') return SkillsEngine.isProtected(item);
+    return false;
+  },
+
+
   // Плоский рендер карточек выбранной папки + DnD-источник
   async _renderPanelItems(type, mount, allItems, renderItemCard, bindItemEvents) {
     if (!mount) return;
     const sel = this.folderSelection[type];
     const items = allItems.filter(it => (it.parentId || null) === sel);
-    const crumb = `<div class="folder-breadcrumb">${await this._folderPath(type, sel)}</div>`;
+    const systemFolder = await this.agent.folders.isSystem(sel);
+    const compact = !!this.panelCompact[type];
+
+    const note = systemFolder
+      ? `<div class="folder-note">🔒 Системная папка: её содержимое нельзя переносить, переименовывать и удалять.</div>`
+      : '';
+    const crumb = `<div class="folder-breadcrumb">${await this._folderPath(type, sel)}</div>${note}`;
 
     const grid = items.length
-      ? `<div class="tree-items">${items.map(it =>
-          `<div class="tree-item-wrap" draggable="true" data-item-id="${it.id}">${renderItemCard(it)}</div>`
-        ).join('')}</div>`
+      ? `<div class="tree-items${compact ? ' compact' : ''}">${items.map(it => {
+          const locked = this._isItemProtected(type, it);
+          return `<div class="tree-item-wrap" ${locked ? '' : 'draggable="true"'} data-item-id="${it.id}">${renderItemCard(it)}</div>`;
+        }).join('')}</div>`
       : `<div class="tree-empty">В этой папке пусто. Нажмите «+ Создать» — элемент добавится сюда.</div>`;
 
     mount.innerHTML = crumb + grid;
@@ -579,7 +613,32 @@ Object.assign(UI.prototype, {
       }
     }
 
-    const renderCard = (t) => {
+    const compact = !!this.panelCompact.tools;
+
+    // Компактный вид — только название и переключатель. Описание,
+    // параметры и привязки уходят в подсказку: список из сорока карточек
+    // невозможно окинуть взглядом, а именно это чаще всего и нужно —
+    // найти инструмент и понять, включён ли он.
+    const renderCompact = (t) => {
+      const inSkills = usedBy.get(t.id) || [];
+      const hint = [t.description, inSkills.length ? 'Навыки: ' + inSkills.map(s => s.name).join(', ') : '']
+        .filter(Boolean).join('\n');
+      const lockTitle = 'Системный инструмент — на нём держатся базовые механизмы агента, выключить нельзя';
+      const editable = !t.builtin && !t.mcpServerId;
+      return `
+      <div class="tool-card compact-row${t.locked ? ' tool-locked' : ''}" data-id="${t.id}">
+        <span class="compact-name${editable ? ' clickable' : ''}" title="${this._escHtml(hint)}"
+              ${editable ? `data-edit-tool="${t.id}"` : ''}>
+          ${t.locked ? '🔒 ' : (t.mcpServerId ? '🧩 ' : '')}${this._escHtml(t.name)}
+        </span>
+        <label class="toggle-switch${t.locked ? ' locked' : ''}" ${t.locked ? `title="${lockTitle}"` : ''}>
+          <input type="checkbox" ${t.enabled ? 'checked' : ''} ${t.locked ? 'disabled' : ''} data-toggle="${t.id}">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>`;
+    };
+
+    const renderFull = (t) => {
       const inSkills = usedBy.get(t.id) || [];
       const skillsLine = inSkills.length
         ? `<div class="tool-skills" title="Навыки, к которым привязан инструмент">
@@ -608,6 +667,8 @@ Object.assign(UI.prototype, {
         </div>
       </div>`;
     };
+
+    const renderCard = (t) => compact ? renderCompact(t) : renderFull(t);
 
     const bind = (scope) => {
       scope.querySelectorAll('[data-toggle]').forEach(el => el.addEventListener('change', async () => {
@@ -653,7 +714,33 @@ Object.assign(UI.prototype, {
     const allTools = await this.agent.tools.loadTools();
     const toolsById = new Map(allTools.map(t => [t.id, t]));
 
-    const renderCard = (s) => {
+    const compact = !!this.panelCompact.skills;
+
+    // Подписи к трём состояниям навыка. Разница между locked и protected
+    // существенная и должна читаться с карточки: системный навык нельзя
+    // даже выключить и посмотреть, защищённый — можно и то, и другое,
+    // нельзя только изменить и перенести.
+    const lockTitle = 'Системный навык: участвует в каждом запросе, выключить и посмотреть нельзя';
+    const protTitle = 'Навык из папки «Системные»: управляет ядром агента. ' +
+      'Смотреть, включать и выключать можно; изменять и переносить — нет';
+
+    const renderCompact = (s) => {
+      const prot = SkillsEngine.isProtected(s);
+      const viewable = !s.locked;   // устройство системного навыка не показывается
+      return `
+      <div class="tool-card compact-row${prot ? ' tool-locked' : ''}" data-id="${s.id}">
+        <span class="compact-name${viewable ? ' clickable' : ''}"
+              title="${this._escHtml(s.description)}" ${viewable ? `data-edit-skill="${s.id}"` : ''}>
+          ${s.locked ? '🔒 ' : (prot ? '🛡 ' : '')}${this._escHtml(s.icon)} ${this._escHtml(s.name)}
+        </span>
+        <label class="toggle-switch${s.locked ? ' locked' : ''}" ${s.locked ? `title="${lockTitle}"` : ''}>
+          <input type="checkbox" ${s.enabled ? 'checked' : ''} ${s.locked ? 'disabled' : ''} data-skill-toggle="${s.id}">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>`;
+    };
+
+    const renderFull = (s) => {
       const bound = this.agent.skills.toolIdsOf(s).map(id => toolsById.get(id)).filter(Boolean);
       const offCount = bound.filter(t => !t.enabled).length;
       const toolsBlock = bound.length ? `
@@ -664,27 +751,36 @@ Object.assign(UI.prototype, {
           ${offCount ? `<span class="skill-tools-warn" title="Выключенные инструменты модели не передаются">⚠ ${offCount} выключено</span>` : ''}
         </div>` : '';
 
-      // Системный навык описывает устройство самого агента и участвует
-      // в каждом запросе — выключать и удалять его нечему.
-      const lockTitle = 'Системный навык — описывает устройство агента, выключить нельзя';
+      const prot = SkillsEngine.isProtected(s);
+      // Устройство системного навыка не показывается вовсе: текст его
+      // промпта — это правила, которым подчиняется модель, и знание
+      // точных формулировок заметно облегчает их обход. Защищённые
+      // навыки папки «Системные» смотреть можно — менять нельзя.
+      const promptBlock = s.locked
+        ? `<div class="tool-params locked-note">Устройство системного навыка не показывается: ` +
+          `он описывает правила, которым подчиняется модель. Что он делает — в описании выше.</div>`
+        : `<div class="tool-params" style="white-space:pre-wrap">${this._escHtml(s.systemPrompt)}</div>`;
+
       return `
-      <div class="tool-card${s.locked ? ' tool-locked' : ''}" data-id="${s.id}">
+      <div class="tool-card${prot ? ' tool-locked' : ''}" data-id="${s.id}">
         <div class="tool-header">
-          <span class="tool-name">${s.locked ? '🔒 ' : ''}${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
-          <label class="toggle-switch${s.locked ? ' locked' : ''}" ${s.locked ? `title="${lockTitle}"` : ''}>
+          <span class="tool-name">${s.locked ? '🔒 ' : (prot ? '🛡 ' : '')}${this._escHtml(s.icon)} ${this._escHtml(s.name)}</span>
+          <label class="toggle-switch${s.locked ? ' locked' : ''}" ${s.locked ? `title="${lockTitle}"` : `title="${prot ? protTitle : ''}"`}>
             <input type="checkbox" ${s.enabled ? 'checked' : ''} ${s.locked ? 'disabled' : ''} data-skill-toggle="${s.id}">
             <span class="toggle-slider"></span>
           </label>
         </div>
         <div class="tool-desc">${this._escHtml(s.description)}</div>
         ${toolsBlock}
-        <div class="tool-params" style="white-space:pre-wrap">${this._escHtml(s.systemPrompt)}</div>
+        ${promptBlock}
         <div class="tool-actions">
-          <button class="btn btn-secondary btn-sm" data-edit-skill="${s.id}">${s.locked ? '👁 Посмотреть' : '✏ Редактировать'}</button>
-          ${s.locked ? '' : `<button class="btn btn-danger btn-sm" data-del-skill="${s.id}">Удалить</button>`}
+          ${s.locked ? '' : `<button class="btn btn-secondary btn-sm" data-edit-skill="${s.id}">${prot ? '👁 Посмотреть' : '✏ Редактировать'}</button>`}
+          ${prot ? '' : `<button class="btn btn-danger btn-sm" data-del-skill="${s.id}">Удалить</button>`}
         </div>
       </div>`;
     };
+
+    const renderCard = (s) => compact ? renderCompact(s) : renderFull(s);
 
     const bind = (scope) => {
       scope.querySelectorAll('[data-skill-toggle]').forEach(el => el.addEventListener('change', async () => {
@@ -696,7 +792,9 @@ Object.assign(UI.prototype, {
       scope.querySelectorAll('[data-edit-skill]').forEach(el => el.addEventListener('click', () => this.showAddSkillModal(el.dataset.editSkill)));
       scope.querySelectorAll('[data-del-skill]').forEach(el => el.addEventListener('click', async () => {
         const skill = await this.agent.db.get('skills', el.dataset.delSkill);
-        if (skill?.locked) return;
+        // Кнопки удаления у защищённого навыка нет, но событие могло
+        // прийти и не от неё — проверка на стороне действия, а не разметки.
+        if (SkillsEngine.isProtected(skill)) return;
         if (!await this._confirm(`Удалить навык «${skill?.name || ''}»?`, { title: 'Удаление навыка', danger: true })) return;
         await this.agent.db.delete('skills', el.dataset.delSkill);
         this.renderSkills();
@@ -712,7 +810,19 @@ Object.assign(UI.prototype, {
     const prompts = await this.agent.prompts.loadPrompts();
     const mount = document.getElementById('prompts-container');
 
-    const renderCard = (p) => `
+    const compact = !!this.panelCompact.prompts;
+
+    // У промпта нет переключателя «включён» — включать нечего, он просто
+    // подставляется в поле ввода. Поэтому в компактном виде остаётся одно
+    // название; клик по нему открывает промпт, как и кнопка ✏ в подробном.
+    const renderCompact = (p) => `
+      <div class="prompt-card compact-row" data-prompt-id="${p.id}">
+        <span class="compact-name clickable" title="${this._escHtml((p.content || '').slice(0, 300))}"
+              data-edit-prompt="${p.id}">${this._escHtml(p.title)}</span>
+        <button class="btn btn-primary btn-sm" data-use-prompt="${p.id}" title="Подставить в поле ввода">▶</button>
+      </div>`;
+
+    const renderFull = (p) => `
       <div class="prompt-card" data-prompt-id="${p.id}">
         <div class="prompt-title">${this._escHtml(p.title)}</div>
         <div class="prompt-preview">${this._escHtml(p.content)}</div>
@@ -723,6 +833,8 @@ Object.assign(UI.prototype, {
           <button class="btn btn-danger btn-sm" data-del-prompt="${p.id}">✕</button>
         </div>
       </div>`;
+
+    const renderCard = (p) => compact ? renderCompact(p) : renderFull(p);
 
     const bind = (scope) => {
       scope.querySelectorAll('[data-use-prompt]').forEach(el => el.addEventListener('click', () => this.usePrompt(el.dataset.usePrompt)));

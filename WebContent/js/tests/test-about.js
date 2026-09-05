@@ -58,6 +58,8 @@ class FakeDB {
 
   const files = [
     'js/core/markdown.js',
+    'js/core/log-guard.js',
+    'js/engines/folders-engine.js',
     'js/core/changelog.js',
     'js/engines/about-engine.js',
     'js/engines/tasks-engine.js',

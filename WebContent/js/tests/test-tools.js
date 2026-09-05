@@ -48,6 +48,8 @@ console.log('\n── Загрузка модулей в порядке index.ht
 try {
   load('llm/llm-registry.js', 'LLMRegistry');
   load('engines/security-engine.js', 'SecurityEngine');
+  load('core/log-guard.js', 'LogGuard');
+  load('engines/folders-engine.js', 'FoldersEngine');
   load('tools/tools-engine.js', 'ToolsEngine');
   load('tools/tools-registry.js');
   load('tools/tools-executor.js');

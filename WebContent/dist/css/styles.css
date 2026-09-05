@@ -1567,6 +1567,92 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   color: var(--text-secondary);
   font-size: 12px;
 }
+/* Пояснение под крошками у системной папки: почему здесь ничего не двигается. */
+.folder-note {
+  margin: -8px 4px 14px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--tint-soft);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.tree-node-row.system-folder .tw-name { color: var(--text-secondary); }
+
+/* ── Компактный режим панелей ──
+   Одна колонка вместо сетки карточек: в компактном виде строка — это
+   название и переключатель, и растягивать её на треть экрана незачем. */
+.tree-items.compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tree-items.compact .tree-item-wrap { min-width: 0; }
+
+.tool-card.compact-row,
+.prompt-card.compact-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  min-height: 0;
+}
+.compact-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compact-name.clickable { cursor: pointer; }
+.compact-name.clickable:hover { color: var(--accent-light); }
+
+/* Кнопка плотности: активное состояние видно, а не угадывается. */
+.density-btn.active { border-color: var(--accent); color: var(--accent-light); }
+
+/* Пометка вместо содержимого системного навыка. */
+.tool-params.locked-note {
+  font-style: italic;
+  color: var(--text-muted);
+  white-space: normal;
+}
+
+/* ── Короткие уведомления ──
+   Появляются, когда действие не выполнено, а решать пользователю нечего. */
+#toast-host {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  pointer-events: none;
+}
+.toast {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 9px 14px;
+  max-width: 420px;
+  animation: toastIn 0.2s ease;
+}
+.toast.leaving { opacity: 0; transition: opacity 0.3s ease; }
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 /* ===== BOOT ERROR ===== */
 .boot-error {
   position: fixed; inset: 0; z-index: 9999;

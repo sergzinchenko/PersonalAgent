@@ -80,7 +80,10 @@ class LLMGateway {
     console.log('%cMethod:', 'color:#888;', 'POST');
     console.log('%cHeaders:', 'color:#888;', logHeaders);
     console.log('%cBody:', 'color:#888;');
-    console.dir(JSON.parse(JSON.stringify(body)));
+    // Системный промпт и описания системных инструментов в консоль не
+    // уходят никогда — см. core/log-guard.js.
+    LogGuard.notice();
+    console.dir(JSON.parse(JSON.stringify(LogGuard.redactBody(body))));
     console.log('%cMessages count:', 'color:#888;', messages.length);
     if (tools) console.log('%cTools count:', 'color:#888;', tools.length);
     console.log('%cStream:', 'color:#888;', stream);
@@ -215,10 +218,10 @@ class LLMGateway {
       console.log('%cContent preview:', 'color:#888;', fullContent.substring(0, 300) + (fullContent.length > 300 ? '...' : ''));
       if (result.tool_calls) {
         console.log('%cTool Calls:', 'color:#f39c12;');
-        console.dir(result.tool_calls);
+        console.dir(LogGuard.redactToolCalls(result.tool_calls));
       }
       console.log('%cFull assembled response:', 'color:#888;');
-      console.dir(result);
+      console.dir({ ...result, tool_calls: result.tool_calls ? LogGuard.redactToolCalls(result.tool_calls) : null });
       console.groupEnd();
       }
 
@@ -269,14 +272,14 @@ class LLMGateway {
     resp.headers.forEach(function(v, k) { console.log('  ' + k + ': ' + v); });
     console.log('%cElapsed:', 'color:#888;', elapsed2 + 'ms');
     console.log('%cFull API Response:', 'color:#888;');
-    console.dir(data);
+    console.dir(LogGuard.redactApiResponse(data));
     console.log('%cUsage:', 'color:#888;', data.usage || 'N/A');
     console.log('%cFinish reason:', 'color:#888;', choice.finish_reason);
     console.log('%cContent length:', 'color:#888;', result2.content.length + ' chars');
     console.log('%cContent:', 'color:#888;', result2.content.substring(0, 500) + (result2.content.length > 500 ? '...' : ''));
     if (result2.tool_calls) {
       console.log('%cTool Calls:', 'color:#f39c12;font-weight:bold;');
-      console.dir(result2.tool_calls);
+      console.dir(LogGuard.redactToolCalls(result2.tool_calls));
     }
     console.groupEnd();
     }
