@@ -108,6 +108,9 @@ class SecurityEngine {
   static SELF_MODIFYING = new Set([
     'create_tool', 'update_tool', 'create_skill', 'update_skill',
     'link_skill_tools', 'import_skill_from_text',
+    // Импорт описания API создаёт сразу набор инструментов и навык —
+    // это самая массовая самомодификация из всех возможных.
+    'api_import',
   ]);
 
   // Отмечается ПОСЛЕ успешного вызова (см. tools-executor.js): важен факт,
@@ -186,6 +189,10 @@ class SecurityEngine {
     // Исполнение / подмена поведения
     create_tool: 'execute', update_tool: 'execute',
     import_skill_from_text: 'execute',
+    // Импорт API создаёт инструменты и навык — та же категория, что и
+    // create_tool, и по той же причине.
+    api_import: 'execute',
+    api_bundle_configure: 'write', api_bundle_list: 'read',
 
     // Управление подключениями к модели. Чтение состояния безобидно;
     // llm_switch меняет, ЧЕМ агент думает дальше, —
@@ -198,6 +205,10 @@ class SecurityEngine {
   categoryOf(toolName, tool) {
     const known = SecurityEngine.CATEGORY[toolName];
     if (known) return known;
+    // Импортированный вызов чужого API — это обращение наружу, и правила
+    // у него сетевые: адрес известен заранее, но данные уходят на чужой
+    // сервер ровно так же, как у http_fetch.
+    if (tool && tool.apiCall) return 'network';
     // Незнакомый инструмент с собственным кодом — потенциально что угодно.
     if (tool && tool.mcpServer) return 'mcp';
     if (tool && tool.handlerCode) return 'execute';

@@ -2,7 +2,7 @@
 //  DATABASE LAYER — IndexedDB wrapper
 // ============================================================
 class AgentDB {
-  constructor(name = 'ai_agent_db', version = 13) {
+  constructor(name = 'ai_agent_db', version = 14) {
     this.name = name;
     this.version = version;
     this.db = null;
@@ -89,6 +89,14 @@ class AgentDB {
         if (!db.objectStoreNames.contains('tasks')) {
           const s = db.createObjectStore('tasks', { keyPath: 'id' });
           s.createIndex('chatId', 'chatId');
+        }
+        // Импортированные наборы API (см. engines/api-import-engine.js):
+        // базовый адрес, способ авторизации и сам секрет (зашифрован),
+        // ссылки на папку инструментов и навык набора. Отдельное
+        // хранилище, а не поле в каждом инструменте: адрес и секрет —
+        // общие для всего набора, и меняются они один раз на всех.
+        if (!db.objectStoreNames.contains('api_bundles')) {
+          db.createObjectStore('api_bundles', { keyPath: 'id' });
         }
         // Журнал решений политики безопасности (см. engines/security-engine.js).
         // Отдельное хранилище, а не запись в settings: записей тысячи, они

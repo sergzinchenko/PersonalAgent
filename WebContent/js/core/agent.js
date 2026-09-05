@@ -13,6 +13,7 @@ class AIAgent {
     this.artifacts = null;
     this.tasks = null;
     this.security = null;
+    this.apiImport = null;
     this.about = null;
     this.models = null;
     this.ui = null;
@@ -35,6 +36,10 @@ class AIAgent {
     this.security.db = this.db;
     // Имя агента и история его доработок. Поднимается рано: имя уходит
     // в системный промпт, то есть нужно раньше первого запроса к модели.
+    // Импорт описаний API в комплекты «навык + инструменты».
+    this.apiImport = new ApiImportEngine(this.db);
+    this.tools.apiImport = this.apiImport;
+
     this.about = new AboutEngine(this.db);
     await this.about.load();
     this.skills.about = this.about;   // имя агента в системном промпте

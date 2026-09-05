@@ -275,6 +275,109 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ── Доступ к импортированному API ──
+  // Секрет вводит человек и только здесь: спрошенный у пользователя
+  // текстом, он стал бы частью переписки, а она уезжает в каждый
+  // следующий запрос к модели. Отсюда он уходит прямо в шифрованное
+  // хранилище — тот же путь, что у токенов вики и ключей провайдеров.
+  showApiAuthModal(bundleId) {
+    return new Promise(async (resolve) => {
+      let settled = false;
+      const eng = this.agent.apiImport;
+      const bundle = await eng.get(bundleId);
+      if (!bundle) return resolve({ cancelled: true, reason: 'набор не найден' });
+
+      const auth = bundle.auth || { type: 'none' };
+      const sel = (v) => auth.type === v ? 'selected' : '';
+
+      this._showModal(`🔌 Доступ к «${this._escHtml(bundle.name)}»`, `
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+          Набор из ${bundle.toolCount || 0} операций, импортирован из
+          ${this._escHtml(ApiImportEngine.FORMATS[bundle.format] || bundle.format)}.
+          Секрет сохранится в зашифрованном виде и будет подставляться в запросы приложением:
+          агенту он не передаётся и в переписке не появляется.
+        </div>
+
+        <div class="form-group">
+          <label>Базовый адрес сервиса</label>
+          <input id="api_base" value="${this._escHtml(bundle.baseUrl || '')}" placeholder="https://api.example.com/v1">
+        </div>
+
+        <div class="form-group">
+          <label>Как отправлять запросы</label>
+          <select id="api_transport">
+            <option value="direct" ${bundle.transport !== 'proxy' ? 'selected' : ''}>Напрямую из браузера</option>
+            <option value="proxy" ${bundle.transport === 'proxy' ? 'selected' : ''}>Через локальный прокси (внутренние адреса, CORS)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Способ авторизации</label>
+          <select id="api_auth_type">
+            <option value="none" ${sel('none')}>Без авторизации</option>
+            <option value="bearer" ${sel('bearer')}>Bearer-токен (Authorization: Bearer …)</option>
+            <option value="header" ${sel('header')}>Ключ в заголовке</option>
+            <option value="query" ${sel('query')}>Ключ в параметре запроса</option>
+            <option value="basic" ${sel('basic')}>Логин и пароль (Basic)</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="api_name_row" ${['header', 'query'].includes(auth.type) ? '' : 'hidden'}>
+          <label>Имя заголовка или параметра</label>
+          <input id="api_auth_name" value="${this._escHtml(auth.name || '')}" placeholder="X-API-Key">
+        </div>
+
+        <div class="form-group" id="api_user_row" ${auth.type === 'basic' ? '' : 'hidden'}>
+          <label>Логин</label>
+          <input id="api_user" value="${this._escHtml(auth.user || '')}">
+        </div>
+
+        <div class="form-group" id="api_secret_row" ${auth.type === 'none' ? 'hidden' : ''}>
+          <label>Секрет (токен, ключ или пароль)</label>
+          <input id="api_secret" type="password"
+                 placeholder="${auth.secret ? 'Сохранён — оставьте пустым, чтобы не менять' : ''}">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            Шифруется тем же механизмом, что и ключи провайдеров (AES-GCM).
+          </div>
+        </div>
+      `, async () => {
+        settled = true;
+        const type = document.getElementById('api_auth_type').value;
+        const res = await eng.saveAuth(bundle.id, {
+          type,
+          name: document.getElementById('api_auth_name')?.value || '',
+          user: document.getElementById('api_user')?.value || '',
+          secret: document.getElementById('api_secret')?.value || '',
+          baseUrl: (document.getElementById('api_base')?.value || '').trim(),
+          transport: document.getElementById('api_transport')?.value || 'direct',
+        });
+        if (res && res.error) {
+          // Окно уже закрывается — говорим об отказе заметно и отдельно,
+          // иначе «сохранил» останется единственным, что видел человек.
+          this._toast(res.error);
+          return resolve({ error: res.error, hint: res.hint });
+        }
+        this.renderTools?.();
+        resolve({ authType: type, hasSecret: !!res.hasSecret, baseUrl: res.baseUrl });
+      }, () => { if (!settled) resolve({ cancelled: true }); });
+
+      // Показываем только те поля, которые нужны выбранному способу:
+      // «имя заголовка» при Bearer — лишний вопрос без ответа.
+      setTimeout(() => {
+        const type = document.getElementById('api_auth_type');
+        const sync = () => {
+          const v = type.value;
+          document.getElementById('api_name_row').hidden = !['header', 'query'].includes(v);
+          document.getElementById('api_user_row').hidden = v !== 'basic';
+          document.getElementById('api_secret_row').hidden = v === 'none';
+        };
+        type?.addEventListener('change', sync);
+        sync();
+      }, 50);
+    });
+  },
+
+
   // ── Генератор файлов локального прокси ──
   // Прокси — отдельный Node-процесс, и до сих пор его нужно было добыть
   // самому. Здесь его комплект собирается по заполненной форме: config.js
