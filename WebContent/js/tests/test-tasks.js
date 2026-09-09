@@ -138,14 +138,33 @@ const { TasksEngine, ToolsEngine, SecurityEngine } = sandbox;
   ok('описание объясняет, зачем план нужен', /переж/.test(def.description));
 
   await engine.loadTools();
+  // ── Что инструмент возвращает модели ──
+  // Актуальный план и так подставляется в каждый запрос (digest), поэтому
+  // отметки о шагах возвращают подтверждение, а не снимок плана целиком:
+  // такие снимки оставались в переписке и на длинной задаче занимали
+  // контекст десятком устаревших копий одного и того же.
   const created = await engine.executeTool('task_plan', { action: 'create', goal: 'Цель', steps: ['раз', 'два'] });
-  ok('план создаётся через инструмент', created.ok === true && created.plan.total === 2);
+  ok('план создаётся через инструмент', created.ok === true && created.steps === 2, JSON.stringify(created));
+  ok('и сказано, что пересказывать план не нужно', /не пересказывай/.test(created.note || ''));
+
   const shown = await engine.executeTool('task_plan', { action: 'show' });
   ok('план читается через инструмент', shown.plan.goal === 'Цель');
+  ok('show — единственное действие, отдающее план целиком', Array.isArray(shown.steps));
+
   const started = await engine.executeTool('task_plan', { action: 'start', step: 1 });
-  ok('шаг начат через инструмент', started.plan.currentN === 1);
+  ok('шаг начат через инструмент', started.ok === true && started.started === 1);
+  ok('и это подтверждение, а не копия плана', started.plan === undefined && started.steps === undefined,
+     JSON.stringify(started));
+
   const finished = await engine.executeTool('task_plan', { action: 'done', step: 1, result: 'сделано' });
-  ok('шаг закрыт через инструмент', finished.ok === true);
+  ok('шаг закрыт через инструмент', finished.ok === true && finished.closed === 1);
+  ok('видно, сколько шагов осталось', finished.left === 1, JSON.stringify(finished));
+  ok('и снимка плана снова нет', finished.plan === undefined, JSON.stringify(finished));
+
+  const factAdded = await engine.executeTool('task_plan', { action: 'fact', result: 'ключ в vault-42' });
+  ok('факт записан, а в ответ — только счётчик', factAdded.ok === true && factAdded.facts === 1,
+     JSON.stringify(factAdded));
+
   const bad = await engine.executeTool('task_plan', { action: 'нет-такого' });
   ok('неизвестное действие объяснено и перечислены доступные',
      /Неизвестное действие/.test(bad.error) && /create/.test(bad.error));

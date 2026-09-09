@@ -524,14 +524,55 @@ class UI {
   }
 
 
-  // Единая точка переключения "агент занят / свободен":
-  // раньше disabled у send-btn выставлялся в семи местах вразнобой.
+  // ── Единая точка «агент занят / свободен» ──
+  // Раньше disabled у send-btn выставлялся в семи местах вразнобой.
+  //
+  // ЗАНЯТОСТЬ ГЛОБАЛЬНА, ХОТЯ ХОД ПРИНАДЛЕЖИТ ЧАТУ. Шлюз LLM в
+  // приложении один и обслуживает один ход за раз (см. _chatRuns), но
+  // кнопка отправки отражала только просматриваемый чат: стоило уйти в
+  // соседний, и она снова выглядела рабочей. Человек писал сообщение,
+  // жал «отправить» — и получал отказ, уже потратив время на текст.
+  // Теперь пока где-то идёт ход, отправка недоступна ВЕЗДЕ, и кнопка
+  // подсказывает, чего ждать. Кнопка останова — по-прежнему только у
+  // своего чата: чужой ход останавливать не отсюда.
   _setBusy(busy) {
     this.isStreaming = busy;
     const send = document.getElementById('send-btn');
     const stop = document.getElementById('stop-btn');
-    if (send) send.disabled = busy;
+    const elsewhere = !busy && this._chatRuns.size > 0;
+    if (send) {
+      send.disabled = busy || elsewhere;
+      send.title = busy ? 'Агент отвечает в этом чате'
+        : (elsewhere ? 'Агент занят в другом чате — одновременно выполняется один ход' : 'Отправить');
+    }
     if (stop) stop.hidden = !busy;
+    this._renderBusyElsewhereNote(elsewhere);
+  }
+
+  // Полоска над полем ввода: какой чат занят и как туда перейти.
+  // Без неё заблокированная кнопка выглядит поломкой интерфейса —
+  // причина видна только во всплывающей подсказке, до которой ещё надо
+  // догадаться навести курсор.
+  async _renderBusyElsewhereNote(show) {
+    const host = document.getElementById('agent-status-host');
+    let note = document.getElementById('busy-elsewhere');
+    if (!show) { note?.remove(); return; }
+    if (!host || note) return;
+
+    const busyId = this._chatRuns.keys().next().value;
+    if (!busyId) return;
+    let title = '';
+    try { title = (await this.agent.db.get('chats', busyId))?.title || ''; } catch (_) {}
+    // Пока ходили в базу, ход мог закончиться или пользователь — уйти
+    // в занятый чат: тогда полоска уже не нужна.
+    if (!this._chatRuns.has(busyId) || busyId === this.currentChatId) return;
+    if (document.getElementById('busy-elsewhere')) return;
+
+    host.insertAdjacentHTML('afterend',
+      `<div class="busy-elsewhere" id="busy-elsewhere">⏳ Агент занят в чате
+        «<button type="button" class="link-btn" id="busy-goto">${this._escHtml(title || 'без названия')}</button>».
+        Одновременно выполняется один ход — отправка станет доступна, когда он закончится.</div>`);
+    document.getElementById('busy-goto')?.addEventListener('click', () => this.loadChat(busyId));
   }
 
 

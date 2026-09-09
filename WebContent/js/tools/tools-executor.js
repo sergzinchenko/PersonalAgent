@@ -7,6 +7,12 @@
 // инструмента. Поэтому проверки безопасности стоят здесь, а не в
 // обработчиках — иначе новый инструмент легко забыть закрыть.
 
+// Сколько байт разрешено отдать одним файлом из песочницы. Ограничение
+// не про безопасность, а про исправность: строка в несколько сотен
+// мегабайт не переживёт границу сообщений и уронит вкладку, а понятный
+// отказ подскажет разбить выгрузку на части.
+ToolsEngine.MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
+
 Object.assign(ToolsEngine.prototype, {
 
   // timeoutMs — ограничение на выполнение ОДНОГО вызова инструмента.
@@ -203,7 +209,95 @@ Object.assign(ToolsEngine.prototype, {
 	  },
 
 
-	  // ── Мост сети для песочницы ──
+	  // ── Мост к приложению для песочницы ──
+  // Кадр инструмента изолирован намеренно и полностью: у него нет ни
+  // страницы, ни диска, ни права начать скачивание (браузер запрещает
+  // его в <iframe sandbox> без allow-downloads, а выдать это разрешение
+  // значило бы позволить чужому коду ронять файлы на диск молча).
+  // Из-за этого инструмент, который ДОЛЖЕН отдать результат файлом —
+  // отчёт, выгрузка, картинка, — упирался в стену: File System Access в
+  // кадре обезврежен, a.click() ничего не делает. Теперь кадр просит, а
+  // файл отдаёт приложение — оно же и записывает это в журнал.
+  async _sandboxHost({ kind, payload }) {
+    if (kind === 'download') return this._sandboxDownload(payload || {});
+    return { error: 'Песочница попросила о неизвестном действии: ' + kind };
+  },
+
+  async _sandboxDownload({ name, content, mime, base64 }) {
+    const sec = this.security;
+    // Имя приходит от кода, написанного моделью. Каталоги из него
+    // вырезаем: «../../важное.txt» браузер бы и так не принял, но
+    // молчаливое переименование хуже понятного правила.
+    let filename = String(name || '')
+      .replace(/[/\\]/g, '_')
+      .replace(/[\u0000-\u001f<>:"|?*]/g, '')
+      .trim().slice(0, 120);
+    if (!filename || /^\.+$/.test(filename)) filename = 'file-' + Date.now() + '.txt';
+
+    const text = typeof content === 'string' ? content : String(content ?? '');
+    const limit = ToolsEngine.MAX_DOWNLOAD_BYTES;
+    const mb = Math.round(limit / 1048576);
+
+    let blob;
+    try {
+      if (base64) {
+        const clean = text.replace(/^data:[^,]*,/, '').replace(/\s+/g, '');
+        const bin = atob(clean);
+        if (bin.length > limit) {
+          return { error: `Файл больше допустимых ${mb} МБ (${bin.length} байт). Отдай его частями.` };
+        }
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
+      } else {
+        if (text.length > limit) {
+          return { error: `Файл больше допустимых ${mb} МБ (${text.length} символов). Отдай его частями.` };
+        }
+        // BOM — по той же причине, что и в _downloadFile: без него Excel
+        // открывает кириллицу в CSV нечитаемой.
+        const type = mime || this._guessDownloadMime(filename);
+        const needsBom = /csv|excel|html/.test(type);
+        blob = new Blob([needsBom ? '\uFEFF' + text : text], { type });
+      }
+    } catch (e) {
+      return { error: base64
+        ? 'Содержимое не является корректным base64: ' + ((e && e.message) || 'ошибка декодирования')
+        : 'Не удалось собрать файл: ' + ((e && e.message) || 'ошибка') };
+    }
+
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      // Отзываем не сразу: часть браузеров начинает читать blob уже
+      // после возврата из click(), и мгновенный revoke обрывал бы
+      // скачивание на нуле байт.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e) {
+      return { error: 'Браузер не начал скачивание: ' + ((e && e.message) || 'неизвестная причина') };
+    }
+
+    sec && sec.audit({ tool: 'sandbox_download', decision: 'executed',
+      detail: filename + ' · ' + blob.size + ' байт' });
+
+    return { value: { ok: true, filename, bytes: blob.size,
+      note: 'Файл отдан браузеру. Куда он лёг, решает сам браузер — обычно это папка загрузок.' } };
+  },
+
+  // Тип по расширению: браузер по нему выбирает, чем открывать файл, а
+  // модель про mime вспоминает не всегда.
+  _guessDownloadMime(filename) {
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    return {
+      txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
+      xml: 'application/xml', html: 'text/html', htm: 'text/html', js: 'text/javascript',
+      css: 'text/css', yml: 'text/yaml', yaml: 'text/yaml', svg: 'image/svg+xml',
+    }[ext] || 'text/plain';
+  },
+
+  // ── Мост сети для песочницы ──
 	  // Код инструмента не ходит в сеть сам: его fetch подменён и уходит
 	  // сюда сообщением (см. core/tool-sandbox.js). Здесь — единственное
 	  // место, где решается, выпускать ли запрос. Проверки те же, что у

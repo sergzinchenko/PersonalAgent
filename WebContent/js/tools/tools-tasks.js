@@ -28,13 +28,23 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerTaskHandlers() {
     const action = String(p.action || 'show').toLowerCase();
     const refresh = () => { try { ui?.updateChatToolbar?.(); } catch (_) {} };
 
+    // ── Что возвращается модели ──
+    // Ровно столько, чтобы понять, что действие принято. Раньше почти
+    // каждое действие возвращало план ЦЕЛИКОМ (plan + steps + facts), и
+    // эти снимки оставались в переписке навсегда: на длинной задаче с
+    // двумя десятками отметок в контекст ехало два десятка устаревших
+    // копий одного и того же плана. Причём бесполезных: актуальный план
+    // подставляется в системный промпт при КАЖДОМ запросе (см.
+    // tasks-engine.digest) — то есть модель и так видит его свежим.
+    // Исключение — show: показать план и есть его единственная работа.
     const result = async () => {
       switch (action) {
         case 'create': {
           const plan = await eng.create(chatId, p.goal, p.steps);
           if (plan.error) return plan;
-          return { ok: true, plan: eng.summary(plan), steps: plan.steps,
-            note: 'План создан. Отмечай шаги по мере работы — он переживёт подрезку контекста и перезагрузку.' };
+          return { ok: true, steps: plan.steps.length,
+            note: 'План создан и с этого момента виден тебе в каждом запросе — не пересказывай его. ' +
+              'Отмечай шаги по мере работы: он переживёт подрезку контекста и перезагрузку.' };
         }
         case 'show': {
           const plan = await eng.active(chatId);
@@ -44,23 +54,27 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerTaskHandlers() {
         }
         case 'start': {
           const plan = await eng.start(chatId, p.step);
-          return plan.error ? plan : { ok: true, plan: eng.summary(plan) };
+          return plan.error ? plan : { ok: true, started: Number(p.step) };
         }
         case 'done': {
           const plan = await eng.done(chatId, p.step, p.result, false);
-          return plan.error ? plan : { ok: true, plan: eng.summary(plan), status: plan.status };
+          if (plan.error) return plan;
+          return { ok: true, closed: Number(p.step), status: plan.status,
+            left: plan.steps.filter(s => s.status === 'todo' || s.status === 'doing').length };
         }
         case 'fail': {
           const plan = await eng.done(chatId, p.step, p.result, true);
-          return plan.error ? plan : { ok: true, plan: eng.summary(plan), status: plan.status };
+          if (plan.error) return plan;
+          return { ok: true, failed: Number(p.step), status: plan.status,
+            left: plan.steps.filter(s => s.status === 'todo' || s.status === 'doing').length };
         }
         case 'fact': {
           const plan = await eng.addFact(chatId, p.result || p.fact || '');
-          return plan.error ? plan : { ok: true, facts: plan.facts };
+          return plan.error ? plan : { ok: true, facts: plan.facts.length };
         }
         case 'add_steps': {
           const plan = await eng.addSteps(chatId, p.steps);
-          return plan.error ? plan : { ok: true, plan: eng.summary(plan), steps: plan.steps };
+          return plan.error ? plan : { ok: true, total: plan.steps.length };
         }
         case 'finish': {
           const plan = await eng.finish(chatId, 'done');

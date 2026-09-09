@@ -22,6 +22,87 @@
 // прежнее поведение (заглушка) — потерять контекст неприятно, но это
 // лучше, чем не ответить вовсе.
 
+// ── ПОЧЕМУ У СВЁРТКИ ЕСТЬ ТОРМОЗА ──
+// Свёртка вызывалась всякий раз, когда история не помещалась в окно, —
+// то есть на КАЖДОМ шаге цепочки вызовов инструментов и на каждой
+// попытке продолжить прерванный ход. А шаг цепочки добавляет в историю
+// новый результат инструмента, снова выталкивая часть переписки за
+// границу бюджета. Получался самоподдерживающийся цикл: агент сворачивал
+// переписку, делал шаг, снова сворачивал — резюме поверх резюме, лишний
+// запрос к модели на каждом шаге, и со стороны это выглядело как
+// зависание, которым невозможно управлять. Особенно наглядно при
+// возобновлении многоэтапной задачи, где история и так уже на пределе.
+//
+// Ограничения ниже отвечают на вопрос «сворачивать ли ЕЩЁ РАЗ»:
+//   • не чаще одного раза за ход — свёртка делается ради этого хода, и
+//     второй такой же в нём ничего не добавит;
+//   • не ради мелочи — за пару вытесненных реплик платить запросом глупо;
+//   • не бесконечно на чат — если свёртка перестала помогать, проблема
+//     не в истории, а в том, что разговор перерос окно модели; об этом
+//     надо сказать человеку, а не молча жечь запросы;
+//   • не после повторных сбоев — если модель не отвечает, следующие
+//     попытки тоже не ответят.
+UI.COMPACTION_MAX_PER_TURN = 1;
+UI.COMPACTION_MAX_PER_CHAT = 5;
+UI.COMPACTION_MIN_MESSAGES = 4;
+UI.COMPACTION_MAX_FAILURES = 2;
+
+Object.assign(UI.prototype, {
+
+  // Состояние свёртки по чатам за сессию. В базе ему делать нечего:
+  // это счётчики попыток, а не данные пользователя.
+  _compactionState(chatId) {
+    this._compactions = this._compactions || new Map();
+    if (!this._compactions.has(chatId)) {
+      this._compactions.set(chatId, { total: 0, failures: 0, useless: 0, exhausted: false });
+    }
+    return this._compactions.get(chatId);
+  },
+
+  // Решение «сворачивать ли сейчас». Возвращает { ok } либо
+  // { ok:false, reason } — причина уходит в объяснение пользователю.
+  _compactionAllowed(chatId, run, trim) {
+    if (this.limits.contextCompaction === false) return { ok: false, reason: 'off' };
+    if (trim.droppedCount < UI.COMPACTION_MIN_MESSAGES) return { ok: false, reason: 'tiny' };
+
+    const st = this._compactionState(chatId);
+    if (st.exhausted) return { ok: false, reason: 'exhausted' };
+    if (st.failures >= UI.COMPACTION_MAX_FAILURES) return { ok: false, reason: 'failing' };
+    if (st.total >= UI.COMPACTION_MAX_PER_CHAT) {
+      st.exhausted = true;
+      return { ok: false, reason: 'exhausted' };
+    }
+    if (run && (run.compactions || 0) >= UI.COMPACTION_MAX_PER_TURN) {
+      return { ok: false, reason: 'turn' };
+    }
+    return { ok: true };
+  },
+
+  // Свёртка прошла — считаем и проверяем, дала ли она результат.
+  // «Не помогло» — это когда после резюме за границу бюджета всё равно
+  // вытесняется почти столько же: значит, не помещается уже не начало
+  // разговора, а его рабочая часть, и следующая свёртка ничего не
+  // изменит. Два таких раза подряд — повод остановиться и сказать.
+  _noteCompaction(chatId, run, before, after) {
+    const st = this._compactionState(chatId);
+    st.total++;
+    if (run) run.compactions = (run.compactions || 0) + 1;
+
+    const gained = (before?.droppedCount || 0) - (after?.droppedCount || 0);
+    if (gained <= 0) st.useless++;
+    else st.useless = 0;
+    if (st.useless >= 2) st.exhausted = true;
+    return st;
+  },
+
+  _noteCompactionFailure(chatId) {
+    const st = this._compactionState(chatId);
+    st.failures++;
+    return st;
+  },
+
+});
+
 Object.assign(UI.prototype, {
 
   _compactionPrompt() {

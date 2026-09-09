@@ -243,6 +243,79 @@ class FakeDB {
   await ui.loadChat('c2');
   ok('в чате без обрывов ничего не предлагается', !document.getElementById('resume-offer'));
 
+  console.log('\n── Остановка по ограничению обратима ──');
+  // Раньше упёршийся в лимит ход обрывался насовсем: журнал стирался
+  // вместе с остановкой, и продолжить многоэтапную работу было нечем.
+  {
+    await db.put('chats', { id: 'c5', title: 'Долгая задача', modelRef: 'conn::a', modelRefs: ['conn::a'], createdAt: 5, updatedAt: 5 });
+    await ui.loadChat('c5');
+    ui.limits.maxToolSteps = 1;
+
+    document.getElementById('chat-input').value = 'Сделай в несколько шагов';
+    const run5 = ui.sendMessage();
+    await tick();
+    // Первый ответ — с вызовом инструмента: следующий шаг упрётся в предел.
+    pending.resolve({
+      content: '', tool_calls: [{ id: 'tc1', function: { name: 'read_file', arguments: '{}' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    await run5;
+    await tick(10);
+
+    const j5 = await db.get('runs', 'c5');
+    ok('журнал хода сохранён — работу есть чем продолжить', !!j5, JSON.stringify(j5));
+    ok('и помечен как остановленный ограничением',
+       j5 && j5.status === 'interrupted' && j5.stoppedBy === 'limit', JSON.stringify(j5));
+    ok('с указанием, каким именно', j5 && j5.stopReason === 'steps', j5 && j5.stopReason);
+
+    const текст = document.getElementById('chat-messages').textContent;
+    ok('пользователю объяснено, что это ограничение, а не отказ модели', /ограничение из настроек/.test(текст));
+    ok('и предложено продолжить', !!document.querySelector('[data-limit-continue]'));
+    ok('и поднять предел', !!document.querySelector('[data-limit-settings]'));
+
+    // После перезагрузки страницы то же самое приходит из журнала.
+    await ui.loadChat('c1');
+    await ui.loadChat('c5');
+    ok('после возврата в чат предложение продолжить на месте', !!document.getElementById('resume-offer'));
+    ok('в нём названа причина остановки',
+       /пределе итераций/.test(document.getElementById('resume-offer').textContent),
+       document.getElementById('resume-offer').textContent.slice(0, 120));
+    ok('и рядом кнопка изменения ограничений', !!document.getElementById('resume-limits'));
+
+    // Продолжение работает: предел поднят — ход идёт дальше.
+    ui.limits.maxToolSteps = 25;
+    const resumed = ui.resumeRun('c5');
+    await tick();
+    ok('продолжение началось, а не отклонено', ui._chatRuns.has('c5'));
+    ok('и журнал снова помечен рабочим',
+       (await db.get('runs', 'c5'))?.status === 'running');
+    pending.resolve({ content: 'Доделал', usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    await resumed;
+    await tick(5);
+    ok('после успешного завершения журнал очищен', !(await db.get('runs', 'c5')));
+  }
+
+  console.log('\n── Предупреждение накануне предела ──');
+  {
+    await db.put('chats', { id: 'c6', title: 'Близко к пределу', modelRef: 'conn::a', modelRefs: ['conn::a'], createdAt: 6, updatedAt: 6 });
+    await ui.loadChat('c6');
+    ui._chatRuns.set('c6', { startedAt: Date.now(), turnToolCalls: 0 });
+    ui.limits.maxToolSteps = 10;
+
+    ui._checkLimitApproach('c6', 5, ui._chatRuns.get('c6'));
+    ok('на половине пути молчим', !document.querySelector('.limit-warn'));
+
+    ui._checkLimitApproach('c6', 8, ui._chatRuns.get('c6'));
+    ok('на подходе к пределу предупреждаем', !!document.querySelector('.limit-warn'));
+    ok('и сразу даём открыть ограничения', !!document.querySelector('.limit-warn [data-limit-settings]'));
+
+    ui._checkLimitApproach('c6', 9, ui._chatRuns.get('c6'));
+    ok('но не повторяем это на каждом шаге',
+       document.querySelectorAll('.limit-warn').length === 1,
+       String(document.querySelectorAll('.limit-warn').length));
+    ui._chatRuns.delete('c6');
+  }
+
   console.log('\n==============================================');
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('==============================================');

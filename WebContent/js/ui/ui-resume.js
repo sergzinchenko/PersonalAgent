@@ -183,6 +183,14 @@ Object.assign(UI.prototype, {
   // Показывается в чате, где ход оборвался. Текст объясняет, что именно
   // произошло и что уже сохранено: обрыв не должен выглядеть как
   // необъяснимая пропажа ответа.
+  //
+  // Причин обрыва теперь три, и они требуют разного разговора:
+  //   • вкладку закрыли / сбой — работа не потеряна, можно продолжить;
+  //   • ход упёрся в ограничение — то же самое, но рядом нужна дверь
+  //     в настройки: продолжать с тем же пределом часто бессмысленно;
+  //   • ошибка сети или отказ провайдера — повторять с места обрыва.
+  // Раньше остановка по ограничению вообще не оставляла следа: журнал
+  // стирался, и многоэтапная задача обрывалась насовсем.
   async renderResumeOffer(chatId) {
     if (!chatId || chatId !== this.currentChatId) return;
     if (this._chatRuns.has(chatId)) return;   // ход идёт прямо сейчас
@@ -195,6 +203,19 @@ Object.assign(UI.prototype, {
     if (!container || document.getElementById('resume-offer')) return;
 
     const when = rec.updatedAt ? new Date(rec.updatedAt).toLocaleString('ru-RU') : '';
+    const byLimit = rec.stoppedBy === 'limit' && rec.stopReason && rec.stopReason !== 'error';
+    const byError = rec.stoppedBy === 'limit' && rec.stopReason === 'error';
+
+    const cause = byLimit
+      ? {
+          steps: 'ход остановился на пределе итераций с вызовом инструментов',
+          calls: 'ход остановился на пределе вызовов инструментов за ответ',
+          time: 'ход остановился по бюджету времени на ответ',
+        }[rec.stopReason] || 'ход остановлен ограничением'
+      : (byError
+        ? 'ход прервался ошибкой — сетью или отказом провайдера'
+        : 'вкладка была закрыта, страница обновлена или произошёл сбой');
+
     const details = [];
     if (rec.stage) details.push('остановился на стадии: ' + rec.stage);
     if (rec.toolCalls) details.push(`выполнено вызовов инструментов: ${rec.toolCalls}`);
@@ -202,17 +223,19 @@ Object.assign(UI.prototype, {
 
     container.insertAdjacentHTML('beforeend', `
       <div class="message system resume-offer" id="resume-offer">
-        ⚠️ Работа агента прервалась ${when ? '(' + this._escHtml(when) + ')' : ''} — вкладка была закрыта,
-        страница обновлена или произошёл сбой. Всё, что агент успел сделать, сохранено выше.
+        ${byLimit ? '⏸' : '⚠️'} Работа агента прервалась ${when ? '(' + this._escHtml(when) + ')' : ''} —
+        ${this._escHtml(cause)}. Всё, что агент успел сделать, сохранено выше.
         ${details.length ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">${this._escHtml(details.join(' · '))}</div>` : ''}
-        <div style="margin-top:8px;display:flex;gap:8px;">
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-primary btn-sm" id="resume-continue">▶ Продолжить с этого места</button>
+          ${byLimit ? '<button class="btn btn-secondary btn-sm" id="resume-limits">⚙ Изменить ограничения</button>' : ''}
           <button class="btn btn-secondary btn-sm" id="resume-dismiss">Не продолжать</button>
         </div>
       </div>`);
     container.scrollTop = container.scrollHeight;
 
     document.getElementById('resume-continue')?.addEventListener('click', () => this.resumeRun(chatId));
+    document.getElementById('resume-limits')?.addEventListener('click', () => this.showSettingsModal('limits'));
     document.getElementById('resume-dismiss')?.addEventListener('click', async () => {
       document.getElementById('resume-offer')?.remove();
       await this._runJournalClear(chatId);
@@ -228,12 +251,7 @@ Object.assign(UI.prototype, {
     document.getElementById('resume-offer')?.remove();
     if (this._chatRuns.has(chatId)) return;
 
-    if (this._chatRuns.size > 0) {
-      const c = document.getElementById('chat-messages');
-      c?.insertAdjacentHTML('beforeend',
-        '<div class="message system">⏳ Сейчас отвечает другой чат — одновременно обрабатывается только один запрос. Попробуйте, когда он закончит.</div>');
-      return;
-    }
+    if (await this._blockedByOtherChat(chatId)) return;
 
     if (!this.agent.llm.isConfigured()) return this.showSettingsModal();
 
@@ -257,11 +275,16 @@ Object.assign(UI.prototype, {
       resumed: true,
     };
     this._chatRuns.set(chatId, run);
-    await this._runJournalPut(chatId, { status: 'running', resumed: true, stage: 'возобновление' });
+    // Причину прошлой остановки снимаем: иначе следующий обрыв — уже
+    // по другому поводу — объяснялся бы старой записью.
+    await this._runJournalPut(chatId, {
+      status: 'running', resumed: true, stage: 'возобновление',
+      stoppedBy: null, stopReason: null,
+    });
     this._startHeartbeat(chatId);
 
+    this._setBusy(this._chatRuns.has(this.currentChatId));
     if (chatId === this.currentChatId) {
-      this._setBusy(true);
       const c = document.getElementById('chat-messages');
       c?.insertAdjacentHTML('beforeend',
         '<div class="message system">▶ Работа продолжена с места обрыва.</div>');

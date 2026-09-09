@@ -89,6 +89,91 @@ function assertParses(code, what) {
   }
 }
 
+// ── Проверка песочницы инструментов на выходе сборки ──
+//
+// ЗАЧЕМ ОНА ЕСТЬ. Код кадра песочницы (ToolSandbox._runtime) попадает в
+// браузер не как часть бандла, а строкой: он сериализуется через
+// toString() и подставляется в srcdoc отдельного документа, где НЕТ
+// ничего из окружения бандла. Обфускатор же выносит строки в общий
+// массив и обращается к нему через функцию-расшифровщик, объявленную
+// снаружи. Обфусцированный рантайм такую функцию не находит и падает с
+// ReferenceError на первой строке — кадр молчит, ход упирается в
+// таймаут, а пользователь видит «Не удалось запустить песочницу
+// инструментов». В исходниках при этом всё работает, тесты зелёные:
+// поломка существует ТОЛЬКО в собранной версии.
+//
+// Поэтому в tool-sandbox.js стоит ограда javascript-obfuscator:disable,
+// а здесь — доказательство, что ограда на месте: класс достаётся из
+// готового бандла, его frameSource() исполняется в пустом контексте (ни
+// расшифровщика строк, ни чего-либо ещё из бандла там нет), и кадр
+// обязан сообщить о готовности. Проверяется именно артефакт сборки,
+// а не исходник, — ломается всегда он.
+const SANDBOX_CLASS_ANCHOR = /class\s+ToolSandbox\s*\{/;
+
+// Вырезает объявление класса от «class ToolSandbox {» до парной скобки.
+// Простой счётчик скобок здесь достаточен и надёжен: строковые литералы
+// он пропускает, а шаблонных строк, регулярных выражений и комментариев
+// в этом классе нет (комментарии обфускатор в любом случае удаляет).
+function extractSandboxClass(code) {
+  const m = SANDBOX_CLASS_ANCHOR.exec(code);
+  if (!m) return null;
+  const start = m.index;
+  let i = code.indexOf('{', start);
+  let depth = 0, quote = 0;
+  const BACKSLASH = 92;
+  for (; i < code.length; i++) {
+    const c = code.charCodeAt(i);
+    if (quote) {
+      if (c === BACKSLASH) { i++; continue; }
+      if (c === quote) quote = 0;
+      continue;
+    }
+    if (c === 34 || c === 39 || c === 96) { quote = c; continue; }
+    if (c === 123) depth++;
+    else if (c === 125 && --depth === 0) return code.slice(start, i + 1);
+  }
+  return null;
+}
+
+function assertSandboxRuntimeRuns(code, what) {
+  const classCode = extractSandboxClass(code);
+  if (!classCode) {
+    throw new Error(`В ${what} не найден класс ToolSandbox — проверить песочницу нечем`);
+  }
+
+  // Класс достаём в пустой контекст: если обфускатор всё же добрался до
+  // рантайма, здесь не окажется ни расшифровщика строк, ни любого
+  // другого его помощника — ровно как в кадре.
+  const holder = vm.createContext({});
+  vm.runInContext(classCode + '\n;this.__ToolSandbox = ToolSandbox;', holder);
+  const html = holder.__ToolSandbox.frameSource();
+
+  const open = html.indexOf('<script>');
+  const close = html.lastIndexOf('</' + 'script>');
+  if (open < 0 || close < 0) throw new Error(`В ${what} документ кадра песочницы собран неузнаваемо`);
+  const frameCode = html.slice(open + '<script>'.length, close);
+
+  // Кадр объявляет о готовности сообщением родителю — по нему и судим.
+  const posted = [];
+  const self = {
+    parent: { postMessage: (msg) => posted.push(msg) },
+    addEventListener: () => {},
+    navigator: {},
+  };
+  try {
+    vm.runInNewContext(frameCode, { self });
+  } catch (e) {
+    throw new Error(
+      `Песочница инструментов в ${what} не запускается: ${e.message}. ` +
+      'Скорее всего, из tool-sandbox.js пропала ограда javascript-obfuscator:disable — ' +
+      'без неё код кадра ссылается на окружение бандла, которого в кадре нет.');
+  }
+  if (!posted.some((m) => m && m.type === 'ready')) {
+    throw new Error(`Песочница инструментов в ${what} не сообщила о готовности`);
+  }
+  console.log('✓ песочница инструментов в бандле запускается сама по себе');
+}
+
 function build() {
   const html = fs.readFileSync(INDEX_HTML_PATH, 'utf8');
   const files = extractScriptOrder(html);
@@ -119,6 +204,7 @@ function build() {
   }).getObfuscatedCode();
 
   assertParses(obfuscated, `dist/${BUNDLE_NAME}`);
+  assertSandboxRuntimeRuns(obfuscated, `dist/${BUNDLE_NAME}`);
 
   fs.mkdirSync(DIST_DIR, { recursive: true });
   fs.writeFileSync(path.join(DIST_DIR, BUNDLE_NAME), obfuscated, 'utf8');

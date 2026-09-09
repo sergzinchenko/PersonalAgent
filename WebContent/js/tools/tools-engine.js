@@ -63,7 +63,12 @@ class ToolsEngine {
     // лениво, при первом вызове такого инструмента: в тестах и на
     // страницах, где своих инструментов нет, он не нужен вовсе.
     // Сеть песочнице выдаётся мостом — через проверку адреса здесь.
-    this.sandbox = new ToolSandbox({ fetchBridge: (req) => this._sandboxFetch(req) });
+    // Мост hostBridge даёт песочнице то, чего в изолированном кадре нет
+    // физически: отдать пользователю файл. Всё остальное кадр делает сам.
+    this.sandbox = new ToolSandbox({
+      fetchBridge: (req) => this._sandboxFetch(req),
+      hostBridge: (req) => this._sandboxHost(req),
+    });
 
     this._initBuiltinTools();
     // Модули, подключённые после ядра, добавляют свои обработчики здесь.

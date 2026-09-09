@@ -1804,3 +1804,46 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ── Занятость соседнего чата ──
+   Полоска над полем ввода, когда ход идёт в другом чате: без неё
+   заблокированная кнопка отправки выглядит поломкой. Живёт рядом со
+   строкой состояния и по тем же причинам — прибита к полю ввода,
+   а не уезжает вверх вместе с лентой. */
+.busy-elsewhere {
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--warning);
+  border-radius: 4px;
+  background: rgba(253,203,110,0.10);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent-light);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* Остановка по ограничению — не ошибка, а решение, которое можно
+   пересмотреть: рядом с объяснением стоят обе кнопки (продолжить и
+   изменить ограничения), поэтому блок оформлен как предложение, а не
+   как сообщение об аварии. */
+.message.system.limit-stop {
+  max-width: 90%;
+  font-size: 13px;
+  border: 1px solid var(--warning);
+  border-left-width: 2px;
+  background: rgba(253,203,110,0.10);
+}
+.message.system.limit-warn {
+  max-width: 90%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-left: 2px solid var(--warning);
+}

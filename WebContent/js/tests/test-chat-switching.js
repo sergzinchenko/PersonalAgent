@@ -171,7 +171,14 @@ class FakeDB {
   // ── Переключаемся на чат B ПОСРЕДИ стриминга чата A ──
   await ui.loadChat('chatB');
   ok('после переключения показан чат B (пуст)', document.getElementById('chat-messages').textContent.includes('Начните диалог'));
-  ok('кнопка отправки в чате B разблокирована — B ничего не генерирует', !document.getElementById('send-btn').disabled);
+  // Ход занимает ПРИЛОЖЕНИЕ, а не только свой чат: шлюз LLM один. Пока
+  // раньше кнопка в соседнем чате выглядела рабочей, человек успевал
+  // написать сообщение и лишь потом узнавал, что отправить его нельзя.
+  ok('кнопка отправки в чате B заблокирована — приложение занято ходом чата A',
+     document.getElementById('send-btn').disabled);
+  ok('и подсказка кнопки называет причину',
+     /занят в другом чате/.test(document.getElementById('send-btn').title || ''),
+     document.getElementById('send-btn').title);
   ok('кнопка остановки в чате B скрыта', document.getElementById('stop-btn').hidden);
 
   // Ещё один чанк чата A прилетает, пока на экране чат B.
@@ -188,8 +195,15 @@ class FakeDB {
   const bMsgsAfterAttempt = await db.getAllByIndex('messages', 'chatId', 'chatB');
   ok('сообщение в чат B не отправлено, пока общий шлюз занят чатом A', bMsgsAfterAttempt.length === 0,
      JSON.stringify(bMsgsAfterAttempt));
-  ok('в чате B показано понятное объяснение, а не тишина',
-     document.getElementById('chat-messages').textContent.includes('Дождитесь ответа'));
+  // Объяснение — рядом с полем ввода и во всплывающей подсказке, а НЕ
+  // записью в переписке: такие записи оставались в чате навсегда и
+  // ехали потом в контекст модели.
+  ok('переписка чата B не засорена служебным отказом',
+     !document.getElementById('chat-messages').textContent.includes('одновременно'));
+  ok('но причина занятости показана над полем ввода',
+     !!document.getElementById('busy-elsewhere') &&
+     /Чат A/.test(document.getElementById('busy-elsewhere').textContent),
+     document.getElementById('busy-elsewhere')?.textContent);
 
   // ── Возвращаемся в чат A — визуализация должна восстановиться ──
   await ui.loadChat('chatA');

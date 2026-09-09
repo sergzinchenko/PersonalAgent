@@ -40,11 +40,29 @@
 // сериализуется в srcdoc через toString(). Так её можно выполнить в
 // тесте с поддельным каналом сообщений и проверить не «строку с кодом»,
 // а фактическое поведение: что вернётся, что упадёт, что обезврежено.
+// ── ОГРАДА ОТ ОБФУСКАТОРА ──
+// Продакшен-сборка (scripts/build-prod.js) прогоняет весь бандл через
+// javascript-obfuscator. Для любого другого класса это безобидно, а
+// здесь ломало песочницу насмерть, и только в собранной версии: тело
+// _runtime после обфускации ссылается на расшифровщик строк, который
+// живёт в бандле СНАРУЖИ функции. Сериализованная через toString() и
+// подставленная в srcdoc, она теряла это окружение и падала с
+// ReferenceError на первой же строке — кадр не отвечал «готов», ход
+// упирался в таймаут, а пользователь видел «Не удалось запустить
+// песочницу инструментов» и не мог пользоваться своими инструментами.
+// Прятать этот класс всё равно бессмысленно: его код виден в кадре
+// через DevTools. Сборка дополнительно проверяет, что рантайм остался
+// самодостаточным, — см. assertSandboxRuntimeRuns в build-prod.js.
+// javascript-obfuscator:disable
 class ToolSandbox {
-  constructor({ fetchBridge = null, doc = null } = {}) {
+  constructor({ fetchBridge = null, hostBridge = null, doc = null } = {}) {
     // Выполняет сетевой запрос за песочницу — после проверки адреса.
     // Ставится снаружи (ToolsEngine): здесь не место политике доступа.
     this.fetchBridge = fetchBridge;
+    // Выполняет за песочницу то, чего в изолированном кадре нет в
+    // принципе: сохранение файла на диск пользователя. Ставится снаружи
+    // (ToolsEngine) — здесь не место ни политике, ни работе с DOM.
+    this.hostBridge = hostBridge;
     this.doc = doc || (typeof document !== 'undefined' ? document : null);
     this.frame = null;
     this.frameReady = null;      // промис готовности кадра
@@ -121,7 +139,8 @@ class ToolSandbox {
     // not a function» — и выглядело бы это как поломка, а не как граница.
     // Работа с файлами у агента и так своя: вкладка «Файлы» и инструменты
     // list_files / read_file, которым песочница не нужна.
-    const filesHint = 'Файлы у агента берутся со вкладки «Файлы»: перечень — list_files, чтение — read_file.';
+    const filesHint = 'Файлы у агента берутся со вкладки «Файлы»: перечень — list_files, ' +
+      'чтение — read_file. Чтобы ОТДАТЬ файл пользователю, вызови await agent_download(...).';
     kill('showOpenFilePicker', filesHint);
     kill('showSaveFilePicker', filesHint);
     kill('showDirectoryPicker', filesHint);
@@ -170,8 +189,55 @@ class ToolSandbox {
       };
     };
 
+    // ── Мост к приложению ──
+    // Всё, чего в изолированном кадре нет и быть не может, но что
+    // инструменту нужно по делу. Пока такое одно: отдать пользователю
+    // файл. Сам кадр этого не умеет — у него нет доступа к странице, а
+    // браузер запрещает скачивание из <iframe sandbox> без
+    // allow-downloads (выдавать который значило бы разрешить кадру
+    // ронять файлы на диск без ведома приложения). Поэтому кадр только
+    // ПРОСИТ, а решает и выполняет родитель.
+    const hostWaiters = new Map();
+    let hostSeq = 0;
+    const hostCall = (kind, payload) => new Promise((resolve, reject) => {
+      const id = 'h' + (++hostSeq);
+      hostWaiters.set(id, { resolve, reject });
+      post({ __ts: 1, type: 'host', kind, id, payload });
+    });
+
+    // Принимает и agent_download({ name, content }), и
+    // agent_download(name, content, mime): модель пишет и так, и так, а
+    // разница между «не сработало» и «вызвал не той формой» из кадра не
+    // видна — там просто не появился файл.
+    g.agent_download = function (a, b, c) {
+      const o = (a && typeof a === 'object' && !Array.isArray(a)) ? a : { name: a, content: b, mime: c };
+      let content = o.content;
+      // Объект и массив сериализуем сами: иначе в файл уходит
+      // «[object Object]», и обнаруживается это уже после скачивания.
+      if (content !== null && typeof content === 'object' && !o.base64) {
+        try { content = JSON.stringify(content, null, 2); } catch (_) { content = String(content); }
+      }
+      return hostCall('download', {
+        name: String(o.name || o.filename || ''),
+        content: content === undefined || content === null ? '' : String(content),
+        mime: o.mime ? String(o.mime) : '',
+        // Двоичный файл (картинка, архив, xlsx) кодируется в base64 —
+        // через границу сообщений байты иначе не проходят.
+        base64: !!o.base64,
+      });
+    };
+
     const handle = async (msg) => {
       if (!msg || msg.__ts !== 1) return;
+
+      if (msg.type === 'host-result') {
+        const waiter = hostWaiters.get(msg.id);
+        if (!waiter) return;
+        hostWaiters.delete(msg.id);
+        if (msg.error) waiter.reject(new Error(msg.error));
+        else waiter.resolve(msg.value);
+        return;
+      }
 
       if (msg.type === 'fetch-result') {
         const waiter = fetchWaiters.get(msg.id);
@@ -229,6 +295,10 @@ class ToolSandbox {
     if (!this.doc || !this.doc.createElement) {
       return Promise.reject(new Error('Песочница недоступна: нет DOM для создания кадра'));
     }
+    // Кадр этой попытки виден и таймауту, и обработчику load. Замыкание,
+    // а не this.frame: пока идёт ожидание, кадр могли снести, и тогда
+    // this.frame — уже чужой.
+    let loaded = false;
 
     const frame = this.doc.createElement('iframe');
     // Ровно одно разрешение: исполнять скрипты. allow-same-origin здесь
@@ -239,6 +309,14 @@ class ToolSandbox {
     frame.setAttribute('tabindex', '-1');
     frame.style.cssText = 'position:absolute;width:0;height:0;border:0;left:-9999px;';
     frame.srcdoc = ToolSandbox.frameSource();
+    // Различаем два разных отказа. Кадр не загрузился вовсе — это одно
+    // (браузер не дал создать документ). Кадр загрузился, но не ответил
+    // «готов» — совсем другое: его скрипт не выполнился или упал, и
+    // причина почти всегда снаружи (политика CSP страницы, расширение
+    // браузера, испорченный сборкой код рантайма). Без этого различия
+    // наружу уходило одно и то же «песочница не запустилась», по
+    // которому починить было нечего.
+    frame.addEventListener('load', () => { loaded = true; });
 
     if (!this._listening) {
       (this.doc.defaultView || window).addEventListener('message', this._onMessageBound);
@@ -249,8 +327,19 @@ class ToolSandbox {
 
     this.frameReady = new Promise((resolve, reject) => {
       this._resolveReady = resolve;
-      this._readyTimer = setTimeout(
-        () => reject(new Error('Песочница инструментов не запустилась')), ToolSandbox.READY_TIMEOUT_MS);
+      this._readyTimer = setTimeout(() => {
+        // ВАЖНО: состояние сбрасываем. Раньше неудачный запуск оставлял
+        // в this.frameReady навсегда отклонённый промис, и первая же
+        // осечка выключала свои инструменты до перезагрузки страницы —
+        // каждый следующий вызов получал ту же ошибку, даже когда
+        // причина давно исчезла. Теперь следующий вызов начинает заново.
+        this._teardownFrame();
+        reject(new Error(loaded
+          ? 'кадр загрузился, но его код не выполнился. Обычно это политика ' +
+            'безопасности страницы (CSP) или расширение браузера, блокирующее ' +
+            'скрипты во встроенных кадрах'
+          : 'кадр не загрузился за ' + ToolSandbox.READY_TIMEOUT_MS + ' мс'));
+      }, ToolSandbox.READY_TIMEOUT_MS);
     });
     // Пустой обработчик на КОПИИ промиса: если кадр снесли раньше, чем он
     // успел ответить, отказ никто не ждёт — и среда сообщила бы о
@@ -263,11 +352,22 @@ class ToolSandbox {
 
   // Единственный вход. Возвращает результат инструмента либо { error }.
   async run(code, params, { timeoutMs = 0 } = {}) {
-    const generation = this._generation;
+    let generation = this._generation;
     try {
       await this._ensureFrame();
     } catch (e) {
-      return { error: 'Не удалось запустить песочницу инструментов: ' + e.message };
+      // Одна повторная попытка. Самая частая причина осечки —
+      // случайность: кадр снесли по таймауту соседнего вызова, вкладка
+      // подтормозила на загрузке страницы, система ушла в своп. Сдаваться
+      // после первой такой — значит терять работающий инструмент на
+      // ровном месте; вторая попытка стоит доли секунды.
+      try {
+        generation = this._generation;
+        await this._ensureFrame();
+      } catch (e2) {
+        return { error: 'Не удалось запустить песочницу инструментов: ' + e2.message +
+          '. Инструменты с собственным кодом сейчас не работают; встроенные — работают.' };
+      }
     }
     // Пока ждали готовности, кадр могли снести — например, по таймауту
     // соседнего вызова. Отвечаем отказом, а не ждём ответа от несуществующего.
@@ -329,6 +429,11 @@ class ToolSandbox {
       return;
     }
 
+    if (msg.type === 'host') {
+      this._bridgeHost(msg);
+      return;
+    }
+
     const entry = this.pending.get(msg.id);
     if (!entry) return;
     if (msg.type === 'result') entry.done(msg.value);
@@ -349,18 +454,48 @@ class ToolSandbox {
     this._send({ __ts: 1, type: 'fetch-result', id: msg.id, ...out });
   }
 
-  destroy(reason = 'остановлена') {
+  // Просьба кадра к приложению (пока это только «отдай файл
+  // пользователю»). Решение принимает не песочница: она лишь переносит
+  // вопрос наружу — туда, где есть и политика, и доступ к странице.
+  async _bridgeHost(msg) {
+    let out;
+    if (typeof this.hostBridge !== 'function') {
+      out = { error: 'Приложение не предоставило песочнице этой возможности' };
+    } else {
+      try {
+        out = await this.hostBridge({ kind: msg.kind, payload: msg.payload || {} });
+      } catch (e) {
+        out = { error: (e && e.message) || String(e) };
+      }
+    }
+    out = out || {};
+    this._send({ __ts: 1, type: 'host-result', id: msg.id, error: out.error || null, value: out.value });
+  }
+
+  // Снос кадра БЕЗ отмены ожиданий: нужен там, где кадр оказался
+  // негодным, но отвечать вызывающей стороне будет кто-то другой (см.
+  // таймаут готовности). destroy() ниже делает то же самое и вдобавок
+  // закрывает все ожидания.
+  _teardownFrame() {
     this._generation++;
     clearTimeout(this._readyTimer);
     this._readyTimer = null;
-    for (const [, entry] of this.pending) {
-      clearTimeout(entry.timer);
-      entry.done({ error: 'Песочница инструментов ' + reason });
-    }
-    this.pending.clear();
     try { this.frame && this.frame.remove(); } catch (_) {}
     this.frame = null;
     this.frameReady = null;
     this._resolveReady = null;
   }
+
+  destroy(reason = 'остановлена') {
+    this._teardownFrame();
+    // Ожидания закрываем ДО очистки набора: done() ищет свою запись
+    // именно в нём и на уже очищенном молча ничего не делает — вызов
+    // повис бы навсегда.
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.done({ error: 'Песочница инструментов ' + reason });
+    }
+    this.pending.clear();
+  }
 }
+// javascript-obfuscator:enable

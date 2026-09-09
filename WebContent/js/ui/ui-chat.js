@@ -291,15 +291,7 @@ Object.assign(UI.prototype, {
     // придётся подождать. Раньше это блокировало отправку молча и во
     // ВСЕХ чатах сразу; теперь ограничение понятно и относится только
     // к попытке начать новый ход, пока другой ещё выполняется.
-    if (this._chatRuns.size > 0) {
-      const busyId = this._chatRuns.keys().next().value;
-      const busyChat = await this.agent.db.get('chats', busyId);
-      const c = document.getElementById('chat-messages');
-      c.insertAdjacentHTML('beforeend',
-        `<div class="message system">⏳ Дождитесь ответа в чате «${this._escHtml(busyChat?.title || 'без названия')}» — одновременно обрабатывается только один запрос.</div>`);
-      c.scrollTop = c.scrollHeight;
-      return;
-    }
+    if (await this._blockedByOtherChat(chatId)) return;
 
     input.value = '';
     input.style.height = 'auto';
@@ -391,7 +383,7 @@ Object.assign(UI.prototype, {
     // Пока ход идёт, запись регулярно обновляется — иначе другая вкладка
     // приняла бы его за оборвавшийся (см. ui-resume.js).
     this._startHeartbeat(chatId);
-    if (chatId === this.currentChatId) this._setBusy(true);
+    this._setBusy(this._chatRuns.has(this.currentChatId));
     this.refreshSidebar(); // сразу показать индикатор у чата в списке
 
     // Счётчики политики безопасности считаются на ход, а не на сессию:
@@ -504,19 +496,54 @@ Object.assign(UI.prototype, {
     host.innerHTML = '';
   },
 
-  _endRun(chatId) {
+  // keepJournal — ход прерван, но продолжить его осмысленно (упёрся в
+  // ограничение). Тогда запись журнала не удаляем, а переводим в
+  // 'interrupted': по ней работает и кнопка «продолжить» здесь же, и
+  // предложение продолжить после перезагрузки страницы (ui-resume.js).
+  // Без этого остановка по лимиту была окончательной: журнал стирался,
+  // и вернуться к прерванной многоэтапной работе было уже нечем.
+  _endRun(chatId, { keepJournal = null } = {}) {
+    // Ход закрывают из двух мест: остановка по ограничению закрывает его
+    // сразу, а finally корневого кадра — ещё раз, на общем пути выхода.
+    // Второй заход не должен переписывать журнал и дёргать интерфейс.
+    if (!this._chatRuns.has(chatId)) return;
     const run = this._chatRuns.get(chatId);
     if (run) clearInterval(run.statusTimer);
     this._chatRuns.delete(chatId);
-    // Ход закончился штатно — журналу больше нечего сторожить. Запись
-    // удаляем именно здесь: она означает «ход идёт», и оставленная
-    // после завершения, предложила бы продолжить уже законченное.
-    this._runJournalClear(chatId);
-    if (chatId === this.currentChatId) {
-      this._setBusy(false);
-      this._hideStatusBar();
+    if (keepJournal) {
+      this._stopHeartbeat(chatId);
+      this._runJournalPut(chatId, {
+        status: 'interrupted', stoppedBy: 'limit', stopReason: keepJournal, partialContent: '',
+      });
+    } else {
+      // Ход закончился штатно — журналу больше нечего сторожить. Запись
+      // удаляем именно здесь: она означает «ход идёт», и оставленная
+      // после завершения, предложила бы продолжить уже законченное.
+      this._runJournalClear(chatId);
     }
+    // Кнопка отправки отражает занятость ПРИЛОЖЕНИЯ, а не только этого
+    // чата (см. _setBusy): ход мог закончиться, пока смотрят на соседний
+    // чат, — и там отправку пора разблокировать.
+    this._setBusy(this._chatRuns.has(this.currentChatId));
+    if (chatId === this.currentChatId) this._hideStatusBar();
     this.refreshSidebar();
+  },
+
+  // ── Один ход на приложение ──
+  // Шлюз LLM общий, поэтому одновременно отвечает ровно один чат.
+  // Проверка нужна и здесь, хотя кнопка отправки уже заблокирована во
+  // всех чатах (см. _setBusy): отправить можно и с клавиатуры, и до
+  // того, как интерфейс успел перерисоваться. Отказ показываем
+  // всплывающей подсказкой, а не записью в переписке: раньше каждая
+  // такая попытка оставляла в чате системное сообщение — мусор,
+  // который потом ехал ещё и в контекст.
+  async _blockedByOtherChat(chatId) {
+    if (!this._chatRuns.size || this._chatRuns.has(chatId)) return false;
+    const busyId = this._chatRuns.keys().next().value;
+    let title = '';
+    try { title = (await this.agent.db.get('chats', busyId))?.title || ''; } catch (_) {}
+    this._toast(`⏳ Агент отвечает в чате «${title || 'без названия'}» — одновременно выполняется один ход.`);
+    return true;
   },
 
   _showTruncationNotice(chatId) {
@@ -584,9 +611,21 @@ Object.assign(UI.prototype, {
       ? toolIdx[toolIdx.length - KEEP_FULL_TOOL_RESULTS]
       : -1;
 
+    // ── Служебная обвязка вызовов не едет в контекст ──
+    // Результат инструмента хранится в переписке ЦЕЛИКОМ: интерфейсу
+    // нужно показать, что именно вернулось. Модели же часть этого не
+    // нужна никогда, а место занимает в каждом следующем запросе до
+    // конца чата — и на сложной задаче (план, подзадачи) именно эта
+    // обвязка вытесняла из окна сам разговор. Отбираем здесь, на
+    // границе с API, а не при сохранении: в базе остаётся правда.
+    const planIdx = [];
+    usable.forEach((m, i) => { if (m.role === 'tool' && PLAN_TOOLS.has(m.name)) planIdx.push(i); });
+    const lastPlanIdx = planIdx.length ? planIdx[planIdx.length - 1] : -1;
+
     const toApi = (m, idx) => {
       if (m.role === 'tool') {
         let content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        content = this._slimToolResult(m, content, idx === lastPlanIdx);
         if (shrinkBefore >= 0 && idx < shrinkBefore && content.length > 400) {
           content = content.slice(0, 400) +
             `… [результат сокращён: было ${content.length} символов. ` +
@@ -668,6 +707,50 @@ Object.assign(UI.prototype, {
     };
   },
 
+  // ── Что из результата инструмента видит модель ──
+  // Вызывается только на границе с API (см. toApi в _trimHistory): в
+  // базе и в интерфейсе результат остаётся полным.
+  //
+  // ВЕДЕНИЕ ПЛАНА. Отметки о шагах возвращают подтверждение, а само
+  // состояние плана модель получает не отсюда, а из системного промпта,
+  // где оно всегда свежее (tasks-engine.digest). Держать в переписке
+  // ещё и снимки плана на каждый его шаг — значит платить контекстом за
+  // устаревшие копии того, что и так перед глазами. Последнюю отметку
+  // оставляем как есть: это ответ на действие, которое модель совершила
+  // прямо сейчас, и подменять его пересказом незачем.
+  //
+  // ПОДЗАДАЧА. Смысл подзадачи в том, что вся её работа остаётся за
+  // границей основного разговора (см. ui-subtask.js), — но вместе с
+  // итогом в контекст ехали ещё и её потроха: id под-чата, число шагов,
+  // вызовов, миллисекунды, потраченные токены. Модели это не нужно ни
+  // для чего: продолжать работу она будет по тексту итога. Интерфейсу —
+  // нужно, поэтому в записи всё сохранено, и кнопка «открыть переписку
+  // подзадачи» продолжает работать.
+  _slimToolResult(msg, content, isLatestPlan) {
+    if (!msg || !msg.name || typeof content !== 'string') return content;
+
+    if (PLAN_TOOLS.has(msg.name)) {
+      if (isLatestPlan || msg.isError) return content;
+      return '{"ok":true,"note":"отметка учтена; актуальный план — в системном промпте"}';
+    }
+
+    if (msg.name === 'run_subtask' && content.length > 200) {
+      let parsed = null;
+      try { parsed = JSON.parse(content); } catch (_) { return content; }
+      if (!parsed || typeof parsed !== 'object') return content;
+      const slim = {};
+      for (const k of ['ok', 'result', 'error', 'hint']) {
+        if (parsed[k] !== undefined && parsed[k] !== null) slim[k] = parsed[k];
+      }
+      // Пустая выжимка означала бы, что формат ответа изменился, —
+      // тогда честнее отдать как есть, чем молча отдать пустоту.
+      return Object.keys(slim).length ? JSON.stringify(slim) : content;
+    }
+
+    return content;
+  },
+
+
   // Уведомление показываем один раз за чат: повтор после каждого
   // запроса засорял бы переписку. Раньше запоминался id только ОДНОГО
   // чата (this._trimNoticeShownFor) — при переключении между двумя
@@ -688,6 +771,39 @@ Object.assign(UI.prototype, {
       </div>`);
     container.scrollTop = container.scrollHeight;
   },
+
+  // ── Свёртка больше не спасает ──
+  // Разговор перерос окно модели: даже сжатое начало не освобождает
+  // места, потому что не помещается уже рабочая часть переписки.
+  // Молчать об этом нельзя — со стороны это выглядит как деградация
+  // агента без причины, — но и продолжать сворачивать бессмысленно:
+  // каждый такой заход стоит запроса и ничего не меняет. Показываем
+  // один раз за чат и предлагаем то, что действительно помогает.
+  _showCompactionExhausted(chatId) {
+    this._compactionNoticeShown = this._compactionNoticeShown || new Set();
+    if (this._compactionNoticeShown.has(chatId)) return;
+    this._compactionNoticeShown.add(chatId);
+
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    if (!container) return;
+    const id = 'ce_' + uid();
+    container.insertAdjacentHTML('beforeend', `
+      <div class="message system context-alert warn" id="${id}">
+        🗜 Сворачивать переписку дальше бесполезно: в окно контекста не помещается уже
+        не начало разговора, а текущая работа. Агент продолжит отвечать, но начало
+        передаваться не будет. Что помогает: продолжить в новом чате (сделанное можно
+        перенести словами) или выбрать модель с большим окном.
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" data-new-chat="1">➕ Новый чат</button>
+          <button class="btn btn-secondary btn-sm" data-open-models="1">🔌 Выбрать модель</button>
+        </div>
+      </div>`);
+    const el = document.getElementById(id);
+    el?.querySelector('[data-new-chat]')?.addEventListener('click', () => this.newChat());
+    el?.querySelector('[data-open-models]')?.addEventListener('click', () => this.showSettingsModal('models'));
+    container.scrollTop = container.scrollHeight;
+  },
+
 
   // ── Подтверждение операции агента ──
   // Диалог должен давать основание для решения, а не просто спрашивать
@@ -757,13 +873,116 @@ Object.assign(UI.prototype, {
     });
   },
 
-  _stopTurn(chatId, reason, depth = 0) {
-    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
-    if (container) {
-      container.insertAdjacentHTML('beforeend', `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
-      container.scrollTop = container.scrollHeight;
+  // ── Остановка хода ──
+  // limit — ход упёрся в ограничение (шаги, время, число вызовов), а не
+  // сломался. Разница принципиальная, и раньше её не было: пользователь
+  // получал строчку «достигнут лимит», работа обрывалась посреди
+  // многоэтапной задачи, а продолжить её было нечем — журнал хода
+  // стирался вместе с остановкой. Теперь такая остановка обратима:
+  // ход можно продолжить с места обрыва, а ограничение — поднять, не
+  // теряя сделанного.
+  _stopTurn(chatId, reason, depth = 0, { limit = null } = {}) {
+    const run = this._chatRuns.get(chatId);
+    if (run && limit) run.stoppedByLimit = limit;
+
+    if (limit) this._renderLimitStop(chatId, reason, limit);
+    else {
+      const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+      if (container) {
+        container.insertAdjacentHTML('beforeend', `<div class="message system">⚠️ ${this._escHtml(reason)}</div>`);
+        container.scrollTop = container.scrollHeight;
+      }
     }
-    if (depth === 0) this._endRun(chatId);
+    // На вложенном шаге ход не завершаем: цепочка раскрутится сама, и
+    // корневой кадр закроет её в своём finally — уже зная из run, что
+    // остановка была по ограничению.
+    if (depth === 0) this._endRun(chatId, { keepJournal: limit });
+  },
+
+  // Блок остановки по ограничению: объяснение и обе двери — продолжить
+  // как есть или сначала поднять предел. Кнопки здесь, а не в настройках,
+  // потому что решение принимается именно сейчас и по конкретному поводу.
+  _renderLimitStop(chatId, reason, limit) {
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    if (!container) return;
+    const id = 'limit_' + uid();
+    const fields = {
+      steps: 'Максимум итераций с вызовом инструментов',
+      calls: 'Максимум вызовов инструментов за ответ',
+      time: 'Бюджет времени на ответ',
+    };
+    container.insertAdjacentHTML('beforeend', `
+      <div class="message system limit-stop" id="${id}">
+        ⏸ ${this._escHtml(reason)}
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+          Это ограничение из настроек, а не отказ модели: всё сделанное сохранено,
+          работу можно продолжить с этого же места. Что менять — «${this._escHtml(fields[limit] || 'Ограничения')}».
+        </div>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-primary btn-sm" data-limit-continue="1">▶ Продолжить с этого места</button>
+          <button class="btn btn-secondary btn-sm" data-limit-settings="1">⚙ Изменить ограничения</button>
+        </div>
+      </div>`);
+    const el = document.getElementById(id);
+    el?.querySelector('[data-limit-continue]')?.addEventListener('click', () => {
+      el.remove();
+      this.resumeRun(chatId);
+    });
+    el?.querySelector('[data-limit-settings]')?.addEventListener('click', () => {
+      this.showSettingsModal('limits');
+    });
+    container.scrollTop = container.scrollHeight;
+  },
+
+  // ── Предупреждение НАКАНУНЕ ограничения ──
+  // Об упёршемся ходе узнавали постфактум, когда работа уже оборвана.
+  // Предупреждение на подходе к пределу даёт сделать выбор заранее:
+  // поднять предел, пока цепочка ещё идёт, или дать ей закончиться и
+  // продолжить отдельным сообщением. Показывается один раз на ход и на
+  // каждый вид ограничения — иначе на длинной задаче оно превратилось
+  // бы в поток одинаковых строк.
+  _limitWarn(chatId, kind, text) {
+    const run = this._chatRuns.get(chatId);
+    if (!run) return;
+    run.limitWarned = run.limitWarned || new Set();
+    if (run.limitWarned.has(kind)) return;
+    run.limitWarned.add(kind);
+
+    const container = (chatId === this.currentChatId) ? document.getElementById('chat-messages') : null;
+    if (!container) return;
+    const id = 'lw_' + uid();
+    container.insertAdjacentHTML('beforeend', `
+      <div class="message system limit-warn" id="${id}">
+        ⚠️ ${this._escHtml(text)}
+        <button class="btn btn-secondary btn-sm" data-limit-settings="1" style="margin-left:6px;">⚙ Ограничения</button>
+      </div>`);
+    document.getElementById(id)?.querySelector('[data-limit-settings]')
+      ?.addEventListener('click', () => this.showSettingsModal('limits'));
+    container.scrollTop = container.scrollHeight;
+  },
+
+  // Пороги предупреждений на подходе к пределам. Проверяются перед
+  // каждым шагом цепочки — там же, где и сами пределы.
+  _checkLimitApproach(chatId, depth, run) {
+    const L = this.limits;
+    const near = (used, max) => max > 0 && max >= 4 && used >= Math.ceil(max * 0.8) && used < max;
+
+    if (near(depth, L.maxToolSteps)) {
+      this._limitWarn(chatId, 'steps',
+        `Использовано ${depth} из ${L.maxToolSteps} итераций с вызовом инструментов. ` +
+        'Когда они закончатся, ход остановится — его можно будет продолжить или поднять предел.');
+    }
+    if (near(run.turnToolCalls, L.maxToolCallsPerTurn)) {
+      this._limitWarn(chatId, 'calls',
+        `Сделано ${run.turnToolCalls} из ${L.maxToolCallsPerTurn} вызовов инструментов за этот ответ.`);
+    }
+    if (L.maxTurnSeconds > 0 && run.startedAt) {
+      const elapsed = (Date.now() - run.startedAt) / 1000;
+      if (elapsed >= L.maxTurnSeconds * 0.8 && elapsed < L.maxTurnSeconds) {
+        this._limitWarn(chatId, 'time',
+          `Прошло ${Math.round(elapsed)} с из отведённых на ответ ${L.maxTurnSeconds} с.`);
+      }
+    }
   },
 
 
@@ -787,7 +1006,7 @@ Object.assign(UI.prototype, {
 
     // ── Лимит 1: количество итераций tool-calling ──
     if (L.maxToolSteps > 0 && depth >= L.maxToolSteps) {
-      this._stopTurn(chatId, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}). Остановлено, чтобы не уйти в бесконечный цикл. Уточните запрос или продолжите вручную.`, depth);
+      this._stopTurn(chatId, `Достигнут лимит итераций с вызовом инструментов (${L.maxToolSteps}) — цепочка остановлена, чтобы не уйти в бесконечный цикл.`, depth, { limit: 'steps' });
       return;
     }
 
@@ -795,12 +1014,18 @@ Object.assign(UI.prototype, {
     if (L.maxTurnSeconds > 0 && run.startedAt) {
       const elapsedSec = (Date.now() - run.startedAt) / 1000;
       if (elapsedSec >= L.maxTurnSeconds) {
-        this._stopTurn(chatId, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с). Цепочка вызовов инструментов остановлена.`, depth);
+        this._stopTurn(chatId, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с) — цепочка вызовов инструментов остановлена.`, depth, { limit: 'time' });
         return;
       }
     }
 
-    if (chatId === this.currentChatId) this._setBusy(true);
+    // Пределы ещё не достигнуты, но уже близко — предупреждаем, пока
+    // цепочка идёт и вмешаться ещё можно (см. _checkLimitApproach).
+    this._checkLimitApproach(chatId, depth, run);
+
+    // Занятость приложения, а не только этого чата: пока ход идёт,
+    // отправка заблокирована во всех чатах (см. _setBusy).
+    this._setBusy(this._chatRuns.has(this.currentChatId));
 
     this._showStatus(chatId,
       depth === 0 ? 'Отправляю запрос модели…' : `Продолжаю работу (шаг ${depth + 1})…`,
@@ -913,21 +1138,33 @@ Object.assign(UI.prototype, {
       // пересобираем контекст уже с ним (см. ui-compaction.js). Так
       // сделанное в начале разговора продолжает работать, занимая
       // десяток строк вместо десятков тысяч токенов.
-      if (trim.droppedCount && this.limits.contextCompaction !== false) {
-        const summary = await this._compactHistory(chatId, trim.dropped, chatRef);
-        if (summary) {
-          const refreshed = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
-          refreshed.sort((a, b) => a.timestamp - b.timestamp);
-          trim = this._trimHistory(refreshed, systemPrompt, chatRef);
-          // Модель этого чата могла смениться внутри свёртки — вернём.
-          await this.applyChatModel(chatId);
+      //
+      // Но не каждый раз: решение о повторной свёртке принимает
+      // _compactionAllowed — иначе на длинной цепочке вызовов агент
+      // сворачивал переписку перед каждым шагом (см. пояснение там же).
+      if (trim.droppedCount) {
+        const verdict = this._compactionAllowed(chatId, run, trim);
+        if (verdict.ok) {
+          const summary = await this._compactHistory(chatId, trim.dropped, chatRef);
+          if (summary) {
+            const refreshed = await this.agent.db.getAllByIndex('messages', 'chatId', chatId);
+            refreshed.sort((a, b) => a.timestamp - b.timestamp);
+            const after = this._trimHistory(refreshed, systemPrompt, chatRef);
+            const st = this._noteCompaction(chatId, run, trim, after);
+            trim = after;
+            // Модель этого чата могла смениться внутри свёртки — вернём.
+            await this.applyChatModel(chatId);
+            if (st.exhausted) this._showCompactionExhausted(chatId);
+          } else {
+            // Свернуть не удалось (сбой сети, отказ провайдера) — работает
+            // прежнее поведение: начало не передаётся, но об этом сказано.
+            this._noteCompactionFailure(chatId);
+            this._showTrimNotice(chatId, trim);
+          }
         } else {
-          // Свернуть не удалось (сбой сети, отказ провайдера) — работает
-          // прежнее поведение: начало не передаётся, но об этом сказано.
-          this._showTrimNotice(chatId, trim);
+          if (verdict.reason === 'exhausted') this._showCompactionExhausted(chatId);
+          else this._showTrimNotice(chatId, trim);
         }
-      } else if (trim.droppedCount) {
-        this._showTrimNotice(chatId, trim);
       }
 
       for (const m of trim.messages) apiMessages.push(m);
@@ -1030,14 +1267,14 @@ Object.assign(UI.prototype, {
           // ── Лимит 3: суммарное число вызовов за ход ──
           if (L.maxToolCallsPerTurn > 0 && run.turnToolCalls >= L.maxToolCallsPerTurn) {
             clearTimeout(turnTimer);
-            this._stopTurn(chatId, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`, depth);
+            this._stopTurn(chatId, `Достигнут лимит вызовов инструментов за один ответ (${L.maxToolCallsPerTurn}).`, depth, { limit: 'calls' });
             return;
           }
           // ── Лимит 2 (повторная проверка между вызовами) ──
           if (L.maxTurnSeconds > 0 && run.startedAt &&
               (Date.now() - run.startedAt) / 1000 >= L.maxTurnSeconds) {
             clearTimeout(turnTimer);
-            this._stopTurn(chatId, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`, depth);
+            this._stopTurn(chatId, `Превышен лимит времени на ответ (${L.maxTurnSeconds} с).`, depth, { limit: 'time' });
             return;
           }
           run.turnToolCalls++;
@@ -1212,17 +1449,25 @@ Object.assign(UI.prototype, {
 
       if (error.name === 'AbortError' && run.stopRequested) {
         // Сообщение об остановке уже показал stopAgent() — не дублируем.
+      } else if (error.name === 'AbortError') {
+        // Обрыв по бюджету времени — то же ограничение, что и проверки
+        // между шагами, только сработавшее посреди запроса к модели.
+        // Значит, и обходиться с ним надо так же: сохранённое остаётся,
+        // ход помечается продолжаемым, рядом — обе кнопки.
+        run.stoppedByLimit = 'time';
+        this._renderLimitStop(chatId,
+          `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с). ` +
+          (run.partialContent.trim() ? 'Полученная часть ответа сохранена.' : ''), 'time');
       } else {
-        const msg = error.name === 'AbortError'
-          ? `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с). ` +
-            (run.partialContent.trim() ? 'Полученная часть ответа сохранена. ' : '') +
-            'Лимит можно изменить в ⚙ Настройки → Ограничения.'
-          : `Ошибка: ${error.message}`;
         const errContainer = dom();
         if (errContainer) {
-          errContainer.insertAdjacentHTML('beforeend', `<div class="message system">❌ ${this._escHtml(msg)}</div>`);
+          errContainer.insertAdjacentHTML('beforeend',
+            `<div class="message system">❌ ${this._escHtml('Ошибка: ' + error.message)}</div>`);
           errContainer.scrollTop = errContainer.scrollHeight;
         }
+        // Сбой сети или отказ провайдера тоже не должен стоить работы:
+        // журнал остаётся, и к ходу можно вернуться, ничего не повторяя.
+        run.stoppedByLimit = run.stoppedByLimit || 'error';
       }
     } finally {
       clearTimeout(turnTimer);
@@ -1232,7 +1477,10 @@ Object.assign(UI.prototype, {
       // цикла вызовов инструментов и любую необработанную ошибку.
       // Панель статуса и запись в this._chatRuns снимаются здесь же —
       // иначе «зависший» индикатор пережил бы ошибку или прерывание.
-      if (depth === 0) this._endRun(chatId);
+      // keepJournal: остановка по ограничению или сбою оставляет запись
+      // журнала — по ней ход можно продолжить, в том числе после
+      // перезагрузки страницы (см. renderResumeOffer).
+      if (depth === 0) this._endRun(chatId, { keepJournal: run.stoppedByLimit || null });
     }
 
     // Ход завершён (цепочка вызовов инструментов раскручена) — записываем
@@ -1340,7 +1588,14 @@ Object.assign(UI.prototype, {
     let r = {};
     try { r = JSON.parse(resultStr) || {}; } catch (_) {}
     if (isError || r.error) return out + ' — ' + (r.error || 'ошибка');
+    // Подпись собирается из того, что действие реально возвращает.
+    // Полный снимок плана оттуда убран (он занимал контекст, см.
+    // tools-tasks.js), поэтому счётчик берём из оставшегося: у show —
+    // сводка, у отметки шага — сколько шагов ещё не закрыто.
     if (r.plan && typeof r.plan.total === 'number') out += ` · ${r.plan.done}/${r.plan.total}`;
+    else if (typeof r.left === 'number') out += r.left ? ` · осталось ${r.left}` : ' · план выполнен';
+    else if (typeof r.steps === 'number') out += ` · ${r.steps} шагов`;
+    else if (typeof r.total === 'number') out += ` · всего ${r.total}`;
     return out;
   },
 

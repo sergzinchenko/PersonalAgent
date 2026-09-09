@@ -402,6 +402,177 @@ class FakeDB {
     ok('встроенные инструменты работают напрямую', t.result === 42 && seen.length === 1);
   }
 
+  console.log('\n── Рантайм: файл пользователю ──');
+  {
+    // Кадру браузер запрещает скачивание (нет allow-downloads), а
+    // File System Access в нём обезврежен. Значит, единственный
+    // работающий путь — попросить приложение. Проверяем, что просьба
+    // уходит наружу и её ответ доходит до кода инструмента.
+    const { posted, api } = makeRuntime();
+    const done = api.handle({
+      __ts: 1, type: 'run', id: 'd1', params: {},
+      code: 'const r = await agent_download({ name: "отчёт.csv", content: "a;b", mime: "text/csv" });' +
+            'return { сохранено: r.filename, байт: r.bytes };',
+    });
+    await tick();
+    const req = posted.find(m => m.type === 'host');
+    ok('просьба о файле ушла приложению, а не в браузер', !!req && req.kind === 'download');
+    ok('имя, содержимое и тип переданы',
+       req.payload.name === 'отчёт.csv' && req.payload.content === 'a;b' && req.payload.mime === 'text/csv');
+
+    await api.handle({ __ts: 1, type: 'host-result', id: req.id, value: { ok: true, filename: 'отчёт.csv', bytes: 3 } });
+    await done;
+    const out = posted.find(m => m.id === 'd1' && m.type === 'result');
+    ok('ответ приложения вернулся в код инструмента',
+       out && out.value.сохранено === 'отчёт.csv' && out.value.байт === 3, JSON.stringify(out));
+
+    // Отказ должен доходить обычной ошибкой, а не молчанием.
+    const done2 = api.handle({
+      __ts: 1, type: 'run', id: 'd2', params: {},
+      code: 'try { await agent_download({ name: "x", content: "y" }); return { leaked: true }; }' +
+            'catch (e) { return { err: e.message }; }',
+    });
+    await tick();
+    const req2 = posted.filter(m => m.type === 'host').pop();
+    await api.handle({ __ts: 1, type: 'host-result', id: req2.id, error: 'файл слишком большой' });
+    await done2;
+    ok('отказ приложения приходит в код ошибкой',
+       posted.find(m => m.id === 'd2' && m.type === 'result').value.err === 'файл слишком большой');
+
+    // Позиционная форма вызова: модель пишет и так, и так.
+    const done3 = api.handle({
+      __ts: 1, type: 'run', id: 'd3', params: {},
+      code: 'agent_download("a.txt", { поле: 1 }); return { ok: 1 };',
+    });
+    await tick();
+    const req3 = posted.filter(m => m.type === 'host').pop();
+    ok('позиционный вызов понимается так же', req3.payload.name === 'a.txt');
+    ok('объект сериализуется сам, а не превращается в [object Object]',
+       /"поле"/.test(req3.payload.content), req3.payload.content);
+    await done3;
+  }
+
+  console.log('\n── Кадр: просьба о файле уходит родителю ──');
+  {
+    const asked = [];
+    const sb = new X.ToolSandbox({
+      doc: document,
+      hostBridge: async (req) => { asked.push(req); return { value: { ok: true, filename: 'f.txt' } }; },
+    });
+    sb._ensureFrame().catch(() => {});
+    sb._resolveReady(true);
+    const sent = [];
+    sb._send = (m) => sent.push(m);
+    await sb._bridgeHost({ id: 'h1', kind: 'download', payload: { name: 'f.txt', content: 'x' } });
+    ok('просьба дошла до приложения', asked.length === 1 && asked[0].kind === 'download');
+    ok('ответ вернулся в кадр', sent.some(m => m.type === 'host-result' && m.value.filename === 'f.txt'));
+
+    const noBridge = new X.ToolSandbox({ doc: document });
+    noBridge._ensureFrame().catch(() => {});
+    const sent2 = [];
+    noBridge._send = (m) => sent2.push(m);
+    await noBridge._bridgeHost({ id: 'h2', kind: 'download', payload: {} });
+    ok('без моста возможности нет — и об этом сказано', !!sent2[0].error);
+    noBridge.destroy();
+    sb.destroy();
+  }
+
+  console.log('\n── Приложение отдаёт файл ──');
+  {
+    const db = new FakeDB();
+    const tools = new X.ToolsEngine(db);
+    tools.security = new X.SecurityEngine();
+    tools.security.db = db;
+
+    // jsdom не умеет отдавать файлы — подменяем ровно то, чем это
+    // делается в браузере, и смотрим, что именно туда попало.
+    const saved = [];
+    window.URL.createObjectURL = (blob) => { saved.push(blob); return 'blob:fake'; };
+    window.URL.revokeObjectURL = () => {};
+    const realCreate = document.createElement.bind(document);
+    document.createElement = (tag) => {
+      const el = realCreate(tag);
+      if (tag === 'a') el.click = () => { el.__clicked = true; saved.clicked = el.download; };
+      return el;
+    };
+
+    const good = await tools._sandboxHost({ kind: 'download', payload: { name: 'отчёт.csv', content: 'a;b', mime: 'text/csv' } });
+    ok('файл отдан браузеру', good.value && good.value.ok === true, JSON.stringify(good));
+    ok('под своим именем', saved.clicked === 'отчёт.csv', saved.clicked);
+    ok('и это записано в журнал безопасности',
+       tools.security.auditLog.some(e => e.tool === 'sandbox_download' && e.decision === 'executed'));
+
+    const nasty = await tools._sandboxHost({ kind: 'download', payload: { name: '../../etc/passwd', content: 'x' } });
+    ok('каталоги из имени вырезаны', !/[/]/.test(nasty.value.filename), nasty.value.filename);
+
+    const noName = await tools._sandboxHost({ kind: 'download', payload: { content: 'x' } });
+    ok('без имени файл всё равно получает имя', /^file-\d+\.txt$/.test(noName.value.filename), noName.value.filename);
+
+    const huge = await tools._sandboxHost({ kind: 'download', payload: { name: 'big.txt', content: 'я'.repeat(X.ToolsEngine.MAX_DOWNLOAD_BYTES + 1) } });
+    ok('слишком большой файл отклонён с понятной причиной',
+       !!huge.error && /частями/.test(huge.error), huge.error);
+
+    const badB64 = await tools._sandboxHost({ kind: 'download', payload: { name: 'a.png', content: '!!!не base64!!!', base64: true } });
+    ok('испорченный base64 объяснён, а не проглочен', !!badB64.error, JSON.stringify(badB64));
+
+    const unknown = await tools._sandboxHost({ kind: 'нечто', payload: {} });
+    ok('неизвестная просьба отклоняется', !!unknown.error);
+
+    document.createElement = realCreate;
+  }
+
+  console.log('\n── Кадр запускается сам по себе ──');
+  {
+    // Код кадра уезжает в ОТДЕЛЬНЫЙ документ строкой и не видит там
+    // ничего из приложения. Проверяем это буквально: исполняем документ
+    // кадра в пустом контексте — ни бандла, ни его помощников. Именно
+    // это ломала обфускация в продакшен-сборке: рантайм ссылался на
+    // расшифровщик строк из бандла и падал ещё до первой строки, а
+    // наружу выходило «не удалось запустить песочницу инструментов».
+    const vm = require('vm');
+    const doc = X.ToolSandbox.frameSource();
+    const code = doc.slice(doc.indexOf('<script>') + 8, doc.lastIndexOf('</' + 'script>'));
+    const posted = [];
+    const fakeSelf = {
+      parent: { postMessage: (m) => posted.push(m) },
+      addEventListener: () => {}, navigator: {},
+    };
+    let boom = null;
+    try { vm.runInNewContext(code, { self: fakeSelf }); } catch (e) { boom = e; }
+    ok('документ кадра исполняется без окружения приложения', !boom, boom && boom.message);
+    ok('и сразу сообщает о готовности', posted.some(m => m && m.type === 'ready'));
+  }
+
+  console.log('\n── Осечка запуска не выключает инструменты навсегда ──');
+  {
+    // Кадр в jsdom не исполняется, поэтому «готов» не придёт никогда —
+    // ровно тот случай, ради которого проверка и написана. Раньше
+    // отклонённый промис оставался в объекте песочницы, и первая же
+    // осечка выключала свои инструменты до перезагрузки страницы.
+    const was = X.ToolSandbox.READY_TIMEOUT_MS;
+    X.ToolSandbox.READY_TIMEOUT_MS = 20;
+    const sb = new X.ToolSandbox({ doc: document });
+    const res = await sb.run('return 1;', {}, { timeoutMs: 0 });
+    ok('вызов вернул объяснимую ошибку', !!res.error && /песочниц/i.test(res.error), JSON.stringify(res));
+    ok('и сказано, что встроенные инструменты работают', /встроенные/.test(res.error));
+    ok('причина названа, а не спрятана', /кадр/.test(res.error), res.error);
+    ok('состояние сброшено — следующий вызов начнёт заново',
+       sb.frame === null && sb.frameReady === null);
+
+    // А после починки среды тот же экземпляр работает: ничего
+    // «залипшего» от прошлой осечки не осталось.
+    sb._send = () => {};
+    const p = sb.run('return 1;', {}, { timeoutMs: 0 });
+    await tick();
+    if (sb._resolveReady) sb._resolveReady(true);
+    await tick();
+    const runMsg = sb.pending.size ? Array.from(sb.pending.keys())[0] : null;
+    ok('после осечки песочница снова принимает задания', !!runMsg);
+    sb.destroy();
+    await p;
+    X.ToolSandbox.READY_TIMEOUT_MS = was;
+  }
+
   console.log('\n==============================================');
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('==============================================');

@@ -12,7 +12,10 @@ Object.assign(UI.prototype, {
   //  Провайдеры и модели / Ограничения / Отображение / Безопасность / Журналирование.
   //  Окно, как и все прочие, строго модально — см. _showModal.
   // ──────────────────────────────────────────────
-  showSettingsModal() {
+  // tab — вкладка, на которой открыть окно. Нужна, когда настройки
+  // открывают по конкретному поводу: ход упёрся в ограничение, и
+  // заставлять человека искать нужную вкладку значит терять повод.
+  showSettingsModal(tab = 'models') {
     const llm = this.agent.llm;
     const isBearerChecked = llm.authType !== 'custom' ? 'checked' : '';
     const isCustomChecked = llm.authType === 'custom' ? 'checked' : '';
@@ -550,6 +553,16 @@ Object.assign(UI.prototype, {
       // Панель провайдеров рисуется отдельно: она перечитывает реестр и
       // перерисовывает только свой контейнер, не трогая остальные вкладки.
       this.renderProvidersPanel();
+
+      // Открытие сразу на нужной вкладке (см. аргумент tab).
+      const wanted = document.querySelector(`.settings-tab-btn[data-settings-tab="${tab}"]`);
+      if (wanted && tab !== 'models') {
+        document.querySelectorAll('.settings-tab-btn').forEach((b) => b.classList.remove('active'));
+        wanted.classList.add('active');
+        document.querySelectorAll('.settings-tab-panel').forEach((p) => {
+          p.hidden = p.dataset.settingsPanel !== tab;
+        });
+      }
 
       // --- Переключение вкладок ---
       document.querySelectorAll('.settings-tab-btn').forEach((btn) => {
