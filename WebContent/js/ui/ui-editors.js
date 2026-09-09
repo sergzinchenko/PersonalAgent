@@ -275,6 +275,123 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ── Схема имён импортируемых функций ──
+  // Имена инструментов — то, чем пользователь и модель пользуются каждый
+  // день, и угадать их за человека нельзя: в одном сервисе operationId
+  // говорящие, в другом — «op_17», в третьем запросы названы по-русски.
+  // Поэтому имена предлагаются, а решает пользователь: схему можно
+  // сменить целиком, а любое имя — поправить руками.
+  //
+  // Форма возвращает { prefix, scheme, names: { ключ операции → имя } }
+  // либо { cancelled: true }.
+  showApiNamingModal({ bundleName, prefix, plan, endpoints, taken = [] }) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const takenSet = new Set(taken);
+
+      const render = (state) => {
+        const rows = state.plan.map((it, i) => `
+          <tr>
+            <td style="white-space:nowrap;color:var(--text-muted);font-size:11px;">
+              ${it.group.length ? '📁 ' + this._escHtml(it.group.join('/')) : '—'}
+            </td>
+            <td style="font-size:11px;">
+              <div><b>${this._escHtml(it.method)}</b> ${this._escHtml(it.path)}</div>
+              ${it.summary ? `<div style="color:var(--text-muted);">${this._escHtml(it.summary)}</div>` : ''}
+            </td>
+            <td><input class="api-name-input" data-name-index="${i}"
+                       value="${this._escHtml(it.name)}" spellcheck="false"></td>
+          </tr>`).join('');
+
+        const schemes = Object.entries(ApiImportEngine.NAME_SCHEMES).map(([k, label]) =>
+          `<option value="${k}" ${state.scheme === k ? 'selected' : ''}>${this._escHtml(label)}</option>`).join('');
+
+        this._showModal(`🔤 Имена функций набора «${this._escHtml(bundleName)}»`, `
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+            Так будут называться инструменты. По этим именам вы будете просить агента,
+            а он — вызывать операции, поэтому имена стоит принять осознанно.
+            Схему можно сменить целиком, любое имя — поправить руками.
+            Допустимы латиница, цифры и «_», до 64 символов.
+          </div>
+
+          <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px;">
+            <div class="form-group" style="flex:1;margin:0;">
+              <label>Схема именования</label>
+              <select id="api_name_scheme">${schemes}</select>
+            </div>
+            <div class="form-group" style="width:150px;margin:0;">
+              <label>Префикс набора</label>
+              <input id="api_name_prefix" value="${this._escHtml(state.prefix)}" spellcheck="false">
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" id="api_name_recalc"
+                    style="margin-bottom:2px;">↻ Пересчитать</button>
+          </div>
+
+          <div style="max-height:46vh;overflow:auto;">
+            <table class="stats-table">
+              <thead><tr><th>Папка</th><th>Операция</th><th>Имя инструмента</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+            Операций: ${state.plan.length}. «Пересчитать» перезапишет все имена по выбранной
+            схеме — правки, сделанные руками, при этом потеряются.
+          </div>
+        `, async () => {
+          settled = true;
+          // Читаем поля до закрытия окна: после onSave разметки уже нет.
+          const edited = [...document.querySelectorAll('[data-name-index]')]
+            .map(inp => ({ index: +inp.dataset.nameIndex, value: inp.value }));
+          const names = {};
+          const problems = [];
+          const used = new Set(takenSet);
+
+          for (const { index, value } of edited) {
+            const item = state.plan[index];
+            const check = ApiImportEngine.validateToolName(value, { taken: used });
+            if (check.error) { problems.push(`${value || '(пусто)'} — ${check.error}`); continue; }
+            used.add(check.name);
+            names[item.key] = check.name;
+            item.name = check.name;
+          }
+
+          if (problems.length) {
+            // Окно уже закрывается — открываем его заново с введёнными
+            // значениями: молча исправить имя за пользователя нельзя,
+            // он именно его и выбирал.
+            this._toast('Имена не приняты: ' + problems.slice(0, 3).join('; '), 5000);
+            for (const { index, value } of edited) state.plan[index].name = value;
+            settled = false;
+            render(state);
+            return;
+          }
+          resolve({ prefix: state.prefix, scheme: state.scheme, names });
+        }, () => { if (!settled) resolve({ cancelled: true }); }, { wide: true });
+
+        // Пересчёт по схеме — на кнопке, а не на каждом изменении поля:
+        // иначе смена схемы молча затирала бы ручные правки.
+        setTimeout(() => {
+          const save = document.querySelector('#modals .btn-primary');
+          if (save) save.textContent = 'Создать инструменты';
+
+          document.getElementById('api_name_recalc')?.addEventListener('click', () => {
+            const scheme = document.getElementById('api_name_scheme').value;
+            const prefixVal = (document.getElementById('api_name_prefix').value || '')
+              .toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 12);
+            settled = false;
+            render({
+              scheme, prefix: prefixVal,
+              plan: ApiImportEngine.planNames(endpoints, { prefix: prefixVal, scheme, taken: takenSet }),
+            });
+          });
+        }, 50);
+      };
+
+      render({ prefix, scheme: 'prefix_operation', plan });
+    });
+  },
+
+
   // ── Доступ к импортированному API ──
   // Секрет вводит человек и только здесь: спрошенный у пользователя
   // текстом, он стал бы частью переписки, а она уезжает в каждый

@@ -84,10 +84,21 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
         (e.name || '').toLowerCase().includes(only) ||
         (e.tags || []).some(t => String(t).toLowerCase().includes(only)));
     }
+    // ── Одна функция — один инструмент ──
+    // Сводим вхождения одной и той же операции: в записи браузера один
+    // вызов встречается десятками, в коллекции — лежит в двух папках.
+    // Инструменты-близнецы модель различить не может, а выбирать ей
+    // придётся (см. dedupe в engines/api-import-engine.js).
+    const beforeDedupe = list.length;
+    const deduped = ApiImportEngine.dedupe(list);
+    list = deduped.endpoints;
+
     const total = list.length;
     const offset = Math.max(0, parseInt(p.offset, 10) || 0);
     const limit = Math.min(ApiImportEngine.MAX_ENDPOINTS, Math.max(1, parseInt(p.limit, 10) || 25));
     const slice = list.slice(offset, offset + limit);
+
+    const groups = [...new Set(list.map(e => ApiImportEngine.groupOf(e).join('/')).filter(Boolean))];
 
     const overview = {
       format: spec.format,
@@ -96,6 +107,11 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
       baseUrl: spec.baseUrl,
       operationsFound: spec.endpoints.length,
       operationsMatchingFilter: total,
+      // Сколько вхождений схлопнулось: пользователь должен видеть, что
+      // «в файле 300 запросов, а функций 42» — это не потеря, а сведение.
+      duplicatesMerged: deduped.duplicates,
+      occurrencesBeforeMerge: beforeDedupe,
+      groups: groups.length > 1 ? groups : undefined,
       authGuess: (spec.authHint && spec.authHint.type) || 'none',
     };
 
@@ -105,12 +121,23 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
       return {
         ok: true, dryRun: true, ...overview,
         operations: list.slice(0, 80).map(e => ({
-          method: e.method, path: e.path || e.url, summary: e.summary || e.name, tags: e.tags,
+          method: e.method, path: e.path || e.url, summary: e.summary || e.name,
+          group: ApiImportEngine.groupOf(e).join('/') || undefined,
         })),
-        note: total > limit
-          ? `Операций больше, чем стоит брать за один раз. Импортируй частями: ` +
-            `only (фильтр по пути, имени или разделу), limit и offset. Заведи план задачи (task_plan).`
-          : 'Можно импортировать одним вызовом: повтори без dryRun.',
+        note:
+          (deduped.duplicates
+            ? `Повторных вхождений одной операции сведено: ${deduped.duplicates} — ` +
+              `в источнике ${beforeDedupe} записей, разных функций ${total}. `
+            : '') +
+          (groups.length > 1
+            ? `Операции сгруппированы в источнике (${groups.length} папок) — ` +
+              'та же раскладка появится внутри папки набора. '
+            : '') +
+          (total > limit
+            ? `Операций больше, чем стоит брать за один раз. Импортируй частями: ` +
+              `only (фильтр по пути, имени или разделу), limit и offset. Заведи план задачи (task_plan).`
+            : 'Можно импортировать одним вызовом: повтори без dryRun. ' +
+              'Имена инструментов пользователь подтвердит в форме — сам их не выдумывай.'),
       };
     }
 
@@ -123,10 +150,39 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
     const wantedName = String(p.name || spec.name || 'API').slice(0, 60);
     const existing = await eng.get(wantedName);
 
+    // ── Имена подтверждает человек ──
+    // Схема имён важнее, чем кажется: по этим именам пользователь будет
+    // просить агента, а агент — вызывать операции. Поэтому имена сначала
+    // ПРЕДЛАГАЮТСЯ формой, и решает пользователь. Модель пропустить этот
+    // шаг не может: confirmNames:false существует для случая, когда
+    // интерфейса нет вовсе (тесты, автоматический прогон).
+    let names = null;
+    const ui = this.ui;
+    const canAsk = p.confirmNames !== false && ui && typeof ui.showApiNamingModal === 'function';
+    if (canAsk) {
+      const prefix = ApiImportEngine.bundlePrefix(
+        wantedName, (existing && existing.baseUrl) || spec.baseUrl);
+      const taken = (await this.db.getAll('tools')).map(t => t.name);
+      const plan = ApiImportEngine.planNames(slice, { prefix, taken: new Set(taken) });
+
+      const decided = await ui.showApiNamingModal({
+        bundleName: wantedName, prefix, plan, endpoints: slice, taken,
+      });
+      if (!decided || decided.cancelled) {
+        return {
+          cancelled: true,
+          ...overview,
+          note: 'Пользователь закрыл форму имён — ничего не создано. ' +
+                'Спроси, что поправить: схему именования, отбор операций или название набора.',
+        };
+      }
+      names = decided.names;
+    }
+
     const res = await eng.createBundle({
       spec, name: wantedName, endpoints: slice,
       folders: this.folders, transport,
-      existingBundle: existing,
+      existingBundle: existing, names,
     });
     if (res.error) return res;
 
@@ -145,14 +201,26 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
       toolsTotalInBundle: res.bundle.toolCount,
       remaining,
       enabled: false,
+      grouped: res.grouped,
       needsAuth: !(res.bundle.auth && res.bundle.auth.secret) && res.bundle.auth.type !== 'none',
+      // ── Отчёт по импортированным функциям ──
+      // Папка, имя, что делает, вызов и параметры — по каждой. Готовая
+      // таблица идёт рядом, чтобы модель показала её как есть, а не
+      // пересобирала из полей, теряя половину строк.
+      report: res.report,
+      reportTable: ApiImportEngine.reportTable(res.report),
       testPlan: ApiImportEngine.testPlan(res.bundle.name, res.tools),
       note:
         'Инструменты и навык созданы ВЫКЛЮЧЕННЫМИ — включает их пользователь. ' +
+        (deduped.duplicates
+          ? `Повторных вхождений сведено: ${deduped.duplicates} (из ${beforeDedupe} записей источника). `
+          : '') +
+        (res.grouped ? 'Инструменты разложены по подпапкам, как в источнике. ' : '') +
         (remaining ? `Осталось операций: ${remaining} — продолжай с offset=${offset + slice.length}. ` : '') +
-        'Дальше: 1) если сервису нужен ключ или логин — вызови api_bundle_configure ' +
-        '(секрет вводит пользователь в форме, тебе он не передаётся); ' +
-        '2) покажи пользователю план тестирования из testPlan и предложи начать с первого шага.',
+        'Дальше по порядку: 1) ПОКАЖИ пользователю отчёт из reportTable как есть — ' +
+        'папка, имя, что делает, параметры; 2) если сервису нужен ключ или логин — вызови ' +
+        'api_bundle_configure (секрет вводит пользователь в форме, тебе он не передаётся); ' +
+        '3) покажи план тестирования из testPlan и предложи начать с первого шага.',
     };
   });
 
@@ -390,6 +458,14 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function apiImportDefs() {
         'СНАЧАЛА вызывай с dryRun: true — узнаешь, сколько операций внутри. Если их много, импортируй ' +
         'частями (only/limit/offset) и веди план задачи (task_plan): описание на сотни операций ' +
         'не нужно ни пользователю, ни контексту целиком.\n' +
+        'Повторные вхождения одной операции (записи HAR, один запрос в двух папках коллекции) ' +
+        'сводятся сами: инструмент создаётся ОДИН, примеры из всех вхождений собираются в него.\n' +
+        'Раскладка по папкам из источника (папки Postman, tags OpenAPI, группы Insomnia) ' +
+        'повторяется внутри папки набора.\n' +
+        'ИМЕНА ИНСТРУМЕНТОВ ПОДТВЕРЖДАЕТ ПОЛЬЗОВАТЕЛЬ: перед созданием открывается форма, где он ' +
+        'принимает схему именования или правит имена. Не придумывай имена сам и не обещай их заранее.\n' +
+        'В ответе есть report и готовая таблица reportTable (папка, имя, что делает, вызов, параметры) — ' +
+        'ПОКАЖИ её пользователю после импорта.\n' +
         'Секрет авторизации здесь НЕ передаётся: для него есть api_bundle_configure с формой для человека.',
       parameters: {
         type: 'object',
@@ -411,6 +487,12 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function apiImportDefs() {
           limit: { type: 'number', description: 'Сколько операций взять за раз. По умолчанию 25, максимум 60' },
           offset: { type: 'number', description: 'С какой операции продолжать — для импорта частями' },
           dryRun: { type: 'boolean', description: 'Только разобрать и показать состав, ничего не создавая' },
+          confirmNames: {
+            type: 'boolean',
+            description: 'По умолчанию true — имена подтверждает пользователь в форме. ' +
+              'false оставлено для случая, когда интерфейса нет (тесты, автоматический прогон); ' +
+              'сам его не выключай',
+          },
         },
         required: [],
       },

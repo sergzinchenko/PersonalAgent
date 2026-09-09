@@ -760,10 +760,236 @@ class ApiImportEngine {
     return { type: 'object', properties, required };
   }
 
+  // ══════════════════════════════════════════════
+  //  ОДНА ФУНКЦИЯ — ОДИН ИНСТРУМЕНТ
+  // ══════════════════════════════════════════════
+  //
+  // Источники описывают одну и ту же операцию по нескольку раз: в записи
+  // браузера (HAR) один вызов встречается десятками — с разными значениями
+  // в пути и с разным набором необязательных параметров; в коллекции
+  // Postman один запрос лежит и в «Клиентах», и в «Примерах». Инструмент на
+  // каждое вхождение превращает набор в свалку близнецов, из которой модель
+  // выбирает наугад.
+  //
+  // Поэтому вхождения СВОДЯТСЯ. Ключ операции — метод, шаблон пути и набор
+  // имён параметров. Значения в пути при этом обобщаются: /users/123 и
+  // /users/456 — это один вызов с параметром, а не два разных. Примеры из
+  // всех вхождений остаются: несколько примеров одной операции полезны,
+  // несколько одинаковых инструментов — нет.
+
+  // Похоже ли значение сегмента на идентификатор, а не на имя ресурса.
+  static _looksLikeId(seg) {
+    if (!seg) return false;
+    if (/^\d+$/.test(seg)) return true;                                   // 123
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return true;
+    if (/^[0-9a-f]{16,}$/i.test(seg)) return true;                        // длинный hex
+    if (seg.length >= 20 && /\d/.test(seg) && /[A-Za-z]/.test(seg)) return true;  // токен
+    return false;
+  }
+
+  // Грубое приведение к единственному числу — только чтобы параметр
+  // назывался userId, а не usersId. Ошибка здесь не страшна: имя параметра
+  // видно и в описании инструмента, и в форме подтверждения имён.
+  static _singular(word) {
+    const w = String(word || '').replace(/[^A-Za-z0-9]/g, '');
+    if (/ies$/i.test(w)) return w.slice(0, -3) + 'y';
+    if (/(ses|xes|zes|ches|shes)$/i.test(w)) return w.slice(0, -2);
+    if (/s$/i.test(w) && !/ss$/i.test(w)) return w.slice(0, -1);
+    return w;
+  }
+
+  // Путь → шаблон с параметрами: { template, params: [имена] }.
+  // Уже размеченные пути ({id}, :id) не трогаем — там разметку сделал автор
+  // описания, и она точнее любой догадки.
+  static normalizePath(pathOrUrl) {
+    const raw = String(pathOrUrl || '');
+    let origin = '', path = raw;
+    const m = /^(https?:\/\/[^/]+)(\/.*)?$/i.exec(raw);
+    if (m) { origin = m[1]; path = m[2] || '/'; }
+
+    const params = [];
+    const used = new Set();
+    const segs = path.split('/');
+    const out = segs.map((seg, i) => {
+      if (!seg) return seg;
+      if (/^[{:]/.test(seg)) return seg;
+      if (!ApiImportEngine._looksLikeId(seg)) return seg;
+
+      const prev = segs.slice(0, i).reverse()
+        .find(x => x && !/^[{:]/.test(x) && !ApiImportEngine._looksLikeId(x));
+      let name = prev ? ApiImportEngine._singular(prev) + 'Id' : 'id';
+      if (!/^[A-Za-z_]/.test(name)) name = 'id';
+      const base = name;
+      let n = 2;
+      while (used.has(name)) name = base + (n++);
+      used.add(name);
+      params.push(name);
+      return '{' + name + '}';
+    });
+    return { template: origin + out.join('/'), params };
+  }
+
+  // Ключ операции: что именно считается «той же самой функцией».
+  static endpointKey(e) {
+    const { template } = ApiImportEngine.normalizePath(e.path || e.url || '');
+    const names = (e.params || [])
+      .filter(p => p.in === 'path' || p.in === 'query')
+      .map(p => p.name).sort().join(',');
+    return [String(e.method || 'GET').toUpperCase(), template, names].join(' ');
+  }
+
+  // Сводит вхождения одной операции в одно. Возвращает
+  // { endpoints, duplicates } — число нужно, чтобы честно сказать
+  // пользователю, сколько вхождений схлопнулось.
+  static dedupe(endpoints) {
+    const byKey = new Map();
+    let duplicates = 0;
+
+    for (const e of endpoints) {
+      // Путь обобщаем ДО ключа: иначе /users/123 и /users/456 разойдутся.
+      const norm = ApiImportEngine.normalizePath(e.path || e.url || '');
+      const item = { ...e, params: (e.params || []).slice(), examples: (e.examples || []).slice() };
+      if (norm.params.length) {
+        if (item.path) item.path = norm.template;
+        else item.url = norm.template;
+        for (const name of norm.params) {
+          if (!item.params.some(p => p.name === name)) {
+            item.params.push({
+              in: 'path', name, required: true, type: 'string',
+              description: 'Значение из пути (распознано по образцу вызова)',
+            });
+          }
+        }
+      }
+      item.__key = ApiImportEngine.endpointKey(item);
+
+      const seen = byKey.get(item.__key);
+      if (!seen) { byKey.set(item.__key, item); continue; }
+
+      duplicates++;
+      // Сливаем то, что различается между вхождениями: описания заполнены
+      // не у всех, примеры — тем более, а необязательный параметр мог
+      // встретиться только в одном вызове.
+      if (!seen.summary && item.summary) seen.summary = item.summary;
+      if (!seen.description && item.description) seen.description = item.description;
+      if (!seen.opId && item.opId) seen.opId = item.opId;
+      if (!seen.body && item.body) seen.body = item.body;
+      for (const p of item.params) {
+        if (!seen.params.some(x => x.name === p.name && x.in === p.in)) {
+          // Параметр, встреченный не во всех вхождениях, обязательным быть
+          // не может: в половине вызовов его не было.
+          seen.params.push({ ...p, required: false });
+        }
+      }
+      for (const ex of item.examples) {
+        if (seen.examples.length >= 3) break;
+        if (!seen.examples.some(x => x.response === ex.response)) seen.examples.push(ex);
+      }
+      // Группа берётся у первого вхождения: инструмент не может лежать в
+      // двух папках сразу, а первое вхождение обычно и есть «родное» место.
+    }
+
+    return { endpoints: [...byKey.values()], duplicates };
+  }
+
+  // ══════════════════════════════════════════════
+  //  ГРУППИРОВКА
+  // ══════════════════════════════════════════════
+  //
+  // Если в источнике операции разложены по папкам (Postman), разделам
+  // (tags в OpenAPI) или группам (Insomnia), раскладка повторяется внутри
+  // папки набора. Её придумал тот, кто писал описание, и она отражает
+  // устройство сервиса лучше, чем плоский список из сорока имён.
+  static groupOf(endpoint) {
+    const tags = (endpoint.tags || []).map(t => String(t || '').trim()).filter(Boolean);
+    // Служебные метки формата — не группы: папка «soap» на весь набор
+    // ничего не разделяет.
+    const skip = new Set(['soap', 'graphql', 'api']);
+    return tags.filter(t => !skip.has(t.toLowerCase())).slice(0, 2);
+  }
+
+  // ══════════════════════════════════════════════
+  //  ПЛАН ИМЁН
+  // ══════════════════════════════════════════════
+  //
+  // Имена инструментов — то, чем пользователь и модель пользуются каждый
+  // день, и угадать их за пользователя нельзя: в одном сервисе
+  // operationId говорящие, в другом — «op_17». Поэтому имена сначала
+  // ПРЕДЛАГАЮТСЯ, а решает человек (см. showApiNamingModal).
+  static NAME_SCHEMES = {
+    prefix_operation: 'Префикс набора + имя операции (pets_listPets)',
+    operation: 'Только имя операции (listPets)',
+    prefix_method_path: 'Префикс + метод и путь (pets_get_pets_petId)',
+  };
+
+  static planNames(endpoints, { prefix = '', scheme = 'prefix_operation', taken = new Set() } = {}) {
+    const busy = new Set(taken);
+    return endpoints.map((e, i) => {
+      const key = e.__key || ApiImportEngine.endpointKey(e);
+      // Схема «метод и путь» — это отказ от собственного имени операции,
+      // поэтому opId прячем: пусть имя соберётся из адреса.
+      const src = scheme === 'prefix_method_path' ? { ...e, opId: '', name: '' } : e;
+      const name = ApiImportEngine.toolName(scheme === 'operation' ? '' : prefix, src, busy);
+      return {
+        key,
+        index: i,
+        name,
+        group: ApiImportEngine.groupOf(e),
+        method: e.method,
+        path: e.path || e.url || '',
+        summary: e.summary || e.name || '',
+        params: (e.params || []).map(p => p.name),
+        hasBody: !!e.body,
+      };
+    });
+  }
+
+  // Проверка имени, введённого человеком: те же правила, что у API
+  // моделей, плюс запрет столкновений. Возвращает { ok, name } либо { error }.
+  static validateToolName(name, { taken = new Set() } = {}) {
+    const n = String(name || '').trim();
+    if (!n) return { error: 'пустое имя' };
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(n)) {
+      return { error: 'допустимы латиница, цифры и _, начало не с цифры, до 64 символов' };
+    }
+    if (taken.has(n)) return { error: 'имя уже занято' };
+    return { ok: true, name: n };
+  }
+
+  // ══════════════════════════════════════════════
+  //  ОТЧЁТ
+  // ══════════════════════════════════════════════
+  //
+  // Чем закончился импорт — по каждой функции: где лежит, как называется,
+  // что делает и что принимает. Без него набор из двадцати инструментов
+  // приходится изучать карточка за карточкой.
+  static importReport(rows) {
+    return rows.map(r => ({
+      folder: r.folder || '—',
+      name: r.name,
+      does: ApiImportEngine._trim(r.summary || (r.method + ' ' + r.path), 120),
+      call: r.method + ' ' + r.path,
+      params: r.params && r.params.length ? r.params.join(', ') : '—',
+    }));
+  }
+
+  // Тот же отчёт таблицей — чтобы модель показала его пользователю как
+  // есть, не пересобирая из полей и не теряя половину строк.
+  static reportTable(report) {
+    if (!report || !report.length) return '';
+    const esc = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|');
+    const head = '| Папка | Инструмент | Что делает | Вызов | Параметры |';
+    const sep = '|---|---|---|---|---|';
+    const rows = report.map(r =>
+      '| ' + [esc(r.folder), esc(r.name), esc(r.does), esc(r.call), esc(r.params)].join(' | ') + ' |');
+    return [head, sep, ...rows].join('\n');
+  }
+
+
   // Создаёт комплект: папку инструментов, сами инструменты и навык,
   // который их описывает. Всё — ВЫКЛЮЧЕННЫМ: включение чужого набора
   // сетевых вызовов остаётся решением пользователя.
-  async createBundle({ spec, name, endpoints, folders, skills, transport = 'direct', existingBundle = null }) {
+  async createBundle({ spec, name, endpoints, folders, skills, transport = 'direct', existingBundle = null, names = null }) {
     const bundleName = String(name || spec.name || 'API').slice(0, 60);
     // Префикс общий для всего набора и берётся один раз: при дозагрузке он
     // обязан совпасть с прежним, иначе половина инструментов набора будет
@@ -786,9 +1012,56 @@ class ApiImportEngine {
     const taken = new Set(allTools.map(t => t.name));
     const bundleId = existingBundle ? existingBundle.id : 'bundle_' + uid();
 
+    // ── Подпапки по группам источника ──
+    // Заводим их лениво и только если групп больше одной: единственная
+    // подпапка на весь набор ничего не разделяет, зато добавляет лишний
+    // уровень, через который придётся кликать каждый раз.
+    const groupPaths = endpoints.map(e => ApiImportEngine.groupOf(e));
+    const distinct = new Set(groupPaths.map(g => g.join('/')).filter(Boolean));
+    const useGroups = distinct.size > 1;
+    const folderCache = new Map();   // «Клиенты/Отчёты» → запись папки
+
+    const folderFor = async (groupPath) => {
+      if (!useGroups || !groupPath.length) return folder;
+      const key = groupPath.join('/');
+      if (folderCache.has(key)) return folderCache.get(key);
+
+      // При дозагрузке набора папки уже существуют — переиспользуем их по
+      // имени, иначе после второго импорта появились бы «Клиенты» и
+      // «Клиенты (2)» с половиной инструментов в каждой.
+      const existingFolders = await this.db.getAll('folders');
+      let parent = folder;
+      for (const nameRaw of groupPath) {
+        const gname = String(nameRaw).slice(0, 60);
+        let node = existingFolders.find(f =>
+          f.type === 'tools' && (f.parentId || null) === parent.id &&
+          String(f.name).toLowerCase() === gname.toLowerCase());
+        if (!node) {
+          node = await folders.create('tools', gname, parent.id);
+          if (node && node.error) return folder;   // отказ движка — кладём в корень набора
+          existingFolders.push(node);
+        }
+        parent = node;
+      }
+      folderCache.set(key, parent);
+      return parent;
+    };
+
     const created = [];
+    const rows = [];
     for (const e of endpoints) {
-      const toolName = ApiImportEngine.toolName(prefix, e, taken);
+      const key = e.__key || ApiImportEngine.endpointKey(e);
+      // Имя, подтверждённое человеком, важнее вычисленного: форма имён —
+      // это и есть решение пользователя (см. showApiNamingModal).
+      let toolName = null;
+      if (names && names[key]) {
+        const check = ApiImportEngine.validateToolName(names[key], { taken });
+        if (check.ok) { toolName = check.name; taken.add(toolName); }
+      }
+      if (!toolName) toolName = ApiImportEngine.toolName(prefix, e, taken);
+
+      const groupPath = ApiImportEngine.groupOf(e);
+      const target = await folderFor(groupPath);
       const def = {
         id: 'api_' + bundleId + '_' + toolName,
         name: toolName,
@@ -809,10 +1082,21 @@ class ApiImportEngine {
         },
         enabled: false,
         builtin: false,
-        parentId: folder.id,
+        parentId: target.id,
       };
       await this.db.put('tools', def);
       created.push(def);
+      // Строка будущего отчёта: собираем здесь, пока под рукой и операция,
+      // и папка, — восстанавливать это потом по записям инструментов
+      // значило бы разбирать description обратно в поля.
+      rows.push({
+        folder: useGroups && groupPath.length ? groupPath.join('/') : folder.name,
+        name: toolName,
+        method: e.method,
+        path: e.path || e.url || '',
+        summary: e.summary || e.name || '',
+        params: (e.params || []).map(p => p.name).concat(e.body ? ['body'] : []),
+      });
     }
 
     // Навык комплекта: он и есть «инструкция по применению» набора.
@@ -849,7 +1133,7 @@ class ApiImportEngine {
     };
     await this.db.put('api_bundles', bundle);
 
-    return { bundle, folder, skill, tools: created };
+    return { bundle, folder, skill, tools: created, report: ApiImportEngine.importReport(rows), grouped: useGroups };
   }
 
   static skillPrompt(bundleName, spec, tools) {

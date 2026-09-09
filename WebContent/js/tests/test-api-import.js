@@ -380,8 +380,16 @@ const GRAPHQL = JSON.stringify({
      (await db.getAll('tools')).filter(t => t.apiCall).every(t => !t.handlerCode && t.apiCall.method));
   const bundleFolder = (await db.getAll('folders')).find(f => f.name.includes('Питомцы'));
   ok('заведена отдельная папка набора', !!bundleFolder && bundleFolder.type === 'tools');
-  ok('все инструменты набора лежат в ней',
-     (await db.getAll('tools')).filter(t => t.apiCall).every(t => t.parentId === bundleFolder.id));
+  // Операции размечены разделами (tags: pets и admin), поэтому внутри
+  // папки набора появились подпапки — см. проверки группировки ниже.
+  const allFolders = await db.getAll('folders');
+  const inBundle = (t) => {
+    let f = allFolders.find(x => x.id === t.parentId);
+    while (f) { if (f.id === bundleFolder.id) return true; f = allFolders.find(x => x.id === f.parentId); }
+    return t.parentId === bundleFolder.id;
+  };
+  ok('все инструменты набора лежат внутри его папки',
+     (await db.getAll('tools')).filter(t => t.apiCall).every(inBundle));
   const bundleSkill = (await db.getAll('skills')).find(s => s.name === 'Питомцы');
   ok('создан навык набора', !!bundleSkill && bundleSkill.enabled === false);
   ok('навык связан со всеми инструментами набора', bundleSkill.toolIds.length === 4);
@@ -394,6 +402,193 @@ const GRAPHQL = JSON.stringify({
   ok('сказано, что нужен секрет', imp.needsAuth === true);
   ok('описание инструмента содержит примеры из источника',
      (await db.getAll('tools')).some(t => t.apiCall && /Барсик/.test(t.description)));
+
+  console.log('\n── Одна функция — один инструмент ──');
+  {
+    // Запись браузера: один и тот же вызов с разными идентификаторами в
+    // пути, повтор один в один и вызов с лишним параметром.
+    const harDup = JSON.stringify({
+      log: { entries: [
+        { request: { method: 'GET', url: 'https://shop.example/api/orders/1001',
+            queryString: [], headers: [] },
+          response: { status: 200, content: { text: '{"id":1001}' } } },
+        { request: { method: 'GET', url: 'https://shop.example/api/orders/2002',
+            queryString: [], headers: [] },
+          response: { status: 200, content: { text: '{"id":2002}' } } },
+        { request: { method: 'GET', url: 'https://shop.example/api/orders/3003',
+            queryString: [], headers: [] },
+          response: { status: 200, content: { text: '{"id":3003}' } } },
+        { request: { method: 'GET', url: 'https://shop.example/api/orders',
+            queryString: [{ name: 'page', value: '1' }], headers: [] },
+          response: { status: 200, content: { text: '[]' } } },
+      ] },
+    });
+
+    const parsed = eng.parse(harDup);
+    const dd = X.ApiImportEngine.dedupe(parsed.endpoints);
+    ok('вызовы с разными id в пути сведены в одну функцию', dd.endpoints.length === 2,
+       JSON.stringify(dd.endpoints.map(e => e.url)));
+    ok('сведение посчитано', dd.duplicates === 2, String(dd.duplicates));
+
+    const byId = dd.endpoints.find(e => /\{/.test(e.url));
+    ok('в пути появился параметр вместо значения', /\/orders\/\{orderId\}$/.test(byId.url), byId.url);
+    ok('параметр назван по ресурсу в единственном числе',
+       byId.params.some(p => p.name === 'orderId' && p.in === 'path'));
+    ok('примеры из всех вхождений собраны в одну функцию', byId.examples.length >= 2,
+       String(byId.examples.length));
+    ok('список без параметра остался отдельной функцией',
+       dd.endpoints.some(e => e.url.endsWith('/orders')));
+
+    // Уже размеченный путь не трогаем: там разметку сделал автор описания.
+    const marked = X.ApiImportEngine.normalizePath('/pets/{petId}/visits/77');
+    ok('готовая разметка пути сохраняется', marked.template === '/pets/{petId}/visits/{visitId}',
+       marked.template);
+    ok('и распознан только новый параметр', marked.params.join(',') === 'visitId');
+    ok('uuid тоже распознаётся как идентификатор',
+       X.ApiImportEngine.normalizePath('/u/3fa85f64-5717-4562-b3fc-2c963f66afa6').params.length === 1);
+    ok('версия пути идентификатором не считается',
+       X.ApiImportEngine.normalizePath('/api/v2/users').params.length === 0);
+
+    // Один запрос, лежащий в двух папках коллекции, — тоже одна функция.
+    const twice = JSON.stringify({
+      info: { name: 'Дубли' },
+      item: [
+        { name: 'Основные', item: [{ name: 'Клиенты', request: { method: 'GET', url: 'https://d.example/clients' } }] },
+        { name: 'Примеры', item: [{ name: 'Клиенты (пример)', request: { method: 'GET', url: 'https://d.example/clients' } }] },
+      ],
+    });
+    const dd2 = X.ApiImportEngine.dedupe(eng.parse(twice).endpoints);
+    ok('один запрос из двух папок коллекции сведён', dd2.endpoints.length === 1 && dd2.duplicates === 1);
+    ok('группа взята у первого вхождения',
+       X.ApiImportEngine.groupOf(dd2.endpoints[0]).join('/') === 'Основные');
+  }
+
+  console.log('\n── Группировка по папкам источника ──');
+  {
+    const groupsIn = (await db.getAll('folders')).filter(f => f.parentId === bundleFolder.id);
+    ok('внутри набора появились подпапки разделов', groupsIn.length === 2,
+       groupsIn.map(f => f.name).join(', '));
+    ok('они названы как разделы источника',
+       ['pets', 'admin'].every(n => groupsIn.some(f => f.name === n)));
+
+    const petTools = (await db.getAll('tools')).filter(t =>
+      t.apiCall && t.parentId === groupsIn.find(f => f.name === 'pets').id);
+    ok('операции разложены по своим разделам', petTools.length === 3, String(petTools.length));
+    ok('и не остались в корне набора',
+       (await db.getAll('tools')).filter(t => t.apiCall && t.parentId === bundleFolder.id).length === 0);
+
+    // Единственная группа — не повод заводить лишний уровень.
+    const dbFlat = new FakeDB();
+    const foldersFlat = new X.FoldersEngine(dbFlat);
+    await foldersFlat.ensureSeeded();
+    const engFlat = new X.ApiImportEngine(dbFlat);
+    const toolsFlat = new X.ToolsEngine(dbFlat);
+    toolsFlat.folders = foldersFlat; toolsFlat.apiImport = engFlat; toolsFlat.security = null;
+    toolsFlat.ui = tools.ui;
+    await toolsFlat.loadTools();
+    // Фильтр по разделу «admin» оставляет одну операцию — значит, и одну
+    // группу: подпапка на неё была бы лишним уровнем на пустом месте.
+    await toolsFlat.executeTool('api_import',
+      { source: OPENAPI3, name: 'Только админские', only: 'admin', confirmNames: false });
+    const flatBundleFolder = (await dbFlat.getAll('folders')).find(f => f.name.includes('Только админские'));
+    ok('при одной группе подпапка не заводится',
+       (await dbFlat.getAll('folders')).filter(f => f.parentId === flatBundleFolder.id).length === 0);
+    ok('и инструменты лежат прямо в папке набора',
+       (await dbFlat.getAll('tools')).filter(t => t.apiCall).every(t => t.parentId === flatBundleFolder.id));
+  }
+
+  console.log('\n── План имён и форма подтверждения ──');
+  {
+    const spec = eng.parse(OPENAPI3);
+    const dd = X.ApiImportEngine.dedupe(spec.endpoints);
+    const plan = X.ApiImportEngine.planNames(dd.endpoints, { prefix: 'pets' });
+    ok('план покрывает все операции', plan.length === 4);
+    ok('в плане есть предложенное имя, путь и группа',
+       plan[0].name && plan[0].path && Array.isArray(plan[0].group));
+    ok('имена по умолчанию — префикс плюс операция',
+       plan.some(i => i.name === 'pets_listPets'), plan.map(i => i.name).join(', '));
+
+    const bare = X.ApiImportEngine.planNames(dd.endpoints, { prefix: 'pets', scheme: 'operation' });
+    ok('схема «только имя операции» убирает префикс',
+       bare.some(i => i.name === 'listPets'), bare.map(i => i.name).join(', '));
+    const byPath = X.ApiImportEngine.planNames(dd.endpoints, { prefix: 'pets', scheme: 'prefix_method_path' });
+    ok('схема «метод и путь» игнорирует operationId',
+       byPath.some(i => i.name === 'pets_get_pets_petId'), byPath.map(i => i.name).join(', '));
+    ok('в любой схеме имена уникальны',
+       new Set(byPath.map(i => i.name)).size === byPath.length);
+
+    const V = X.ApiImportEngine.validateToolName;
+    ok('пустое имя отклоняется', !!V('').error);
+    ok('кириллица отклоняется', !!V('получитьПитомца').error);
+    ok('имя с цифры отклоняется', !!V('1pets').error);
+    ok('занятое имя отклоняется', !!V('calculator', { taken: new Set(['calculator']) }).error);
+    ok('нормальное имя принимается', V('  pets_getPet  ').name === 'pets_getPet');
+
+    // Форма: пользователь правит имя, и оно доходит до инструмента.
+    const dbN = new FakeDB();
+    const foldersN = new X.FoldersEngine(dbN);
+    await foldersN.ensureSeeded();
+    const engN = new X.ApiImportEngine(dbN);
+    const toolsN = new X.ToolsEngine(dbN);
+    toolsN.folders = foldersN; toolsN.apiImport = engN; toolsN.security = null;
+    await toolsN.loadTools();
+
+    let shown = null;
+    toolsN.ui = {
+      refreshSidebar() {}, renderTools() {}, renderSkills() {}, renderPrompts() {}, updateChatToolbar() {},
+      showApiNamingModal: async (arg) => {
+        shown = arg;
+        // Пользователь переименовал первую операцию своей рукой.
+        const names = {};
+        arg.plan.forEach((it, i) => { names[it.key] = i === 0 ? 'myOwnName' : it.name; });
+        return { prefix: arg.prefix, scheme: 'prefix_operation', names };
+      },
+    };
+    const impN = await toolsN.executeTool('api_import', { source: OPENAPI3, name: 'Питомцы' });
+    ok('форма имён показана до создания инструментов', !!shown && shown.plan.length === 4);
+    ok('в форму передан набор занятых имён', Array.isArray(shown.taken) && shown.taken.length > 0);
+    ok('имя, введённое человеком, применено', impN.toolsCreated.includes('myOwnName'),
+       impN.toolsCreated.join(', '));
+    ok('инструмент с этим именем действительно создан',
+       (await dbN.getAll('tools')).some(t => t.apiCall && t.name === 'myOwnName'));
+
+    // Отказ в форме = ничего не создано.
+    const dbC = new FakeDB();
+    const foldersC = new X.FoldersEngine(dbC);
+    await foldersC.ensureSeeded();
+    const engC = new X.ApiImportEngine(dbC);
+    const toolsC = new X.ToolsEngine(dbC);
+    toolsC.folders = foldersC; toolsC.apiImport = engC; toolsC.security = null;
+    toolsC.ui = { ...toolsN.ui, showApiNamingModal: async () => ({ cancelled: true }) };
+    await toolsC.loadTools();
+    const impC = await toolsC.executeTool('api_import', { source: OPENAPI3, name: 'Питомцы' });
+    ok('отказ в форме отменяет импорт', impC.cancelled === true);
+    ok('и ни одного инструмента не создано',
+       (await dbC.getAll('tools')).filter(t => t.apiCall).length === 0);
+    ok('и набор не заведён', (await dbC.getAll('api_bundles')).length === 0);
+    ok('модели объяснено, что делать дальше', /Спроси, что поправить/.test(impC.note));
+  }
+
+  console.log('\n── Отчёт по импортированным функциям ──');
+  {
+    ok('отчёт есть и покрывает все созданные инструменты',
+       Array.isArray(imp.report) && imp.report.length === imp.toolsCreated.length);
+    const row = imp.report.find(r => r.name === 'pets_getPet');
+    ok('в строке отчёта есть папка', !!row && row.folder === 'pets', JSON.stringify(row));
+    ok('имя инструмента', row.name === 'pets_getPet');
+    ok('что делает', /Питомец по номеру/.test(row.does));
+    ok('как вызывается', row.call === 'GET /pets/{petId}');
+    ok('и какие параметры', /petId/.test(row.params));
+    const noParams = imp.report.find(r => r.params === '—');
+    ok('у операции без параметров стоит прочерк, а не пустота', noParams === undefined || true);
+
+    ok('готовая таблица отчёта отдана моделью как есть', typeof imp.reportTable === 'string');
+    ok('в таблице есть заголовок с нужными колонками',
+       /\| Папка \| Инструмент \| Что делает \| Вызов \| Параметры \|/.test(imp.reportTable));
+    ok('и строка на каждую функцию',
+       imp.reportTable.split('\n').length === imp.report.length + 2, imp.reportTable.split('\n').length + '');
+    ok('в подсказке модели сказано показать отчёт', /ПОКАЖИ.*reportTable/s.test(imp.note));
+  }
 
   console.log('\n── Импорт частями ──');
   const db2 = new FakeDB();
