@@ -15,6 +15,7 @@ class AIAgent {
     this.security = null;
     this.apiImport = null;
     this.about = null;
+    this.backup = null;
     this.models = null;
     this.ui = null;
   }
@@ -42,6 +43,11 @@ class AIAgent {
 
     this.about = new AboutEngine(this.db);
     await this.about.load();
+    // Полный слепок агента: содержимое, настройки и доступы одним
+    // зашифрованным файлом (см. engines/backup-engine.js). Движку нужна
+    // только база — он читает и пишет хранилища напрямую, потому что
+    // переносит их целиком, а не по одному объекту.
+    this.backup = new BackupEngine(this.db);
     this.skills.about = this.about;   // имя агента в системном промпте
     this.tools.about = this.about;    // agent_name и whats_new
     this.tools.folders = this.folders;
@@ -50,6 +56,7 @@ class AIAgent {
     this.tools.tasks = this.tasks;         // план задачи, живущий вне переписки
     this.tools.skills = this.skills; // связь «навык ↔ инструменты» из tools
     this.tools.security = this.security; // единая точка проверки операций
+    this.tools.backup = this.backup;     // резервная копия по просьбе в чате
 
     // Реестр провайдеров и моделей. Автоматического переключения нет:
     // модель меняется только явным действием пользователя или агента.
@@ -196,7 +203,19 @@ class AIAgent {
     // Два окна разом, да ещё поверх непрочитанного предложения продолжить
     // прерванный ход, — это не знакомство, а завал.
     try {
-      if (!this.about.name) await this.ui.askAgentName({ first: true });
+      if (!this.about.name) {
+        // Перед знакомством — предложение вернуть агента из резервной
+        // копии. Именно в этом порядке: имя приедет из файла, и спросить
+        // его, чтобы через минуту заменить, значило бы заставить
+        // человека выбирать имя дважды. Восстановление заканчивается
+        // перезагрузкой страницы, поэтому дальше идти незачем.
+        const restoring = await this.ui.offerFirstRunRestore();
+        if (restoring) {
+          console.log('🚀 AI Agent: восстановление из резервной копии');
+          return;
+        }
+        await this.ui.askAgentName({ first: true });
+      }
       await this.ui.checkWhatsNew();
     } catch (e) {
       console.error('Знакомство и история доработок: сбой', e);

@@ -1011,6 +1011,17 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   white-space: nowrap;
 }
 
+/* Пояснение под строкой выбора в окне резервной копии. Части слепка
+   называются коротко («Настройки приложения»), и без строки о том, что
+   именно туда входит, выбор состава превращается в угадывание. Отступ
+   слева выравнивает текст по названию, а не по галочке. */
+.bk-hint {
+  margin: 2px 0 8px 26px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .chip {
   padding: 4px 10px;
   background: var(--bg-tertiary);

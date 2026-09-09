@@ -171,6 +171,11 @@ class SecurityEngine {
     confluence_configure: 'write', confluence_create_page: 'write', confluence_update_page: 'write',
     xwiki_configure: 'write', xwiki_create_page: 'write', xwiki_update_page: 'write',
     persistent_memory: 'write', export_chat: 'write', export_chats: 'write',
+    // Резервная копия: инструмент только открывает форму, всю работу
+    // делает пользователь в ней. Спрашивать про открытие окна не о чем,
+    // а вот 'read' было бы неправдой — за формой стоит запись файла и
+    // восстановление базы, и в журнале это должно выглядеть действием.
+    backup: 'write',
     // Переименование агента: меняет то, что видит пользователь, поэтому
     // не 'read'. Но это обратимая подпись, а не действие над данными —
     // в мягких режимах спрашивать не о чем.

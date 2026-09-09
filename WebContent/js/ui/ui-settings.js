@@ -26,6 +26,7 @@ Object.assign(UI.prototype, {
         <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="display">👁 Отображение</button>
         <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="security">🛡 Безопасность</button>
         <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="logging">🪵 Журналирование</button>
+        <button type="button" class="tab-btn settings-tab-btn" data-settings-tab="backup">💾 Резервная копия</button>
       </div>
 
       <div class="settings-tab-panel" data-settings-panel="models">
@@ -410,6 +411,43 @@ Object.assign(UI.prototype, {
           </div>
         </div>
       </div>
+
+      <div class="settings-tab-panel" data-settings-panel="backup" hidden>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px;">
+          Весь агент одним файлом: имя, настройки, подключения к моделям, инструменты,
+          навыки, промпты, память и переписка. Состав выбирается при выгрузке — можно взять
+          всё, а можно только настройки или только содержимое.
+        </div>
+
+        <div class="form-group">
+          <label>Что попадёт в копию</label>
+          <div class="sel-list" style="max-height:180px;">
+            ${BackupEngine.PARTS.map(p => `
+              <div class="check-row" style="cursor:default;">
+                <span>${p.icon} ${this._escHtml(p.label)}</span>
+                ${p.secrets ? '<span class="sel-badge" title="В этой части есть ключи и токены доступа.">доступы</span>' : ''}
+              </div>`).join('')}
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+            Файл всегда шифруется паролем: в копии лежат ключи от ваших сервисов.
+            Ключи можно и не включать — тогда вернётся всё, кроме них.
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:4px;">
+          <button type="button" class="btn btn-primary btn-sm" id="bk-open-export">💾 Сделать копию</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="bk-open-import">📂 Восстановить из копии</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:10px;">
+          Обе кнопки открывают своё окно, а это — закрывают: два окна друг над другом —
+          верный способ потерять, где вы что меняли. Изменения на других вкладках
+          настроек сначала сохраните.
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+          То же самое можно просто попросить у агента: «сделай резервную копию»,
+          «восстанови настройки из файла».
+        </div>
+      </div>
     `, async () => {
       // Окно контекста задаётся у каждой модели; здесь остаётся только
       // порог, при котором предупреждать о заполнении.
@@ -540,6 +578,11 @@ Object.assign(UI.prototype, {
       };
       secMode?.addEventListener('change', syncSecHint);
       syncSecHint();
+
+      // Резервная копия. Окно настроек закрывается — см. пояснение на
+      // самой вкладке и у кнопок «Журнал» / «MCP-серверы» ниже.
+      document.getElementById('bk-open-export')?.addEventListener('click', () => this.showBackupExportModal());
+      document.getElementById('bk-open-import')?.addEventListener('click', () => this.showBackupImportModal({ firstRun: false }));
 
       document.getElementById('sec-show-audit')?.addEventListener('click', () => this.showSecurityAudit());
       document.getElementById('sec-show-mcp')?.addEventListener('click', () => this.showMcpServers());
