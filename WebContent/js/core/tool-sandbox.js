@@ -144,6 +144,10 @@ class ToolSandbox {
     kill('showOpenFilePicker', filesHint);
     kill('showSaveFilePicker', filesHint);
     kill('showDirectoryPicker', filesHint);
+    // Ещё один молчаливый тупик: без allow-popups окно из кадра не
+    // открывается, а window.open возвращает null — код продолжает
+    // работу, будто всё получилось.
+    kill('open', 'Окна из песочницы не открываются. Файл пользователю — agent_download({ name, content }).');
 
     // ── Мост fetch ──
     // Возвращает объект, похожий на Response настолько, насколько нужно
@@ -227,6 +231,131 @@ class ToolSandbox {
       });
     };
 
+    // ── Старый способ «скачать файл» тоже должен работать ──
+    //
+    // ЧТО БЫЛО. Модель пишет привычное: new Blob → URL.createObjectURL →
+    // <a download> → a.click(). В кадре это НЕ падает: и Blob, и
+    // createObjectURL, и сам элемент там есть, click() отрабатывает без
+    // ошибки. А файла не появляется — браузер запрещает скачивание из
+    // <iframe sandbox> без allow-downloads и делает это МОЛЧА. Инструмент
+    // возвращал «файл сохранён», пользователь шёл в «Загрузки» и не
+    // находил ничего. Хуже молчаливого отказа не бывает: по нему не
+    // понять даже, где искать причину.
+    //
+    // ЧТО ВМЕСТО. Клик по ссылке со скачиванием перехватывается, и файл
+    // уходит тем же мостом, что и agent_download: содержимое достаётся из
+    // Blob (или из data:-адреса) и передаётся приложению, а оно уже
+    // отдаёт файл пользователю. Так начинают работать и уже написанные
+    // инструменты, которые никто не будет переписывать.
+    //
+    // ЧЕСТНОСТЬ ОТВЕТА. click() синхронный и ничего не возвращает, а
+    // передача файла асинхронна. Поэтому начатые скачивания дожидаются
+    // ПЕРЕД тем, как отдать результат инструмента (см. handle): иначе
+    // «успех» снова мог бы оказаться неправдой.
+    const blobUrls = new Map();
+    try {
+      const U = g.URL;
+      if (U && typeof U.createObjectURL === 'function') {
+        const realCreate = U.createObjectURL.bind(U);
+        U.createObjectURL = function (obj) {
+          const url = realCreate(obj);
+          try { blobUrls.set(url, obj); } catch (_) {}
+          return url;
+        };
+        if (typeof U.revokeObjectURL === 'function') {
+          const realRevoke = U.revokeObjectURL.bind(U);
+          U.revokeObjectURL = function (url) {
+            // Содержимое НЕ забываем: инструменты почти всегда отзывают
+            // адрес сразу после click(), а передать файл наружу мы к
+            // этому моменту ещё не успели.
+            try { realRevoke(url); } catch (_) {}
+          };
+        }
+      }
+    } catch (_) { /* нет URL — нечего и перехватывать */ }
+
+    const pendingDownloads = [];
+
+    const bytesToBase64 = (buffer) => {
+      const bytes = new Uint8Array(buffer);
+      let bin = '';
+      const CHUNK = 0x8000;   // apply() не принимает мегабайты аргументов
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    };
+
+    const blobToBuffer = (blob) => {
+      if (typeof blob.arrayBuffer === 'function') return blob.arrayBuffer();
+      return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(new Error('не удалось прочитать содержимое файла'));
+        fr.readAsArrayBuffer(blob);
+      });
+    };
+
+    const deliverAnchor = async (name, href) => {
+      const url = String(href || '');
+      const blob = blobUrls.get(url);
+      if (blob) {
+        // Отдаём ровно те байты, что собрал инструмент: base64 проходит
+        // границу сообщений одинаково и для текста, и для картинки.
+        const buffer = await blobToBuffer(blob);
+        return hostCall('download', {
+          name, mime: blob.type || '', content: bytesToBase64(buffer), base64: true,
+        });
+      }
+      if (url.slice(0, 5) === 'data:') {
+        const comma = url.indexOf(',');
+        if (comma < 0) throw new Error('испорченный data:-адрес');
+        const meta = url.slice(5, comma);
+        const body = url.slice(comma + 1);
+        const isB64 = /;base64$/i.test(meta);
+        return hostCall('download', {
+          name, mime: meta.replace(/;base64$/i, ''),
+          content: isB64 ? body : decodeURIComponent(body), base64: isB64,
+        });
+      }
+      throw new Error(
+        'ссылка на скачивание ведёт не на данные инструмента (' + url.slice(0, 40) + '). ' +
+        'Собери содержимое сам и отдай его через agent_download({ name, content }).');
+    };
+
+    const startDownload = (name, href) => {
+      const p = deliverAnchor(name, href);
+      pendingDownloads.push(p);
+      // Отказ разбирается в handle перед отправкой результата; здесь —
+      // только чтобы среда не жаловалась на «необработанное отклонение».
+      p.catch(() => {});
+    };
+
+    try {
+      const A = g.HTMLAnchorElement;
+      if (A && A.prototype && typeof A.prototype.click === 'function') {
+        const realClick = A.prototype.click;
+        A.prototype.click = function () {
+          const wants = typeof this.hasAttribute === 'function' && this.hasAttribute('download');
+          if (!wants) return realClick.call(this);
+          startDownload(this.getAttribute('download') || 'file', this.getAttribute('href') || '');
+        };
+      }
+      // Тот же перехват для ссылки, по которой «кликают» событием, а не
+      // методом. Работает для ссылок, добавленных в документ; до
+      // отдельно созданного элемента событие не доходит — и как раз он
+      // закрыт подменой click() выше.
+      if (g.document && typeof g.document.addEventListener === 'function') {
+        g.document.addEventListener('click', (ev) => {
+          const el = ev && ev.target && typeof ev.target.closest === 'function'
+            ? ev.target.closest('a[download]') : null;
+          if (!el) return;
+          ev.preventDefault();
+          startDownload(el.getAttribute('download') || 'file', el.getAttribute('href') || '');
+        }, true);
+      }
+    } catch (_) { /* нет DOM-ссылок — перехватывать нечего */ }
+
     const handle = async (msg) => {
       if (!msg || msg.__ts !== 1) return;
 
@@ -257,6 +386,28 @@ class ToolSandbox {
       } catch (e) {
         post({ __ts: 1, type: 'error', id: msg.id, message: (e && e.message) || String(e) });
         return;
+      }
+
+      // ── Файлы досылаются до того, как объявлен результат ──
+      // Скачивание начинается синхронным click(), а доходит до
+      // приложения асинхронно: без ожидания инструмент успевал вернуть
+      // «файл сохранён» раньше, чем выяснялось, что не сохранён. Отказ
+      // не прячем — он приезжает вместе с результатом, потому что
+      // остальную работу инструмент, возможно, выполнил.
+      if (pendingDownloads.length) {
+        const results = await Promise.all(
+          pendingDownloads.splice(0).map((p) => p.then(() => null, (e) => (e && e.message) || String(e))));
+        const failed = results.filter(Boolean);
+        if (failed.length) {
+          const why = 'Файл не сохранён: ' + failed.join('; ');
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            if (!value.error) value.download_error = why;
+          } else if (value === undefined || value === null) {
+            value = { error: why };
+          } else {
+            value = { result: value, download_error: why };
+          }
+        }
       }
 
       // Результат уходит через границу сообщений, то есть обязан быть

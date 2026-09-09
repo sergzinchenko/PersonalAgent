@@ -452,6 +452,107 @@ class FakeDB {
     await done3;
   }
 
+  // jsdom не выдаёт blob-адреса сам, а без них проверять нечего:
+  // подменяем ровно то, чем пользуется код инструмента.
+  {
+    let seq = 0;
+    window.URL.createObjectURL = (blob) => 'blob:test/' + (++seq) + '?' + (blob && blob.type || '');
+    window.URL.revokeObjectURL = () => {};
+  }
+
+  console.log('\n── Привычный способ скачивания больше не врёт ──');
+  {
+    // Ровно тот случай, из-за которого всё переделывалось: инструмент
+    // собирает Blob, кликает по ссылке и рапортует об успехе. В кадре
+    // это не падает — браузер запрещает скачивание из <iframe sandbox>
+    // МОЛЧА, и файла просто не появляется. Теперь клик перехватывается
+    // и файл уходит приложению тем же мостом, что и agent_download.
+    const { posted, api } = makeRuntime();
+    const done = api.handle({
+      __ts: 1, type: 'run', id: 'old1', params: {},
+      code: 'const blob = new Blob(["имя;цена"], { type: "text/csv" });' +
+            'const url = URL.createObjectURL(blob);' +
+            'const a = document.createElement("a");' +
+            'a.href = url; a.download = "прайс.csv"; a.click();' +
+            'URL.revokeObjectURL(url);' +
+            'return { ok: true, файл: "прайс.csv" };',
+    });
+    await tick(10);
+    const req = posted.find(m => m.type === 'host' && m.kind === 'download');
+    ok('клик по ссылке превратился в просьбу к приложению', !!req, JSON.stringify(posted.map(m => m.type)));
+    ok('имя файла взято из атрибута download', req && req.payload.name === 'прайс.csv');
+    ok('содержимое доехало байтами', req && req.payload.base64 === true &&
+       Buffer.from(req.payload.content, 'base64').toString('utf8') === 'имя;цена',
+       req && req.payload.content);
+    ok('и тип из Blob не потерян', req && /text\/csv/.test(req.payload.mime), req && req.payload.mime);
+
+    await api.handle({ __ts: 1, type: 'host-result', id: req.id, value: { ok: true, filename: 'прайс.csv', bytes: 15 } });
+    await done;
+    const out = posted.find(m => m.id === 'old1' && m.type === 'result');
+    ok('результат инструмента дошёл без изменений', out && out.value.ok === true, JSON.stringify(out));
+    ok('и не помечен ошибкой, раз файл ушёл', out && out.value.download_error === undefined);
+  }
+
+  console.log('\n── Если файл не ушёл, инструмент об этом скажет ──');
+  {
+    const { posted, api } = makeRuntime();
+    const done = api.handle({
+      __ts: 1, type: 'run', id: 'old2', params: {},
+      code: 'const a = document.createElement("a");' +
+            'a.href = "blob:чужой-адрес"; a.download = "нет.txt"; a.click();' +
+            'return { ok: true, message: "Файл скачан" };',
+    });
+    await tick(10);
+    await done;
+    const out = posted.find(m => m.id === 'old2' && m.type === 'result');
+    ok('ответ инструмента дополнен правдой о файле',
+       out && typeof out.value.download_error === 'string', JSON.stringify(out && out.value));
+    ok('и сказано, чем это чинить',
+       out && /agent_download/.test(out.value.download_error), out && out.value.download_error);
+
+    // Отказ приложения (слишком большой файл, испорченное имя) тоже
+    // обязан доехать до результата, а не потеряться по дороге.
+    const done2 = api.handle({
+      __ts: 1, type: 'run', id: 'old3', params: {},
+      code: 'const blob = new Blob(["x"]);' +
+            'const a = document.createElement("a");' +
+            'a.href = URL.createObjectURL(blob); a.download = "b.txt"; a.click();' +
+            'return { ok: true };',
+    });
+    await tick(10);
+    const req2 = posted.filter(m => m.type === 'host').pop();
+    await api.handle({ __ts: 1, type: 'host-result', id: req2.id, error: 'файл больше допустимых 32 МБ' });
+    await done2;
+    const out2 = posted.find(m => m.id === 'old3' && m.type === 'result');
+    ok('отказ приложения виден в ответе инструмента',
+       out2 && /32 МБ/.test(out2.value.download_error || ''), JSON.stringify(out2 && out2.value));
+  }
+
+  console.log('\n── Молчаливых тупиков не осталось ──');
+  {
+    const { posted, api } = makeRuntime();
+    await api.handle({
+      __ts: 1, type: 'run', id: 'w1', params: {},
+      code: 'try { window.open("https://example.org"); return { leaked: true }; }' +
+            'catch (e) { return { err: e.message }; }',
+    });
+    const res = posted.find(m => m.id === 'w1');
+    ok('window.open не возвращает молча null', res.value.err && /недоступен/.test(res.value.err),
+       JSON.stringify(res.value));
+    ok('и подсказывает, чем отдать файл', /agent_download/.test(res.value.err));
+
+    // Обычная ссылка без download кликается как раньше: перехват не
+    // должен ломать навигацию внутри кадра.
+    await api.handle({
+      __ts: 1, type: 'run', id: 'w2', params: {},
+      code: 'const a = document.createElement("a"); a.href = "#x";' +
+            'let clicked = false; a.addEventListener("click", () => { clicked = true; });' +
+            'a.click(); return { clicked };',
+    });
+    ok('ссылка без download работает по-прежнему',
+       posted.find(m => m.id === 'w2').value.clicked === true);
+  }
+
   console.log('\n── Кадр: просьба о файле уходит родителю ──');
   {
     const asked = [];
