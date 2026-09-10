@@ -490,7 +490,8 @@ Object.assign(ToolsEngine.prototype, {
 				      {
 	        id: 'builtin_list_workspace',
 	        name: 'list_workspace',
-	        description: 'Возвращает списки папок и объектов (tools/skills/prompts) с их id, name и parentId. ' +
+	        description: 'Возвращает списки папок и объектов (tools/skills/prompts) с их id, name и parentId, ' +
+	          'по алфавиту — сначала папки, затем объекты. ' +
 	          'Вызывай ПЕРЕД изменением/перемещением, чтобы узнать актуальные id. ' +
 	          'Для навыков дополнительно отдаёт привязанные инструменты (tools), для инструментов — ' +
 	          'навыки, в которых они используются (usedBySkills).',
@@ -521,7 +522,8 @@ Object.assign(ToolsEngine.prototype, {
 	      {
 	        id: 'builtin_rename_folder',
 	        name: 'rename_folder',
-	        description: 'Переименовывает папку.',
+	        description: 'Переименовывает папку. Папки, которые завело само приложение ' +
+	          '(«Системные» и папки встроенных инструментов), переименовать нельзя.',
 	        parameters: {
 	          type: 'object',
 	          properties: {
@@ -551,7 +553,9 @@ Object.assign(ToolsEngine.prototype, {
 	      {
 	        id: 'builtin_delete_folder',
 	        name: 'delete_folder',
-	        description: 'Удаляет папку. Вложенные подпапки и элементы поднимаются на уровень выше (не удаляются).',
+	        description: 'Удаляет папку. Вложенные подпапки и элементы поднимаются на уровень выше ' +
+	          '(не удаляются). Папки, которые завело само приложение («Системные» и папки встроенных ' +
+	          'инструментов), удалить нельзя.',
 	        parameters: {
 	          type: 'object',
 	          properties: {
@@ -565,7 +569,9 @@ Object.assign(ToolsEngine.prototype, {
 	      {
 	        id: 'builtin_move_item',
 	        name: 'move_item',
-	        description: 'Перемещает объект (tool/skill/prompt) в указанную папку или в корень.',
+	        description: 'Перемещает объект (tool/skill/prompt) в указанную папку или в корень. ' +
+	          'Встроенные и системные инструменты и навыки не перемещаются: их раскладку задаёт ' +
+	          'приложение — переносить можно свои и импортированные.',
 	        parameters: {
 	          type: 'object',
 	          properties: {

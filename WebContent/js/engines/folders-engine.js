@@ -12,6 +12,18 @@
 // перетащить навык наружу, чтобы снять с него все ограничения, — а
 // ограничения на то и ограничения, чтобы их нельзя было обойти мышью.
 //
+// ── Папки встроенных инструментов ──
+// Второй, более мягкий вид неприкосновенности (флаг `builtin`). Встроенных
+// инструментов больше сорока, и свалка из сорока карточек в корне — это не
+// «свобода раскладки», а невозможность найти нужный. Поэтому раскладку
+// задаёт приложение: у каждого набора своя папка со своим значком
+// (см. ToolsEngine.PLACEMENT), и встроенный инструмент из неё не уезжает —
+// иначе после первого же перетаскивания раскладка перестала бы совпадать с
+// той, о которой говорят навыки и справка. Разница с системной папкой:
+//   • переименовать, переместить и удалить нельзя — как и системную;
+//   • но своё содержимое класть можно, и подпапки заводить тоже:
+//     запрет касается ВСТРОЕННЫХ инструментов, а не самой папки.
+//
 // Запрет живёт ЗДЕСЬ, в единственной точке изменения папок, а не в
 // интерфейсе: до этих же операций дотягиваются инструменты агента
 // (create_folder, move_folder, delete_folder, move_item), и проверка,
@@ -27,19 +39,64 @@ class FoldersEngine {
   // менять его нельзя — см. ensureSeeded).
   static SEEDED = [
     {
-      id: 'folder_tools_system', type: 'tools', name: 'Системные', system: true,
+      id: 'folder_tools_system', type: 'tools', name: 'Системные', system: true, icon: '🔒',
       note: 'Инструменты, на которых держатся базовые механизмы агента. Выключить и переместить нельзя.',
     },
+    // ── Папки встроенных инструментов ──
+    // Названия и значки видит пользователь, поэтому они говорят о ДЕЛЕ, а
+    // не о внутреннем устройстве: «Чаты», а не «chat-tools». Состав каждой
+    // папки — в ToolsEngine.PLACEMENT: список инструментов ведётся рядом с
+    // кодом, который его применяет, а здесь — только сами папки.
     {
-      id: 'folder_skills_system', type: 'skills', name: 'Системные', system: true,
+      id: 'folder_tools_chats', type: 'tools', name: 'Чаты', builtin: true, icon: '💬',
+      note: 'Поиск по перепискам, выгрузка и загрузка чатов, раскладка их по папкам.',
+    },
+    {
+      id: 'folder_tools_confluence', type: 'tools', name: 'Confluence', builtin: true, icon: '📘',
+      note: 'Работа с корпоративным Confluence через REST API.',
+    },
+    {
+      id: 'folder_tools_files', type: 'tools', name: 'Файлы', builtin: true, icon: '📄',
+      note: 'Чтение и поиск по файлам и папкам, к которым пользователь дал доступ.',
+    },
+    {
+      id: 'folder_tools_models', type: 'tools', name: 'Модели', builtin: true, icon: '🔀',
+      note: 'Подключения к сервисам моделей: что доступно, на чём агент работает, проверка связи.',
+    },
+    {
+      id: 'folder_tools_net', type: 'tools', name: 'Сеть', builtin: true, icon: '🌐',
+      note: 'Запросы наружу — напрямую из браузера и через локальный прокси.',
+    },
+    {
+      id: 'folder_tools_skills', type: 'tools', name: 'Навыки и промпты', builtin: true, icon: '🧩',
+      note: 'Создание и правка навыков и промптов, привязка к ним инструментов.',
+    },
+    {
+      id: 'folder_tools_toolsmith', type: 'tools', name: 'Свои инструменты', builtin: true, icon: '🛠',
+      note: 'Создание собственных инструментов и импорт готовых наборов из описаний API.',
+    },
+    {
+      id: 'folder_tools_utils', type: 'tools', name: 'Утилиты', builtin: true, icon: '🧰',
+      note: 'Мелкие вычисления без внешних обращений: время, арифметика, форматирование, пароли.',
+    },
+    {
+      id: 'folder_tools_workspace', type: 'tools', name: 'Рабочее пространство', builtin: true, icon: '🗂',
+      note: 'Обзор и раскладка самого агента: папки, перемещение инструментов, навыков и промптов.',
+    },
+    {
+      id: 'folder_tools_xwiki', type: 'tools', name: 'xWiki', builtin: true, icon: '📗',
+      note: 'Работа с корпоративной xWiki через REST API.',
+    },
+    {
+      id: 'folder_skills_system', type: 'skills', name: 'Системные', system: true, icon: '🔒',
       note: 'Навыки, управляющие ядром агента: правила самомодификации и безопасности. Менять их небезопасно.',
     },
     {
-      id: 'folder_skills_service', type: 'skills', name: 'Сервисные',
+      id: 'folder_skills_service', type: 'skills', name: 'Сервисные', icon: '🧭',
       note: 'Навыки, управляющие содержимым агента: порядок, объяснения, перенос и создание объектов.',
     },
     {
-      id: 'folder_skills_applied', type: 'skills', name: 'Прикладные',
+      id: 'folder_skills_applied', type: 'skills', name: 'Прикладные', icon: '🎯',
       note: 'Навыки для работы над задачами пользователя.',
     },
   ];
@@ -53,9 +110,17 @@ class FoldersEngine {
     return FoldersEngine.SEEDED.some(f => f.id === id);
   }
 
-  // Досеивание при запуске. Имя и флаг system выправляются на КАЖДОМ
+  // Папка, которую нельзя переименовать, переместить и удалить:
+  // системная либо заведённая под встроенные инструменты. Один ответ на
+  // весь код — иначе каждый запрет пришлось бы писать дважды и один из
+  // них однажды забыли бы.
+  static isFixed(folder) {
+    return !!(folder && (folder.system || folder.builtin));
+  }
+
+  // Досеивание при запуске. Имя, значок и флаги выправляются на КАЖДОМ
   // запуске: запись могли завести в старой версии или испортить прямой
-  // правкой базы, а от флага зависят запреты ниже.
+  // правкой базы, а от флагов зависят запреты ниже.
   async ensureSeeded() {
     const all = await this.db.getAll('folders');
     const byId = new Map(all.map(f => [f.id, f]));
@@ -70,6 +135,7 @@ class FoldersEngine {
       // Сеяные папки живут в корне своего раздела: вложенная системная
       // папка ездила бы вместе с чужой родительской, а перемещать её нельзя.
       const stale = cur.name !== def.name || !!cur.system !== !!def.system ||
+        !!cur.builtin !== !!def.builtin || cur.icon !== def.icon ||
         cur.note !== def.note || (cur.parentId || null) !== null;
       if (!stale) continue;
       await this.db.put('folders', { ...cur, ...def, parentId: null });
@@ -83,6 +149,15 @@ class FoldersEngine {
     if (FoldersEngine.SEEDED.some(f => f.id === id && f.system)) return true;
     const f = await this.db.get('folders', id);
     return !!(f && f.system);
+  }
+
+  // Папка с заданной приложением раскладкой: системная или папка
+  // встроенных инструментов (см. шапку файла).
+  async isFixed(id) {
+    if (!id) return false;
+    if (FoldersEngine.SEEDED.some(f => f.id === id && FoldersEngine.isFixed(f))) return true;
+    const f = await this.db.get('folders', id);
+    return FoldersEngine.isFixed(f);
   }
 
   // Все папки конкретного раздела: 'tools' | 'skills' | 'prompts'
@@ -112,6 +187,7 @@ class FoldersEngine {
     const f = await this.db.get('folders', id);
     if (!f) return;
     if (f.system) return { error: 'Системную папку нельзя переименовать.' };
+    if (f.builtin) return { error: `Папку «${f.name}» переименовать нельзя: её заводит само приложение под встроенные инструменты.` };
     f.name = String(name || '').trim() || f.name;
     await this.db.put('folders', f);
     return f;
@@ -124,6 +200,7 @@ class FoldersEngine {
     const folder = await this.db.get('folders', id);
     if (!folder) return;
     if (folder.system) return { error: 'Системную папку нельзя переместить.' };
+    if (folder.builtin) return { error: `Папку «${folder.name}» переместить нельзя: её заводит само приложение под встроенные инструменты.` };
     if (await this.isSystem(newParentId)) {
       return { error: 'В системную папку нельзя ничего перемещать.' };
     }
@@ -145,6 +222,7 @@ class FoldersEngine {
     const folder = await this.db.get('folders', id);
     if (!folder) return;
     if (folder.system) return { error: 'Системную папку нельзя удалить.' };
+    if (folder.builtin) return { error: `Папку «${folder.name}» удалить нельзя: её заводит само приложение под встроенные инструменты.` };
     const parentId = folder.parentId || null;
 
     const subs = (await this.db.getAll('folders')).filter(f => f.parentId === id);

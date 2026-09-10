@@ -273,6 +273,84 @@ class FakeDB {
   await tick();
   ok('нажатие на карточке действительно копирует', clip[0] === 'отчёт.docx', JSON.stringify(clip));
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Раскладка встроенных инструментов ──');
+
+  ui.currentTab = 'tools';
+  await ui._renderSidebarTree('tools');
+
+  const utilsRow = document.querySelector('[data-folder-id="folder_tools_utils"]');
+  ok('папка встроенных инструментов есть в дереве', !!utilsRow);
+  ok('у неё свой значок, а не общий 📁',
+     utilsRow.querySelector('.tw-name').textContent.trim().startsWith('🧰'),
+     utilsRow.querySelector('.tw-name').textContent.trim());
+  ok('переименовать её нельзя — кнопки нет', !utilsRow.querySelector('[data-ren]'));
+  ok('удалить нельзя — кнопки нет', !utilsRow.querySelector('[data-del]'));
+  ok('и перетащить нельзя', utilsRow.getAttribute('draggable') !== 'true');
+  // Отличие от системной папки: подпапку завести можно.
+  ok('а подпапку внутри завести можно', !!utilsRow.querySelector('[data-add-sub]'));
+
+  const sysRow = document.querySelector('[data-folder-id="folder_tools_system"]');
+  ok('у системной папки значок замка', sysRow.querySelector('.tw-name').textContent.trim().startsWith('🔒'));
+  ok('и подпапку в ней завести нельзя', !sysRow.querySelector('[data-add-sub]'));
+
+  // Папки в дереве идут по алфавиту.
+  const treeNames = Array.from(document.querySelectorAll('#sidebar-list .tw-name'))
+    .map(el => el.textContent.trim().replace(/^\S+\s+/, ''))
+    .filter(n => n !== 'Корень');
+  const sortedNames = treeNames.slice().sort((a, b) => a.localeCompare(b, 'ru'));
+  ok('папки в дереве отсортированы по алфавиту',
+     JSON.stringify(treeNames) === JSON.stringify(sortedNames), treeNames.join(' | '));
+
+  // Все встроенные инструменты разложены: в корне раздела пусто.
+  const allTools = await tools.loadTools();
+  const rootTools = allTools.filter(t => !(t.parentId));
+  ok('в корне не осталось встроенных инструментов', rootTools.length === 0,
+     rootTools.map(t => t.name).join(', '));
+  const utilsTools = allTools.filter(t => t.parentId === 'folder_tools_utils');
+  ok('в «Утилитах» лежат утилиты', utilsTools.some(t => t.name === 'calculator'),
+     utilsTools.map(t => t.name).join(', '));
+  ok('инструменты вики разложены по своим папкам',
+     allTools.filter(t => t.parentId === 'folder_tools_confluence').every(t => /^confluence_/.test(t.name)) &&
+     allTools.filter(t => t.parentId === 'folder_tools_xwiki').every(t => /^xwiki_/.test(t.name)));
+
+  // Карточки внутри папки — по алфавиту, и ни одну нельзя утащить мышью.
+  ui.folderSelection.tools = 'folder_tools_utils';
+  ui.panelCompact.tools = true;
+  await ui.renderTools();
+  const cardNames = Array.from(document.querySelectorAll('#tools-grid .compact-name'))
+    .map(el => el.textContent.trim());
+  ok('карточки в папке отсортированы по алфавиту',
+     JSON.stringify(cardNames) === JSON.stringify(cardNames.slice().sort((a, b) => a.localeCompare(b, 'ru'))),
+     cardNames.join(', '));
+  const draggables = Array.from(document.querySelectorAll('#tools-grid [data-item-id]'))
+    .filter(el => el.getAttribute('draggable') === 'true');
+  ok('встроенный инструмент не перетаскивается', draggables.length === 0, String(draggables.length));
+
+  // Тот же запрет — со стороны инструмента агента, а не мыши.
+  const moved = await tools.executeTool('move_item',
+    { kind: 'tool', name: 'calculator', to: '' }, { bypassSecurity: true });
+  ok('move_item отказывается перекладывать встроенный инструмент', !!moved.error, JSON.stringify(moved));
+  ok('и объясняет, почему', /встроенн/i.test(moved.error || ''));
+  ok('инструмент остался в своей папке',
+     (await db.get('tools', 'builtin_calc')).parentId === 'folder_tools_utils');
+
+  // Своё — переносится свободно: запрет касается встроенных, а не папки.
+  await db.put('tools', { id: 't_own2', name: 'моё', enabled: false, handlerCode: 'return 1;', parentId: null });
+  const movedOwn = await tools.executeTool('move_item',
+    { kind: 'tool', id: 't_own2', to: 'folder_tools_utils' }, { bypassSecurity: true });
+  ok('свой инструмент в эту папку положить можно', movedOwn.success === true, JSON.stringify(movedOwn));
+
+  // list_workspace отдаёт то же, что видно на экране: папки и объекты по алфавиту.
+  const ws = await tools.executeTool('list_workspace', { kind: 'tool' }, { bypassSecurity: true });
+  const wsFolders = ws.tools.folders.map(f => f.name);
+  ok('list_workspace сортирует папки по алфавиту',
+     JSON.stringify(wsFolders) === JSON.stringify(wsFolders.slice().sort((a, b) => a.localeCompare(b, 'ru'))),
+     wsFolders.join(', '));
+  const wsItems = ws.tools.items.map(i => i.name);
+  ok('и объекты тоже',
+     JSON.stringify(wsItems) === JSON.stringify(wsItems.slice().sort((a, b) => a.localeCompare(b, 'ru'))));
+
   console.log('\n==============================================');
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('==============================================');

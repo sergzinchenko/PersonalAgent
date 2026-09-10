@@ -1,0 +1,1671 @@
+{
+  "info": {
+    "_postman_id": "597d6a7b-17c5-4e2a-b7ae-da9caaadce50",
+    "name": "XWiki REST API (Polyus) Copy",
+    "description": "Коллекция запросов к XWiki REST API + LiveTable (DataFlowManage) для окружения https://wiki.polyus.com.\n\nХост: wiki.polyus.com\nВики (под-вики): eawiki\nПространство: DataFlowManage\n\nREST базовый URL: https://wiki.polyus.com/xwiki/rest\nLiveTable URL: https://wiki.polyus.com/xwiki/wiki/eawiki/get/XWiki/LiveTableResults\n\nАутентификация: HTTP Basic ({{username}} / {{password}}) задана на уровне коллекции и наследуется всеми методами.\n\nФорматы REST-ответа (Accept): application/xml (по умолчанию, если заголовок не указан), application/json, text/html, text/plain.\nLiveTableResults возвращает JSON при outputSyntax=plain.\n\nСтруктура переменных:\n- Переменные коллекции — параметры, общие для большинства/всех методов (адрес сервера, идентификаторы вики/пространства/страницы/класса, версия, учётные данные).\n- Переменные внутри папок (Objects, Attachments, LiveTable/DataFlowManage) — параметры, общие только для методов конкретной папки.\n- Параметры, используемые только в одном методе (например, заголовок страницы, язык перевода, поисковая строка, состав колонок LiveTable), заданы как литеральные значения прямо в этом методе, а не как переменные.\n\nРаздел «9. LiveTable» приведён к минимальному набору уникальных вызовов: удалены повторяющиеся примеры одного и того же запроса с разными наборами параметров, вместо них оставлен один метод с максимально полным (в т.ч. отключаемым) набором параметров. Методы, работающие с классом DataFlowManage.Code.DataFlowManageClass, вынесены в подпапку «DataFlowManage».",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "13985523"
+  },
+  "item": [
+    {
+      "name": "0. API Root",
+      "item": [
+        {
+          "name": "GetApiRoot",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON (рекомендуется для программной интеграции)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Возвращает список ссылок на доступные корневые REST-ресурсы XWiki (точка входа API, HATEOAS-навигация)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "1. Wikis",
+      "item": [
+        {
+          "name": "ListWikis",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis"
+              ]
+            },
+            "description": "Возвращает список всех вики (под-вики) на сервере, доступных текущему пользователю."
+          },
+          "response": []
+        },
+        {
+          "name": "GetWiki",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}"
+              ]
+            },
+            "description": "Возвращает описание конкретной вики {{wikiName}}: идентификатор, отображаемое имя, ссылки на вложенные ресурсы (spaces, classes, search и т.д.)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Spaces",
+      "item": [
+        {
+          "name": "ListSpaces",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces"
+              ]
+            },
+            "description": "Возвращает список пространств верхнего уровня вики {{wikiName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "GetSpace",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}"
+              ]
+            },
+            "description": "Возвращает описание пространства {{spaceName}}: домашнюю страницу, вложенные подпространства, ссылки на страницы."
+          },
+          "response": []
+        },
+        {
+          "name": "CreateSpace",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain",
+                "description": "Тип тела запроса — обычный текст (описание нового пространства)."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "My new space",
+              "options": {
+                "raw": {
+                  "language": "text"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}"
+              ]
+            },
+            "description": "Создаёт пространство {{spaceName}} (или его домашнюю страницу, если пространство ещё не существует). Тело запроса — необязательное описание пространства."
+          },
+          "response": []
+        },
+        {
+          "name": "DeleteSpace",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}"
+              ]
+            },
+            "description": "Безвозвратно удаляет пространство {{spaceName}} вместе со всеми вложенными страницами. Требует прав администратора."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Pages",
+      "item": [
+        {
+          "name": "ListPages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages"
+              ]
+            },
+            "description": "Возвращает список страниц верхнего уровня пространства {{spaceName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageAsJson",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ]
+            },
+            "description": "Возвращает метаданные и содержимое страницы {{pageName}} в формате JSON: заголовок, синтаксис, содержимое (source), автора, версию, ссылки на дочерние ресурсы."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageAsXml",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/xml",
+                "description": "Формат ответа — XML (формат по умолчанию, если заголовок Accept не указан)."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ]
+            },
+            "description": "Возвращает те же данные страницы {{pageName}}, что и GetPageAsJson, но в формате XML."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageAsHtml",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/html",
+                "description": "Формат ответа — отрендеренный HTML-фрагмент содержимого страницы, пригодный для встраивания в веб-страницу."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ]
+            },
+            "description": "Возвращает страницу {{pageName}} в виде HTML-обёртки с отрендеренным содержимым (без метаданных JSON/XML)."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageAsText",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/plain",
+                "description": "Формат ответа — обычный текст: только исходное содержимое страницы (wiki-синтаксис), без метаданных."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ]
+            },
+            "description": "Возвращает необработанный исходный текст страницы {{pageName}} в её нативном wiki-синтаксисе."
+          },
+          "response": []
+        },
+        {
+          "name": "UpsertPage",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain",
+                "description": "Тип тела запроса — обычный текст содержимого страницы в wiki-синтаксисе."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "Welcome to this page!\n\nThis is the page content.",
+              "options": {
+                "raw": {
+                  "language": "text"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}?title=DataFlowManage",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ],
+              "query": [
+                {
+                  "key": "title",
+                  "value": "DataFlowManage",
+                  "description": "Заголовок страницы (человекочитаемое отображаемое имя). Параметр используется только этим методом, поэтому задан как литеральное значение, а не переменная коллекции — при необходимости измените его прямо здесь."
+                }
+              ]
+            },
+            "description": "Создаёт страницу {{pageName}}, если она не существует, либо полностью заменяет её содержимое, если существует. Тело запроса целиком становится новым содержимым страницы."
+          },
+          "response": []
+        },
+        {
+          "name": "PatchPage",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain",
+                "description": "Тип тела запроса — обычный текст нового содержимого страницы."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "Updated content.",
+              "options": {
+                "raw": {
+                  "language": "text"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ]
+            },
+            "description": "Частично обновляет существующую страницу {{pageName}}: изменяет только переданные поля (в примере — содержимое), остальные метаданные страницы не затрагиваются. В отличие от UpsertPage не создаёт страницу заново."
+          },
+          "response": []
+        },
+        {
+          "name": "DeletePage",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}"
+              ]
+            },
+            "description": "Удаляет страницу {{pageName}} (перемещает в корзину, если в вики включена корзина документов)."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageHistory",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/history",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "history"
+              ]
+            },
+            "description": "Возвращает список всех сохранённых версий страницы {{pageName}} с автором, датой и комментарием к каждой версии."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageVersion",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/history/{{version}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "history",
+                "{{version}}"
+              ]
+            },
+            "description": "Возвращает содержимое и метаданные страницы {{pageName}} по состоянию на конкретную версию {{version}} (формат major.minor)."
+          },
+          "response": []
+        },
+        {
+          "name": "DeletePageVersion",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/history/{{version}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "history",
+                "{{version}}"
+              ]
+            },
+            "description": "Удаляет из истории страницы {{pageName}} конкретную версию {{version}}, не затрагивая текущую версию и остальную историю."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageChildren",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/children",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "children"
+              ]
+            },
+            "description": "Возвращает список дочерних страниц, вложенных в страницу {{pageName}} по иерархии."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageTags",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/tags",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "tags"
+              ]
+            },
+            "description": "Возвращает список тегов, присвоенных странице {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "AddPageTag",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain",
+                "description": "Тип тела запроса — обычный текст с именем тега."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "mytag",
+              "options": {
+                "raw": {
+                  "language": "text"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/tags",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "tags"
+              ]
+            },
+            "description": "Добавляет к странице {{pageName}} новый тег, указанный в теле запроса. Существующие теги сохраняются."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageTranslations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/translations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "translations"
+              ]
+            },
+            "description": "Возвращает список языковых версий (переводов), существующих для страницы {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "SetPageTranslation",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain",
+                "description": "Тип тела запроса — обычный текст содержимого перевода."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "Contenu traduit",
+              "options": {
+                "raw": {
+                  "language": "text"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/translations/fr",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "translations",
+                "fr"
+              ]
+            },
+            "description": "Создаёт или заменяет перевод страницы {{pageName}} на язык, указанный последним сегментом пути (в примере — fr, код языка ISO 639-1). Параметр языка используется только этим методом и задан литералом прямо в пути."
+          },
+          "response": []
+        },
+        {
+          "name": "GetPageClass",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/class",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "class"
+              ]
+            },
+            "description": "Возвращает описание XWiki-класса, определённого непосредственно на странице {{pageName}} (если страница является определением класса)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Comments",
+      "item": [
+        {
+          "name": "ListComments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/comments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "comments"
+              ]
+            },
+            "description": "Возвращает список комментариев страницы {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "AddComment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/xml",
+                "description": "Тип тела запроса — XML-представление комментария по схеме XWiki REST."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<comment xmlns='http://www.xwiki.org'>\n  <text>This is a comment</text>\n  <author>XWiki.Admin</author>\n</comment>",
+              "options": {
+                "raw": {
+                  "language": "xml"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/comments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "comments"
+              ]
+            },
+            "description": "Добавляет новый комментарий к странице {{pageName}}. Поля text (текст комментария) и author (автор) задаются в теле XML."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Attachments",
+      "item": [
+        {
+          "name": "ListAttachments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/attachments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "attachments"
+              ]
+            },
+            "description": "Возвращает список вложений (файлов), прикреплённых к странице {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "GetAttachment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/attachments/{{attachmentName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "attachments",
+                "{{attachmentName}}"
+              ]
+            },
+            "description": "Скачивает бинарное содержимое вложения {{attachmentName}} страницы {{pageName}}. Заголовок Accept не задан — сервер сам определяет Content-Type по типу файла."
+          },
+          "response": []
+        },
+        {
+          "name": "UploadAttachment",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/octet-stream",
+                "description": "Тип тела запроса — бинарные данные загружаемого файла."
+              }
+            ],
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": "{{attachmentPath}}"
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/attachments/{{attachmentName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "attachments",
+                "{{attachmentName}}"
+              ]
+            },
+            "description": "Загружает (создаёт или заменяет) вложение {{attachmentName}} на странице {{pageName}} из локального файла {{attachmentPath}}."
+          },
+          "response": []
+        },
+        {
+          "name": "DeleteAttachment",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/attachments/{{attachmentName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "attachments",
+                "{{attachmentName}}"
+              ]
+            },
+            "description": "Удаляет вложение {{attachmentName}} со страницы {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "GetAttachmentHistory",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/attachments/{{attachmentName}}/history",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "attachments",
+                "{{attachmentName}}",
+                "history"
+              ]
+            },
+            "description": "Возвращает список версий вложения {{attachmentName}} страницы {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "GetAttachmentVersion",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/attachments/{{attachmentName}}/history/{{version}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "attachments",
+                "{{attachmentName}}",
+                "history",
+                "{{version}}"
+              ]
+            },
+            "description": "Скачивает конкретную версию {{version}} вложения {{attachmentName}} страницы {{pageName}}."
+          },
+          "response": []
+        }
+      ],
+      "variable": [
+        {
+          "key": "attachmentName",
+          "value": "file.txt",
+          "type": "string",
+          "description": "Имя файла вложения на текущей странице. Общий параметр для всех методов работы с вложениями."
+        },
+        {
+          "key": "attachmentPath",
+          "value": "/path/to/file.txt",
+          "type": "string",
+          "description": "Локальный путь к файлу на диске, который Postman отправит как тело запроса при загрузке вложения (используется только методом UploadAttachment)."
+        }
+      ]
+    },
+    {
+      "name": "6. Objects",
+      "item": [
+        {
+          "name": "ListObjects",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects"
+              ]
+            },
+            "description": "Возвращает список всех объектов (экземпляров XWiki-классов), присоединённых к странице {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "AddObject",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/xml",
+                "description": "Тип тела запроса — XML-представление объекта по схеме XWiki REST."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<object xmlns='http://www.xwiki.org'>\n  <name>XWiki.XWikiUsers</name>\n  <number>0</number>\n  <classname>XWiki.XWikiUsers</classname>\n  <property name='first_name'><value>John</value></property>\n  <property name='last_name'><value>Doe</value></property>\n</object>",
+              "options": {
+                "raw": {
+                  "language": "xml"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects"
+              ]
+            },
+            "description": "Добавляет к странице {{pageName}} новый объект класса, указанного в теле запроса (classname), со значениями его свойств (property)."
+          },
+          "response": []
+        },
+        {
+          "name": "GetObject",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}"
+              ]
+            },
+            "description": "Возвращает объект №{{objectNumber}} класса {{className}} на странице {{pageName}} со значениями всех его свойств."
+          },
+          "response": []
+        },
+        {
+          "name": "UpdateObject",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/xml",
+                "description": "Тип тела запроса — XML-представление обновляемого объекта."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<object xmlns='http://www.xwiki.org'>\n  <name>XWiki.XWikiUsers</name>\n  <number>0</number>\n  <classname>XWiki.XWikiUsers</classname>\n  <property name='first_name'><value>Jane</value></property>\n  <property name='last_name'><value>Doe</value></property>\n</object>",
+              "options": {
+                "raw": {
+                  "language": "xml"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}"
+              ]
+            },
+            "description": "Полностью заменяет значения свойств объекта №{{objectNumber}} класса {{className}} на странице {{pageName}} значениями, указанными в теле запроса."
+          },
+          "response": []
+        },
+        {
+          "name": "DeleteObject",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}"
+              ]
+            },
+            "description": "Удаляет объект №{{objectNumber}} класса {{className}} со страницы {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "ListObjectProperties",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}/properties",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}",
+                "properties"
+              ]
+            },
+            "description": "Возвращает список свойств (имя + значение) объекта №{{objectNumber}} класса {{className}} на странице {{pageName}}."
+          },
+          "response": []
+        },
+        {
+          "name": "SetObjectProperties",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/xml",
+                "description": "Тип тела запроса — XML-список свойств для обновления."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<properties xmlns='http://www.xwiki.org'>\n  <property name='first_name'><value>Jane</value></property>\n  <property name='last_name'><value>Smith</value></property>\n</properties>",
+              "options": {
+                "raw": {
+                  "language": "xml"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}/properties",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}",
+                "properties"
+              ]
+            },
+            "description": "Обновляет сразу несколько перечисленных в теле запроса свойств объекта №{{objectNumber}} класса {{className}}; свойства, не указанные в теле, не изменяются."
+          },
+          "response": []
+        },
+        {
+          "name": "GetObjectProperty",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}/properties/{{propertyName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}",
+                "properties",
+                "{{propertyName}}"
+              ]
+            },
+            "description": "Возвращает значение одного свойства {{propertyName}} объекта №{{objectNumber}} класса {{className}}."
+          },
+          "response": []
+        },
+        {
+          "name": "SetObjectProperty",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/xml",
+                "description": "Тип тела запроса — XML с новым значением свойства."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "<property xmlns='http://www.xwiki.org' name='first_name'><value>Jane</value></property>",
+              "options": {
+                "raw": {
+                  "language": "xml"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/spaces/{{spaceName}}/pages/{{pageName}}/objects/{{className}}/{{objectNumber}}/properties/{{propertyName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "spaces",
+                "{{spaceName}}",
+                "pages",
+                "{{pageName}}",
+                "objects",
+                "{{className}}",
+                "{{objectNumber}}",
+                "properties",
+                "{{propertyName}}"
+              ]
+            },
+            "description": "Задаёт новое значение одного свойства {{propertyName}} объекта №{{objectNumber}} класса {{className}}, не затрагивая остальные свойства."
+          },
+          "response": []
+        }
+      ],
+      "variable": [
+        {
+          "key": "objectNumber",
+          "value": "0",
+          "type": "string",
+          "description": "Порядковый номер объекта заданного класса на странице (нумерация с 0). Общий параметр для всех методов работы с конкретным объектом в этой папке."
+        },
+        {
+          "key": "propertyName",
+          "value": "first_name",
+          "type": "string",
+          "description": "Имя свойства объекта. Общий параметр для методов GetObjectProperty и SetObjectProperty."
+        }
+      ]
+    },
+    {
+      "name": "7. Classes",
+      "item": [
+        {
+          "name": "ListClasses",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/classes",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "classes"
+              ]
+            },
+            "description": "Возвращает список всех XWiki-классов, определённых в вики {{wikiName}}. Полезно для поиска точного имени класса (например, DataFlowManage.Code.DataFlowManageClass) для параметра className/classname в других методах коллекции."
+          },
+          "response": []
+        },
+        {
+          "name": "GetClass",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/classes/{{className}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "classes",
+                "{{className}}"
+              ]
+            },
+            "description": "Возвращает описание класса {{className}}: список свойств со ссылками на их метаданные."
+          },
+          "response": []
+        },
+        {
+          "name": "ListClassProperties",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/classes/{{className}}/properties",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "classes",
+                "{{className}}",
+                "properties"
+              ]
+            },
+            "description": "Возвращает список свойств класса {{className}} с их типами (String, StaticList, DBList, DBTreeList и т.д.). Чтобы получить свойства класса DataFlowManage.Code.DataFlowManageClass, установите переменную className в это значение."
+          },
+          "response": []
+        },
+        {
+          "name": "GetClassProperty",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/classes/{{className}}/properties/{{propertyName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "classes",
+                "{{className}}",
+                "properties",
+                "{{propertyName}}"
+              ]
+            },
+            "description": "Возвращает метаданные одного свойства {{propertyName}} класса {{className}}. Для типа StaticList в ответе перечислены допустимые значения (value) — их следует использовать для фильтрации LiveTable, а не отображаемые подписи (label). Для типа DBList указан источник значений (запрос). Параметр propertyName для этого метода задаётся как значение из переменной коллекции {{propertyName}}, определённой в папке Objects — либо укажите нужное имя свойства (например, DTStatus) прямо в URL."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "8. Search",
+      "item": [
+        {
+          "name": "SearchPages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/wikis/{{wikiName}}/search?q=",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "wikis",
+                "{{wikiName}}",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "",
+                  "description": "Текст полнотекстового поискового запроса по вики {{wikiName}}. Параметр используется только этим методом, поэтому задан как литеральное значение прямо в запросе — впишите нужную поисковую строку."
+                }
+              ]
+            },
+            "description": "Выполняет полнотекстовый поиск страниц (и, опционально, других сущностей) по вики {{wikiName}} по строке q."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "9. LiveTable",
+      "item": [
+        {
+          "name": "QueryLiveTable",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "description": "Формат ответа — JSON (обеспечивается также параметром outputSyntax=plain)."
+              }
+            ],
+            "url": {
+              "raw": "{{xwikiBase}}/wiki/{{wikiName}}/get/XWiki/LiveTableResults?outputSyntax=plain&transprefix=&classname=Space.ClassName&collist=doc.fullName,doc.title,doc.author,doc.date&queryFilters=currentlanguage,hidden&tagcloud=true&limit=15&startIndex=0",
+              "host": [
+                "{{xwikiBase}}"
+              ],
+              "path": [
+                "wiki",
+                "{{wikiName}}",
+                "get",
+                "XWiki",
+                "LiveTableResults"
+              ],
+              "query": [
+                {
+                  "key": "outputSyntax",
+                  "value": "plain",
+                  "description": "Формат вывода сервиса. Значение plain обязательно, чтобы получить JSON-ответ (иначе сервис вернёт HTML-таблицу)."
+                },
+                {
+                  "key": "transprefix",
+                  "value": "",
+                  "description": "Префикс ключей локализации, используемых для перевода заголовков колонок и служебных сообщений таблицы. Зависит от конкретного приложения/класса — оставьте пустым, если локализация не нужна (пример заполненного значения см. в подпапке DataFlowManage)."
+                },
+                {
+                  "key": "classname",
+                  "value": "Space.ClassName",
+                  "description": "Полное имя XWiki-класса (Пространство.ИмяКласса), объекты которого нужно вывести в таблице. Обязательный параметр — замените на нужный класс (например, DataFlowManage.Code.DataFlowManageClass, см. подпапку DataFlowManage; полный список классов — метод ListClasses раздела 7)."
+                },
+                {
+                  "key": "collist",
+                  "value": "doc.fullName,doc.title,doc.author,doc.date",
+                  "description": "Состав и порядок колонок результата, через запятую. По умолчанию — только универсальные служебные поля документа, не зависящие от класса: doc.fullName, doc.name, doc.title, doc.author, doc.date, doc.version, doc.space, doc.wiki, doc.url. Добавьте сюда свойства выбранного класса classname (см. ListClassProperties раздела 7)."
+                },
+                {
+                  "key": "queryFilters",
+                  "value": "currentlanguage,hidden",
+                  "description": "Системные query-фильтры LiveTable: currentlanguage — только версия страницы на текущем языке интерфейса; hidden — исключает скрытые документы."
+                },
+                {
+                  "key": "tagcloud",
+                  "value": "true",
+                  "description": "Признак необходимости построения облака тегов в ответе; на состав строк таблицы не влияет."
+                },
+                {
+                  "key": "limit",
+                  "value": "15",
+                  "description": "Максимальное количество строк в ответе (размер страницы)."
+                },
+                {
+                  "key": "startIndex",
+                  "value": "0",
+                  "description": "Смещение (0-based) от начала полного набора строк — параметр пагинации. Для второй страницы при limit=15 укажите 15, для третьей — 30 и т.д. Общее число строк доступно в ответе в поле totalrows."
+                },
+                {
+                  "key": "sort",
+                  "value": "doc.date",
+                  "description": "Имя колонки для сортировки (служебное поле документа или свойство класса classname). Необязательный параметр.",
+                  "disabled": true
+                },
+                {
+                  "key": "dir",
+                  "value": "desc",
+                  "description": "Направление сортировки: asc — по возрастанию, desc — по убыванию. Учитывается только вместе с sort.",
+                  "disabled": true
+                },
+                {
+                  "key": "columnName",
+                  "value": "value",
+                  "description": "Пример фильтра по точному значению колонки: имя_параметра = имя_колонки, value = искомое значение. Замените и имя параметра (columnName), и значение на реальные — имя нужной колонки класса classname и искомое значение (для полей типа StaticList/DBList — внутреннее value, а не отображаемый label, см. GetClassProperty раздела 7).",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Универсальный метод: возвращает строки LiveTable-таблицы для объектов класса, указанного в classname, через AJAX-сервис LiveTableResults. Объединяет все варианты использования сервиса в один запрос с максимально полным набором параметров: базовые (outputSyntax, transprefix, classname, collist, queryFilters, tagcloud, limit, startIndex) включены и заданы значениями по умолчанию, а необязательные параметры сортировки (sort, dir) и фильтрации по колонке (columnName) добавлены в список, но отключены (disabled) — включите и заполните нужные перед отправкой запроса. Готовый пример для класса DataFlowManage.Code.DataFlowManageClass — в подпапке DataFlowManage."
+          },
+          "response": []
+        }
+      ],
+      "description": "Получение данных LiveTable через AJAX-сервис LiveTableResults веб-приложения XWiki (не входит в /rest, использует {{xwikiBase}}), а также через универсальный REST-ресурс query (XWQL) как альтернативу.\n\nURL сервиса LiveTableResults: {{xwikiBase}}/wiki/{{wikiName}}/get/XWiki/LiveTableResults\nОтвет — JSON (при outputSyntax=plain) с полями: totalrows (всего строк без учёта limit), returnedrows (строк в этом ответе), offset, rows[] (данные).\n\nВ корне папки — универсальный метод QueryLiveTable, применимый к объектам ЛЮБОГО класса вики (classname и collist — открытые параметры, которые нужно указать под конкретную задачу). Он объединяет все варианты использования сервиса из исходной коллекции (отличавшиеся только конкретными значениями collist/limit/startIndex/sort/filter) в один запрос с максимально полным набором параметров, часть которых по умолчанию отключена (disabled) и включается по необходимости.\n\nВ подпапке «DataFlowManage» — тот же метод, но с уже подставленными под класс DataFlowManage.Code.DataFlowManageClass (таблица «Потоки данных») значениями classname/collist/transprefix, плюс альтернативный способ выборки через XWQL (QueryByXwql).\n\nЗапросы, дублировавшие общие методы раздела «7. Classes» (ListClasses/ListClassProperties/GetClassProperty) с захардкоженным именем класса, удалены — используйте методы раздела 7, установив переменную className в нужный класс (например, DataFlowManage.Code.DataFlowManageClass)."
+    }
+  ],
+  "auth": {
+    "type": "basic",
+    "basic": [
+      {
+        "key": "username",
+        "value": "{{username}}",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "value": "{{password}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "host",
+      "value": "wiki.polyus.com",
+      "description": "Доменное имя сервера XWiki. Справочная переменная (общая точка настройки хоста)."
+    },
+    {
+      "key": "baseUrl",
+      "value": "https://wiki.polyus.com/xwiki/rest",
+      "description": "Базовый URL REST API XWiki (используется как префикс {{baseUrl}} во всех запросах разделов 0–8)."
+    },
+    {
+      "key": "xwikiBase",
+      "value": "https://wiki.polyus.com/xwiki",
+      "description": "Базовый URL веб-приложения XWiki без суффикса /rest. Используется методами LiveTable (сервис LiveTableResults не входит в REST API)."
+    },
+    {
+      "key": "wikiName",
+      "value": "eawiki",
+      "description": "Идентификатор под-вики (wiki id). Общий параметр пути wikis/{{wikiName}}/... для всех методов, обращающихся к конкретной вики (Wikis, Spaces, Pages, Comments, Attachments, Objects, Classes, Search, LiveTable)."
+    },
+    {
+      "key": "spaceName",
+      "value": "DataFlowManage",
+      "description": "Текущее рабочее пространство (space) XWiki. Общий параметр пути для методов работы с пространствами и вложенными в них страницами/комментариями/вложениями/объектами."
+    },
+    {
+      "key": "pageName",
+      "value": "WebHome",
+      "description": "Имя текущей рабочей страницы. Общий параметр пути для методов работы с конкретной страницей и её дочерними ресурсами (история версий, теги, переводы, вложения, объекты, комментарии)."
+    },
+    {
+      "key": "className",
+      "value": "XWiki.XWikiUsers",
+      "description": "Полное имя XWiki-класса в формате Пространство.ИмяКласса. Общий параметр для методов работы с объектами страницы (папка Objects) и с метаданными классов (папка Classes)."
+    },
+    {
+      "key": "version",
+      "value": "1.1",
+      "description": "Номер версии в формате major.minor. Общий параметр для методов получения/удаления конкретной версии страницы или вложения."
+    },
+    {
+      "key": "username",
+      "value": "Admin",
+      "description": "Логин для HTTP Basic аутентификации, используемой всеми методами коллекции."
+    },
+    {
+      "key": "password",
+      "value": "admin",
+      "description": "Пароль для HTTP Basic аутентификации, используемой всеми методами коллекции. В окружении PROD задаётся как секретная переменная."
+    }
+  ]
+}

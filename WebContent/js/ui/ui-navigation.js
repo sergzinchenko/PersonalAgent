@@ -265,7 +265,7 @@ Object.assign(UI.prototype, {
     const build = (parentId) => {
       const key = parentId || 'root';
       const children = (byParent[key] || []).slice()
-        .sort((a, b) => a.name.localeCompare(b.name))
+        .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
         .filter(f => !search || f.name.toLowerCase().includes(search));
       if (!children.length) return '';
       let html = '<div class="tree-node-children">';
@@ -274,6 +274,12 @@ Object.assign(UI.prototype, {
         const hasKids = (byParent[f.id] || []).length > 0;
         const server = f.mcpServerId ? mcpById.get(f.mcpServerId) : null;
         const label = server ? server.name : f.name;
+        // Папка с заданной приложением раскладкой: системная или папка
+        // встроенных инструментов. Переименования, удаления и перетаскивания
+        // у неё нет — движок всё равно откажет, а кнопка, которая всегда
+        // отвечает отказом, хуже отсутствующей.
+        const fixed = FoldersEngine.isFixed(f);
+        const icon = server ? '🧩' : (f.icon || '📁');
 
         let toggle = '';
         if (type === 'tools') {
@@ -295,9 +301,9 @@ Object.assign(UI.prototype, {
 
         html += `
           <div class="tree-node">
-            <div class="tree-node-row ${sel}${f.system ? ' system-folder' : ''}" data-folder-id="${f.id}" ${f.system ? 'data-system-folder="1"' : ''} ${server ? `data-mcp-server="${server.id}"` : ''}>
+            <div class="tree-node-row ${sel}${f.system ? ' system-folder' : ''}" data-folder-id="${f.id}" ${fixed ? 'data-fixed-folder="1"' : ''} ${f.system ? 'data-system-folder="1"' : ''} ${server ? `data-mcp-server="${server.id}"` : ''}>
               <span class="tw-toggle">${hasKids ? '▾' : '•'}</span>
-              <span class="tw-name"${f.system ? ` title="${this._escHtml(f.note || 'Системная папка')}"` : ''}>${server ? '🧩' : (f.system ? '🔒' : '📁')} ${this._escHtml(label)}</span>
+              <span class="tw-name"${f.note ? ` title="${this._escHtml(f.note)}"` : ''}>${icon} ${this._escHtml(label)}</span>
               ${toggle}
               <span class="tw-actions">
                 <button data-copy-name="${this._escHtml(label)}" data-copy-label="Название папки"
@@ -306,7 +312,7 @@ Object.assign(UI.prototype, {
                 ${server
                   ? `<button data-mcp-edit="${server.id}" title="Настроить сервер">✏</button>
                      <button data-mcp-del="${server.id}" title="Удалить сервер">✕</button>`
-                  : (f.system ? '' : `<button data-ren="${f.id}" title="Переименовать">✏</button>
+                  : (fixed ? '' : `<button data-ren="${f.id}" title="Переименовать">✏</button>
                      <button data-del="${f.id}" title="Удалить">✕</button>`)}
               </span>
             </div>
@@ -442,7 +448,7 @@ Object.assign(UI.prototype, {
       // Контейнер MCP-сервера не перетаскивается: он всегда лежит в корне
       // раздела Tools, а перемещение внутрь другой папки или другого
       // сервера не имеет смысла — сервер целиком, а не его часть.
-      if (fid && !row.hasAttribute('data-mcp-server') && !row.hasAttribute('data-system-folder')) {
+      if (fid && !row.hasAttribute('data-mcp-server') && !row.hasAttribute('data-fixed-folder')) {
         row.setAttribute('draggable', 'true');
         row.addEventListener('dragstart', (e) => {
           e.stopPropagation();
@@ -478,10 +484,8 @@ Object.assign(UI.prototype, {
         if (data.kind === 'item') {
           const rec = await this.agent.db.get(type, data.id);
           if (!rec) return;
-          if (this._isItemProtected(type, rec)) {
-            this._toast('Это системный элемент — он остаётся в папке «Системные».');
-            return;
-          }
+          const why = this._whyItemFixed(type, rec);
+          if (why) { this._toast(why); return; }
           const sourceScope = await this._mcpScopeOf(type, rec.parentId || null);
           if (sourceScope !== targetScope) return;
           rec.parentId = target; await this.agent.db.put(type, rec);
@@ -552,7 +556,10 @@ Object.assign(UI.prototype, {
     const map = {}; folders.forEach(f => map[f.id] = f);
     const parts = [];
     let cur = map[id];
-    while (cur) { parts.unshift('📁 ' + this._escHtml(cur.name)); cur = cur.parentId ? map[cur.parentId] : null; }
+    while (cur) {
+      parts.unshift((cur.icon || '📁') + ' ' + this._escHtml(cur.name));
+      cur = cur.parentId ? map[cur.parentId] : null;
+    }
     return '🏠 Корень / ' + parts.join(' / ');
   },
 
@@ -563,9 +570,24 @@ Object.assign(UI.prototype, {
   // забыли закрыть.
   _isItemProtected(type, item) {
     if (!item) return false;
-    if (type === 'tools') return !!item.locked;
+    // Встроенный инструмент лежит в своей папке и остаётся в ней:
+    // раскладку задаёт приложение (см. ToolsEngine.PLACEMENT).
+    if (type === 'tools') return !!item.locked || !!item.builtin;
     if (type === 'skills') return SkillsEngine.isProtected(item);
     return false;
+  },
+
+
+  // Почему элемент не переносится — текстом, который можно показать.
+  // Причин две, и они разные: «системный» и «встроенный» — не одно и то
+  // же, а сообщение «это системный элемент» про обычный get_current_time
+  // просто неправда.
+  _whyItemFixed(type, item) {
+    if (!this._isItemProtected(type, item)) return '';
+    if (type === 'tools' && !item.locked) {
+      return 'Встроенный инструмент остаётся в своей папке: раскладку встроенных задаёт приложение.';
+    }
+    return 'Это системный элемент — он остаётся в папке «Системные».';
   },
 
 
@@ -573,13 +595,21 @@ Object.assign(UI.prototype, {
   async _renderPanelItems(type, mount, allItems, renderItemCard, bindItemEvents) {
     if (!mount) return;
     const sel = this.folderSelection[type];
-    const items = allItems.filter(it => (it.parentId || null) === sel);
-    const systemFolder = await this.agent.folders.isSystem(sel);
+    // Порядок — всегда по алфавиту. Порядок добавления в базу для человека
+    // случаен: найти нужную карточку в нём можно только перебором, и он
+    // ещё и разный на разных машинах.
+    const items = allItems
+      .filter(it => (it.parentId || null) === sel)
+      .sort((a, b) => String(a.name || a.title || '').localeCompare(String(b.name || b.title || ''), 'ru'));
+    const folder = sel ? await this.agent.db.get('folders', sel) : null;
     const compact = !!this.panelCompact[type];
 
-    const note = systemFolder
+    const note = folder && folder.system
       ? `<div class="folder-note">🔒 Системная папка: её содержимое нельзя переносить, переименовывать и удалять.</div>`
-      : '';
+      : (folder && folder.builtin
+        ? `<div class="folder-note">${folder.icon || '📁'} Папка встроенных инструментов: сами инструменты остаются здесь, ` +
+          `но свои можно и добавить, и убрать.</div>`
+        : '');
     const crumb = `<div class="folder-breadcrumb">${await this._folderPath(type, sel)}</div>${note}`;
 
     const grid = items.length

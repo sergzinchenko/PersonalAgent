@@ -119,6 +119,8 @@ Object.assign(ToolsEngine.prototype, {
               'Выключенный инструмент не передаётся модели и не выполняется, даже если его вызвать по имени.',
               'На карточке инструмента видно, к каким навыкам он привязан, и кнопкой «🧩 Навыки» этот список меняется; папку целиком можно включить или выключить одним переключателем в дереве.',
               'Часть инструментов системные: они собраны в папке «Системные», включены всегда, и ни выключить, ни перенести их нельзя — на них держатся базовые механизмы агента (память, вопрос пользователю, объяснение устройства, самодиагностика, имя, история доработок, работа по частям).',
+              'Остальные встроенные инструменты разложены по папкам со значками — «Чаты», «Файлы», «Сеть», «Утилиты», «Confluence», «xWiki» и другим. Эти папки и их состав задаёт само приложение: переименовать, удалить или растащить встроенные инструменты по своим папкам нельзя, а вот класть в них свои — можно.',
+              'Списки везде отсортированы по алфавиту: сначала папки, потом сами инструменты и навыки.',
             ],
           },
           files: {
@@ -1486,10 +1488,25 @@ Object.assign(ToolsEngine.prototype, {
         // Системные инструменты и навыки живут в папке «Системные» и
         // остаются в ней: место — часть их защиты, а не украшение
         // (см. engines/folders-engine.js).
-        const protectedItem = kind === 'tool' ? !!item.locked
-          : kind === 'skill' ? SkillsEngine.isProtected(item) : false;
-        if (protectedItem) {
-          return { error: 'Элемент «' + (item.name || item.title) + '» системный — он остаётся в папке «Системные».' };
+        if (kind === 'tool' && item.locked) {
+          return { error: 'Инструмент «' + item.name + '» системный — он остаётся в папке «Системные».' };
+        }
+        if (kind === 'skill' && SkillsEngine.isProtected(item)) {
+          return { error: 'Навык «' + item.name + '» системный — он остаётся в папке «Системные».' };
+        }
+        // Встроенный инструмент лежит в папке своего набора, и раскладку
+        // задаёт приложение: перенос не сохранился бы всё равно — при
+        // следующей загрузке инструмент вернулся бы на место
+        // (см. ToolsEngine.PLACEMENT). Молчаливый откат хуже честного отказа.
+        if (kind === 'tool' && item.builtin) {
+          const homeId = ToolsEngine.folderOfBuiltin(item);
+          const home = homeId ? await this.db.get('folders', homeId) : null;
+          return {
+            error: 'Инструмент «' + item.name + '» встроенный — он остаётся в папке «' +
+              (home ? home.name : 'своего набора') + '».',
+            hint: 'Раскладку встроенных инструментов задаёт приложение. Свои инструменты ' +
+              'и наборы, импортированные из описаний API, переносятся свободно.',
+          };
         }
 
         const target = await this._resolveFolderId(type, params.to, { createMissing: true });
@@ -1806,9 +1823,15 @@ Object.assign(ToolsEngine.prototype, {
 
         for (const kind of kinds) {
           const type = kind + 's';
+          // Порядок ответа — тот же, что видит пользователь: сначала папки,
+          // потом элементы, и то и другое по алфавиту. Иначе модель
+          // пересказывает раскладку в порядке записи в базу, а человек
+          // смотрит на экран и не находит там названного «первым».
+          const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru');
           const folders = (await this.db.getAll('folders'))
             .filter(f => f.type === type)
-            .map(f => ({ id: f.id, name: f.name, parentId: f.parentId || null }));
+            .map(f => ({ id: f.id, name: f.name, parentId: f.parentId || null }))
+            .sort(byName);
           const items = (await this.db.getAll(type)).map(it => {
             const row = {
               id: it.id, name: it.name || it.title,
@@ -1824,7 +1847,7 @@ Object.assign(ToolsEngine.prototype, {
               if (users.length) row.usedBySkills = users;
             }
             return row;
-          });
+          }).sort(byName);
           out[type] = { folders, items };
         }
         return out;

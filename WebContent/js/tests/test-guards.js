@@ -102,17 +102,26 @@ class FakeDB {
   await folders.ensureSeeded();
 
   // ══════════════════════════════════════════════
-  console.log('\n── Системные папки заводятся сами ──');
+  console.log('\n── Папки приложения заводятся сами ──');
   const all = await db.getAll('folders');
-  ok('заведены все четыре папки', all.length === 4, String(all.length));
+  const seeded = X.FoldersEngine.SEEDED.length;
+  ok('заведены все сеяные папки', all.length === seeded, String(all.length));
   ok('у tools есть «Системные»', all.some(f => f.type === 'tools' && f.name === 'Системные' && f.system));
   ok('у skills есть «Системные», «Сервисные», «Прикладные»',
      ['Системные', 'Сервисные', 'Прикладные'].every(n => all.some(f => f.type === 'skills' && f.name === n)));
   ok('системными помечены только две', all.filter(f => f.system).length === 2);
   ok('сеяные папки лежат в корне', all.every(f => (f.parentId || null) === null));
+  ok('у каждой сеяной папки есть значок', all.every(f => !!f.icon), String(all.filter(f => !f.icon).length));
+
+  // Папки встроенных инструментов: раскладку задаёт приложение, поэтому
+  // они защищены — но мягче системных (см. engines/folders-engine.js).
+  const builtinFolders = all.filter(f => f.builtin);
+  ok('заведены папки встроенных инструментов', builtinFolders.length >= 8, String(builtinFolders.length));
+  ok('все они в разделе tools', builtinFolders.every(f => f.type === 'tools'));
+  ok('и ни одна не помечена системной', builtinFolders.every(f => !f.system));
 
   await folders.ensureSeeded();
-  ok('повторный запуск не плодит дубли', (await db.getAll('folders')).length === 4);
+  ok('повторный запуск не плодит дубли', (await db.getAll('folders')).length === seeded);
 
   // Порча записи в базе не должна снимать защиту.
   const sysSkills = await db.get('folders', 'folder_skills_system');
@@ -121,6 +130,17 @@ class FakeDB {
   const repaired = await db.get('folders', 'folder_skills_system');
   ok('испорченная системная папка чинится при запуске',
      repaired.name === 'Системные' && repaired.system === true && repaired.parentId === null);
+
+  console.log('\n── Папку встроенных инструментов нельзя трогать ──');
+  ok('переименовать нельзя', !!(await folders.rename('folder_tools_utils', 'Мои')).error);
+  ok('имя не изменилось', (await db.get('folders', 'folder_tools_utils')).name === 'Утилиты');
+  ok('переместить нельзя', !!(await folders.move('folder_tools_utils', 'folder_tools_net')).error);
+  ok('удалить нельзя', !!(await folders.remove('folder_tools_utils', 'tools')).error);
+  ok('папка на месте', !!(await db.get('folders', 'folder_tools_utils')));
+  // Отличие от системной: своё содержимое класть можно.
+  const sub = await folders.create('tools', 'Мои утилиты', 'folder_tools_utils');
+  ok('подпапка внутри неё создаётся', !!sub.id && !sub.error);
+  await db.delete('folders', sub.id);
 
   console.log('\n── Системную папку нельзя трогать ──');
   ok('переименовать нельзя', !!(await folders.rename('folder_skills_system', 'Другое')).error);

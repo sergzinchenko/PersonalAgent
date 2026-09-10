@@ -2,11 +2,17 @@
 //  ТЕСТ: инструменты Confluence и xWiki
 // ============================================================
 //
-// Проверяет Цикл 35: два набора инструментов к внутренним вики. Главное,
-// за чем здесь следят, — не «запрос собрался», а то, что СЕКРЕТ НЕ ТЕЧЁТ:
-// ни в ответах инструментов, ни в контексте модели. Плюс маршрут через
-// локальный прокси, разбор ошибок доступа и защита существующих страниц
-// от перезаписи по недоразумению.
+// Два набора инструментов к внутренним вики. Главное, за чем здесь
+// следят, — не «запрос собрался», а то, что СЕКРЕТ НЕ ТЕЧЁТ: ни в ответах
+// инструментов, ни в контексте модели. Плюс маршрут через локальный
+// прокси, разбор ошибок доступа и защита существующих страниц от
+// перезаписи по недоразумению.
+//
+// Отдельная забота — АДРЕСА ЗАПРОСОВ: они взяты из коллекций Postman
+// (api/Confluence-REST-API.json, api/XWiki-REST-API.json), и проверка
+// сверяет именно их. Опечатка в пути не падает и не выглядит ошибкой:
+// сервер отвечает 404, а инструмент честно передаёт «объект не найден» —
+// то есть неправильный путь неотличим от отсутствующей страницы.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -63,8 +69,9 @@ const sandbox = {
       status: r.status ?? 200,
       statusText: r.statusText || 'OK',
       ok: (r.status ?? 200) < 400,
-      headers: { get: () => 'application/json' },
+      headers: { get: () => r.contentType || 'application/json' },
       text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {})),
+      blob: async () => ({ size: String(r.body ?? '').length, __blob: true, body: r.body }),
     };
   },
 };
@@ -111,12 +118,24 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
 
   console.log('\n── Описания инструментов ──');
   const names = tools.map(t => t.name);
-  ok('заведены все инструменты Confluence',
-     ['confluence_configure', 'confluence_status', 'confluence_search', 'confluence_get_page',
-      'confluence_create_page', 'confluence_update_page', 'confluence_list_spaces'].every(n => names.includes(n)));
-  ok('заведены все инструменты xWiki',
-     ['xwiki_configure', 'xwiki_status', 'xwiki_search', 'xwiki_get_page',
-      'xwiki_create_page', 'xwiki_update_page', 'xwiki_list_spaces'].every(n => names.includes(n)));
+  const CONFLUENCE_TOOLS = [
+    'confluence_configure', 'confluence_status', 'confluence_list_spaces', 'confluence_list_pages',
+    'confluence_search', 'confluence_get_page', 'confluence_create_page', 'confluence_update_page',
+    'confluence_delete_page', 'confluence_labels', 'confluence_comments', 'confluence_attachments',
+    'confluence_convert_markup',
+  ];
+  const XWIKI_TOOLS = [
+    'xwiki_configure', 'xwiki_status', 'xwiki_list_wikis', 'xwiki_list_spaces', 'xwiki_list_pages',
+    'xwiki_search', 'xwiki_get_page', 'xwiki_create_page', 'xwiki_update_page', 'xwiki_delete_page',
+    'xwiki_history', 'xwiki_comments', 'xwiki_attachments', 'xwiki_objects',
+  ];
+  ok('заведены все инструменты Confluence', CONFLUENCE_TOOLS.every(n => names.includes(n)),
+     CONFLUENCE_TOOLS.filter(n => !names.includes(n)).join(', '));
+  ok('заведены все инструменты xWiki', XWIKI_TOOLS.every(n => names.includes(n)),
+     XWIKI_TOOLS.filter(n => !names.includes(n)).join(', '));
+  ok('инструменты вики разложены по своим папкам',
+     tools.filter(t => CONFLUENCE_TOOLS.includes(t.name)).every(t => t.parentId === 'folder_tools_confluence') &&
+     tools.filter(t => XWIKI_TOOLS.includes(t.name)).every(t => t.parentId === 'folder_tools_xwiki'));
   const wikiTools = tools.filter(t => /^(confluence|xwiki)_/.test(t.name));
   ok('все выключены по умолчанию', wikiTools.every(t => t.enabled === false));
   ok('в описаниях запрещено спрашивать секрет в чате',
@@ -134,12 +153,18 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
 
   console.log('\n── Сохранение доступа ──');
   await engine._wikiSaveConfig('confluence', { baseUrl: 'https://conf.corp.local/', secret: 'PAT-СЕКРЕТ' });
-  await engine._wikiSaveConfig('xwiki', { baseUrl: 'https://xwiki.corp.local', user: 'ivanov', secret: 'ПАРОЛЬ' });
+  await engine._wikiSaveConfig('xwiki', { baseUrl: 'https://xwiki.corp.local/xwiki/rest', user: 'ivanov', secret: 'ПАРОЛЬ', wiki: 'eawiki' });
 
   const rec = await db.get('settings', 'wiki_confluence');
   ok('секрет лёг в БД зашифрованным, а не текстом',
      rec.secret === 'enc(PAT-СЕКРЕТ)' && !JSON.stringify(rec).includes('"PAT-СЕКРЕТ"'), JSON.stringify(rec));
   ok('хвостовой слэш в адресе убран', rec.baseUrl === 'https://conf.corp.local');
+  // В коллекции Postman baseUrl xWiki заканчивается на /rest — человек
+  // скопирует его оттуда, и путь не должен удвоиться.
+  ok('лишний «/rest» в адресе xWiki отброшен',
+     (await db.get('settings', 'wiki_xwiki')).baseUrl === 'https://xwiki.corp.local/xwiki',
+     (await db.get('settings', 'wiki_xwiki')).baseUrl);
+  ok('имя вики сохранено', (await db.get('settings', 'wiki_xwiki')).wiki === 'eawiki');
   ok('настройки переживают перезапуск (лежат в БД, а не в памяти движка)',
      (await new ToolsEngine(db)._wikiConfig('confluence')).configured === true);
 
@@ -148,9 +173,16 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
   const st = await call('confluence_status');
   ok('confluence_status не отдаёт токен', !JSON.stringify(st).includes('PAT-СЕКРЕТ'), JSON.stringify(st));
   ok('но подтверждает, что настроено', st.configured === true && st.baseUrl === 'https://conf.corp.local');
+  responder = () => ({ body: { wikis: [{ id: 'eawiki', name: 'eawiki' }] } });
   const stx = await call('xwiki_status');
   ok('xwiki_status не отдаёт пароль', !JSON.stringify(stx).includes('ПАРОЛЬ'), JSON.stringify(stx));
   ok('имя учётной записи при этом видно', stx.user === 'ivanov');
+  ok('и имя вики тоже', stx.wiki === 'eawiki');
+
+  // Опечатка в имени вики иначе выглядела бы как «страницы нет».
+  responder = () => ({ body: { wikis: [{ id: 'xwiki', name: 'xwiki' }] } });
+  const stray = await call('xwiki_status');
+  ok('несуществующая вика замечена сразу', /eawiki/.test(stray.warning || ''), JSON.stringify(stray.warning));
 
   console.log('\n── Авторизация в запросе ──');
   reset();
@@ -226,6 +258,146 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
   const put = calls.find(c => (c.init.method || '') === 'PUT');
   ok('содержимое ушло формой', /content=%D0%BD%D0%BE%D0%B2%D0%BE%D0%B5/.test(put.init.body), put.init.body);
 
+  console.log('\n── Имя вики попадает в адрес ──');
+  reset();
+  responder = () => ({ body: { pageSummaries: [] } });
+  await call('xwiki_list_pages', { space: 'Docs.Team' });
+  // Вложенные пространства адресуются повторяющимся /spaces — иначе
+  // страница второго уровня не находится вовсе.
+  ok('вика и вложенные пространства собраны в путь',
+     decodeURIComponent(calls[0].url).includes('/rest/wikis/eawiki/spaces/Docs/spaces/Team/pages'), calls[0].url);
+
+  reset();
+  responder = () => ({ body: { searchResults: [] } });
+  await call('xwiki_search', { query: 'x', wiki: 'other' });
+  ok('вику можно указать в вызове, не меняя настройки',
+     decodeURIComponent(calls[0].url).includes('/rest/wikis/other/search'), calls[0].url);
+
+  console.log('\n── Адреса из коллекции Postman ──');
+  const urlOf = async (name, args, body) => {
+    reset();
+    responder = () => ({ body: body ?? {} });
+    await call(name, args);
+    // Адрес идёт через прокси и потому закодирован целиком — разбираем
+    // обратно, иначе проверка пути сравнивала бы проценты.
+    return calls.map(c => decodeURIComponent(c.url) + ' [' + (c.init.method || 'GET') + ']').join(' | ');
+  };
+
+  ok('confluence_list_pages: дети страницы',
+     (await urlOf('confluence_list_pages', { parent_id: '42' })).includes('/rest/api/content/42/child/page'));
+  ok('confluence_list_pages: содержимое пространства',
+     (await urlOf('confluence_list_pages', { space: 'DOCS' })).includes('/rest/api/space/DOCS/content/page'));
+  ok('confluence_labels: список меток',
+     (await urlOf('confluence_labels', { page_id: '7' })).includes('/rest/api/content/7/label'));
+  ok('confluence_comments: комментарии страницы',
+     (await urlOf('confluence_comments', { page_id: '7' })).includes('/rest/api/content/7/child/comment'));
+  ok('confluence_attachments: вложения страницы',
+     (await urlOf('confluence_attachments', { page_id: '7' })).includes('/rest/api/content/7/child/attachment'));
+  ok('confluence_convert_markup: преобразование тела',
+     (await urlOf('confluence_convert_markup', { value: 'h1. Заголовок' }, { value: '<h1>Заголовок</h1>' }))
+       .includes('/rest/api/contentbody/convert/storage'));
+  ok('xwiki_history: история страницы',
+     (await urlOf('xwiki_history', { space: 'Main', page: 'WebHome' }, { historySummaries: [] }))
+       .includes('/rest/wikis/eawiki/spaces/Main/pages/WebHome/history'));
+  ok('xwiki_objects: свойства объекта',
+     (await urlOf('xwiki_objects', { action: 'get', space: 'Main', page: 'WebHome', class_name: 'XWiki.XWikiUsers', number: 0 },
+       { properties: [] })).includes('/pages/WebHome/objects/XWiki.XWikiUsers/0/properties'));
+
+  console.log('\n── Confluence: чем именно живёт правка ──');
+  // Исходник страницы нужен, чтобы правка не стирала разметку: format
+  // «text» для этого не годится, и инструмент должен уметь отдать storage.
+  responder = () => ({ body: {
+    id: '9', title: 'Регламент', space: { key: 'HR' }, version: { number: 2 },
+    ancestors: [{ id: '1', title: 'Корень' }],
+    body: { storage: { value: '<p>Абзац</p>' } },
+  } });
+  const src = await call('confluence_get_page', { page_id: '9', format: 'storage' });
+  ok('format: storage отдаёт разметку как есть', src.content === '<p>Абзац</p>', JSON.stringify(src.content));
+  ok('и говорит, в каком формате отдал', src.format === 'storage');
+  ok('родитель страницы виден', src.parent && src.parent.id === '1');
+  const txt = await call('confluence_get_page', { page_id: '9' });
+  ok('по умолчанию — текст без разметки', txt.content === 'Абзац' && txt.format === 'text', JSON.stringify(txt.content));
+
+  console.log('\n── Метки, обсуждения, вложения ──');
+  reset();
+  responder = () => ({ body: { results: [{ name: 'важное', prefix: 'global' }] } });
+  const added = await call('confluence_labels', { action: 'add', page_id: '7', labels: ['важное', 'hr'] });
+  ok('метки добавляются массивом объектов, как в коллекции',
+     JSON.parse(calls[0].init.body).every(l => l.prefix === 'global' && l.name), calls[0].init.body);
+  ok('и инструмент подтверждает, что именно добавил', added.success === true && added.added.length === 2);
+
+  reset();
+  responder = () => ({ body: { id: 'c1' } });
+  await call('confluence_comments', { action: 'add', page_id: '7', content: '<p>Замечание</p>' });
+  const commentBody = JSON.parse(calls[0].init.body);
+  ok('комментарий уходит контейнером к странице',
+     commentBody.type === 'comment' && commentBody.container.id === '7', calls[0].init.body);
+
+  responder = () => ({ body: { results: [{ id: 'att1', title: 'смета.xlsx', extensions: { fileSize: 10 } }] } });
+  const atts = await call('confluence_attachments', { page_id: '7' });
+  ok('вложения перечислены с именами и размером',
+     atts.attachments[0].name === 'смета.xlsx' && atts.attachments[0].size === 10);
+
+  console.log('\n── Удаление — отдельный разговор ──');
+  reset();
+  let deleteSeen = [];
+  responder = (url, init) => {
+    deleteSeen.push({ url, method: init.method || 'GET' });
+    return { body: { id: '7', title: 'Черновик', space: { key: 'HR' } } };
+  };
+  const del = await call('confluence_delete_page', { page_id: '7' });
+  ok('перед удалением страница прочитана — чтобы назвать её пользователю',
+     del.title === 'Черновик', JSON.stringify(del));
+  ok('и удаление ушло методом DELETE',
+     deleteSeen.some(c => c.method === 'DELETE' && /status=current/.test(decodeURIComponent(c.url))));
+  ok('сказано, что страница ушла в корзину, а не исчезла', /корзин/.test(del.note || ''));
+
+  reset();
+  responder = (url, init) => ((init.method || 'GET') === 'DELETE'
+    ? { body: {} } : { body: { space: 'Main', name: 'Черновик', title: 'Черновик', version: '1.1' } });
+  const delX = await call('xwiki_delete_page', { space: 'Main', page: 'Черновик' });
+  ok('в xWiki тоже сначала читаем, потом удаляем', delX.title === 'Черновик', JSON.stringify(delX));
+  ok('и честно сказано, что корзины нет', /необратим/.test(delX.note || ''));
+
+  console.log('\n── xWiki: исходник, версии, объекты ──');
+  responder = () => ({ body: { space: 'Main', name: 'WebHome', title: 'Главная', version: '2.1',
+    syntax: 'xwiki/2.1', content: '= Заголовок =\n\n* пункт' } });
+  const srcX = await call('xwiki_get_page', { space: 'Main', page: 'WebHome' });
+  ok('по умолчанию отдаётся исходник, а не «очищенный» текст',
+     srcX.content === '= Заголовок =\n\n* пункт' && srcX.format === 'source', JSON.stringify(srcX.content));
+
+  reset();
+  responder = () => ({ body: '<html><body><h1>Заголовок</h1><p>Текст</p></body></html>', contentType: 'text/html' });
+  const textX = await call('xwiki_get_page', { space: 'Main', page: 'WebHome', format: 'text' });
+  ok('format: text просит у сервера отрендеренную страницу',
+     calls[0].init.headers.Accept === 'text/html', calls[0].init.headers.Accept);
+  ok('и возвращает её без разметки',
+     textX.content.includes('Заголовок') && !textX.content.includes('<h1>'), JSON.stringify(textX.content));
+
+  reset();
+  responder = () => ({ body: { space: 'Main', name: 'WebHome', content: 'старое' } });
+  await call('xwiki_get_page', { space: 'Main', page: 'WebHome', version: '1.3' });
+  ok('старая версия читается по своему адресу',
+     decodeURIComponent(calls[0].url).includes('/pages/WebHome/history/1.3'), calls[0].url);
+
+  reset();
+  responder = () => ({ body: {} });
+  await call('xwiki_comments', { action: 'add', space: 'Main', page: 'WebHome', text: 'Замечание <про> «кавычки»' });
+  ok('комментарий xWiki уходит XML, как в коллекции',
+     calls[0].init.headers['Content-Type'] === 'application/xml' &&
+     /<comment[^>]*><text>/.test(calls[0].init.body), calls[0].init.body);
+  ok('и угловые скобки в тексте экранированы, а не ломают XML',
+     calls[0].init.body.includes('&lt;про&gt;') && !calls[0].init.body.includes('<про>'), calls[0].init.body);
+
+  reset();
+  await call('xwiki_objects', {
+    action: 'set', space: 'Main', page: 'WebHome',
+    class_name: 'Space.ClassName', number: 0, properties: { status: 'готово' },
+  });
+  ok('свойства объекта пишутся телом <properties>',
+     /<properties[^>]*><property name="status"><value>готово<\/value>/.test(calls[0].init.body), calls[0].init.body);
+  ok('и только перечисленные', calls[0].init.body.split('<property ').length === 2);
+
   console.log('\n── Ошибки доступа ──');
   responder = () => ({ status: 401, body: 'unauthorized' });
   const denied = await call('confluence_search', { text: 'x' });
@@ -240,18 +412,45 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
   console.log('\n── Категории безопасности ──');
   const sec = new SecurityEngine();
   ok('чтение — read', sec.categoryOf('confluence_search') === 'read' && sec.categoryOf('xwiki_get_page') === 'read');
+  ok('перечни и история — тоже read',
+     sec.categoryOf('confluence_list_pages') === 'read' && sec.categoryOf('xwiki_history') === 'read' &&
+     sec.categoryOf('xwiki_list_wikis') === 'read');
   ok('запись — write', sec.categoryOf('confluence_update_page') === 'write' && sec.categoryOf('xwiki_create_page') === 'write');
   ok('настройка — write', sec.categoryOf('confluence_configure') === 'write');
+  // Инструмент с несколькими действиями числится по самому весомому:
+  // разрешение «посмотреть метки» не должно заодно разрешать их менять.
+  ok('list/add/set — по весомому действию, write',
+     sec.categoryOf('confluence_labels') === 'write' && sec.categoryOf('confluence_comments') === 'write' &&
+     sec.categoryOf('xwiki_objects') === 'write');
+  ok('удаление страницы — destroy',
+     sec.categoryOf('confluence_delete_page') === 'destroy' && sec.categoryOf('xwiki_delete_page') === 'destroy');
+  ok('у каждого инструмента вики есть категория',
+     CONFLUENCE_TOOLS.concat(XWIKI_TOOLS).every(n => !!SecurityEngine.CATEGORY[n]),
+     CONFLUENCE_TOOLS.concat(XWIKI_TOOLS).filter(n => !SecurityEngine.CATEGORY[n]).join(', '));
+  // Чужой текст в ходе закрывает самомодификацию до конца хода.
+  ok('обсуждения и объекты считаются внешним источником',
+     SecurityEngine.EXTERNAL_SOURCES.has('confluence_comments') &&
+     SecurityEngine.EXTERNAL_SOURCES.has('xwiki_comments') &&
+     SecurityEngine.EXTERNAL_SOURCES.has('xwiki_objects'));
 
   console.log('\n── Навыки ──');
   const skills = new SkillsEngine(db);
   const all = await skills.loadSkills();
   const sc = all.find(s => s.id === 'skill_confluence');
   const sx = all.find(s => s.id === 'skill_xwiki');
+  const idOf = (n) => tools.find(t => t.name === n).id;
   ok('навык Confluence заведён и выключен', !!sc && sc.enabled === false);
-  ok('к нему привязаны все семь инструментов', skills.toolIdsOf(sc).length === 7, String(skills.toolIdsOf(sc).length));
+  ok('к нему привязаны все его инструменты',
+     CONFLUENCE_TOOLS.every(n => skills.toolIdsOf(sc).includes(idOf(n))) &&
+     skills.toolIdsOf(sc).length === CONFLUENCE_TOOLS.length, String(skills.toolIdsOf(sc).length));
   ok('навык xWiki заведён и выключен', !!sx && sx.enabled === false);
-  ok('к нему привязаны все семь инструментов', skills.toolIdsOf(sx).length === 7);
+  ok('к нему привязаны все его инструменты',
+     XWIKI_TOOLS.every(n => skills.toolIdsOf(sx).includes(idOf(n))) &&
+     skills.toolIdsOf(sx).length === XWIKI_TOOLS.length, String(skills.toolIdsOf(sx).length));
+  ok('промпты объясняют, чем исходник отличается от текста',
+     /storage/.test(sc.systemPrompt) && /source/.test(sx.systemPrompt));
+  ok('и предупреждают, что содержимое вложения агенту не передаётся',
+     /НЕ передаётся/.test(sc.systemPrompt) && /НЕ передаётся/.test(sx.systemPrompt));
   ok('промпт запрещает принимать токен сообщением',
      /не проси прислать токен/.test(sc.systemPrompt) && /не проси прислать пароль/.test(sx.systemPrompt));
   ok('промпт требует согласовывать правку', /дождись согласия|с его согласия/.test(sx.systemPrompt + sc.systemPrompt));
@@ -260,7 +459,8 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
 
   // Диалог включения инструментов навыка (Цикл 30) должен предложить именно их.
   const off = await skills.disabledToolsOf('skill_confluence');
-  ok('при включении навыка предложат включить его инструменты', off.length === 7, String(off.length));
+  ok('при включении навыка предложат включить его инструменты',
+     off.length === CONFLUENCE_TOOLS.length, String(off.length));
 
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);

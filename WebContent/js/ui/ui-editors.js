@@ -222,13 +222,23 @@ Object.assign(UI.prototype, {
         <div class="form-group">
           <label>Адрес сервера</label>
           <input id="wk_url" value="${this._escHtml(saved?.baseUrl || '')}"
-                 placeholder="${isConfluence ? 'https://confluence.corp.local' : 'https://xwiki.corp.local'}">
+                 placeholder="${isConfluence ? 'https://confluence.corp.local' : 'https://wiki.corp.local/xwiki'}">
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
-            Без «/rest» на конце — путь инструмент добавит сам.
+            Путь к REST инструмент добавит сам: «/rest» на конце можно не писать
+            (а если написали — не страшно).
           </div>
         </div>
 
         ${isConfluence ? '' : `
+        <div class="form-group">
+          <label>Имя вики</label>
+          <input id="wk_wiki" value="${this._escHtml(saved?.wiki || 'xwiki')}" placeholder="xwiki">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+            На одной установке xWiki бывает несколько вик, и пространства у каждой свои.
+            Обычно «xwiki»; если у вас отдельная — впишите её имя, иначе страницы не найдутся.
+          </div>
+        </div>
+
         <div class="form-group">
           <label>Имя учётной записи</label>
           <input id="wk_user" value="${this._escHtml(saved?.user || '')}" placeholder="ivanov">
@@ -257,6 +267,7 @@ Object.assign(UI.prototype, {
 
         const baseUrl = (document.getElementById('wk_url')?.value || '').trim();
         const user = (document.getElementById('wk_user')?.value || '').trim();
+        const wiki = (document.getElementById('wk_wiki')?.value || '').trim();
         const secret = document.getElementById('wk_secret')?.value || '';
 
         if (!baseUrl) return resolve({ cancelled: true, reason: 'не указан адрес' });
@@ -266,10 +277,11 @@ Object.assign(UI.prototype, {
         const res = await this.agent.tools._wikiSaveConfig(kind, {
           baseUrl,
           user: user || saved?.user || '',
+          wiki: wiki || saved?.wiki || '',
           secret: keepOld ? await SecretsVault.decrypt(this.agent.db, saved.secret) : secret,
         });
         this.renderTools?.();
-        resolve({ baseUrl: res.baseUrl, user: res.user });
+        resolve({ baseUrl: res.baseUrl, user: res.user, wiki: res.wiki });
       }, () => { if (!settled) resolve({ cancelled: true }); });
     });
   },

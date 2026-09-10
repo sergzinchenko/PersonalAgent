@@ -277,8 +277,10 @@ class FakeDB {
 
   const builtin = await dst.get('tools', 'builtin_time');
   ok('у встроенного инструмента описание осталось местным', builtin.description === 'НОВОЕ описание');
-  ok('а папка и включённость взяты из копии',
-    builtin.parentId === 'f_my' && builtin.enabled === false);
+  ok('включённость взята из копии', builtin.enabled === false);
+  // Раскладку встроенных задаёт приложение: принятая из файла папка всё
+  // равно вернулась бы на место при следующей загрузке.
+  ok('а папка осталась местной', builtin.parentId === 'folder_tools_system', String(builtin.parentId));
 
   ok('системная папка переиспользована, а не заведена заново',
     (await dst.getAll('folders')).filter(f => f.id === 'folder_tools_system').length === 1);

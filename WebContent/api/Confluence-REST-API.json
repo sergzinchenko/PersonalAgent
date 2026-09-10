@@ -1,0 +1,939 @@
+{
+	"info": {
+		"_postman_id": "a41714c5-2b51-4784-a0eb-2edd5ee8301d",
+		"name": "Confluence REST API",
+		"description": "Коллекция для работы с Confluence REST API (Cloud & Server). Поддерживает v1 (/rest/api) и v2 (/api/v2) эндпоинты.\n\nАутентификация задана на уровне коллекции (Bearer-токен {{api_token}} — Personal Access Token, подходит для Confluence Server/Data Center и для Cloud). Если вместо PAT нужен классический для Cloud вариант Basic Auth (email + API token), переключите тип авторизации коллекции на Basic и используйте переменные {{username}} и {{api_token}} как логин/пароль.\n\nСтруктура переменных: общие для большинства/всех методов параметры (адрес сервера, идентификаторы текущей страницы/пространства/родителя/пользователя) вынесены в переменные коллекции; параметры, общие только для методов одной папки (например, attachment_id в разделе Attachments) — заданы как переменные этой папки; параметры, используемые только в одном методе (label_name, comment_id, group_name, поисковая строка CQL) — заданы литералами прямо в соответствующем методе.\n\nРаздел «📝 Confluence API v2 (Cloud)» — не дубли, а отдельная, более новая версия части эндпоинтов (Pages, Spaces), доступная только в Confluence Cloud и имеющая другой формат данных; сохранён как самостоятельная подпапка, а не объединён с v1.\n\nМетод PUT /content/{id} (обновление страницы) из исходной коллекции существовал в двух почти идентичных вариантах — «Update Page» (изменение заголовка/содержимого) и «Move Page» (смена родителя) — они объединены в один метод UpdatePage с максимально полным набором полей тела запроса (title, body, ancestors, version); поле ancestors можно не указывать, если менять родителя не требуется.\n\nИз переменных коллекции удалена неиспользуемая content_id (дублировала по смыслу уже существующие page_id/comment_id/attachment_id и нигде не применялась).",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "🔐 Auth",
+			"item": [
+				{
+					"name": "GetCurrentUser",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/user/current",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "user", "current"]
+						},
+						"description": "Проверка аутентификации: возвращает данные пользователя, от имени которого выполнен запрос (по текущему токену). Успешный ответ 200 подтверждает, что {{base_url}} и {{api_token}} настроены верно."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📄 Spaces",
+			"item": [
+				{
+					"name": "ListSpaces",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/space?limit=25&start=0&type=global",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "space"],
+							"query": [
+								{ "key": "limit", "value": "25", "description": "Максимальное количество пространств в ответе (размер страницы)." },
+								{ "key": "start", "value": "0", "description": "Смещение (0-based) для постраничного вывода." },
+								{ "key": "type", "value": "global", "description": "Фильтр по типу пространства: global — обычное пространство команды/проекта; personal — личное пространство пользователя." }
+							]
+						},
+						"description": "Возвращает список пространств (spaces), доступных текущему пользователю."
+					},
+					"response": []
+				},
+				{
+					"name": "GetSpace",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/space/{{space_key}}?expand=description.plain,homepage",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "space", "{{space_key}}"],
+							"query": [
+								{ "key": "expand", "value": "description.plain,homepage", "description": "Список дополнительных полей для раскрытия через запятую. description.plain — текстовое описание пространства; homepage — данные домашней страницы пространства. Другие варианты: permissions, icon, metadata.labels." }
+							]
+						},
+						"description": "Возвращает описание пространства {{space_key}}: ключ, имя, тип, ссылки на связанные ресурсы, а также поля, запрошенные через expand."
+					},
+					"response": []
+				},
+				{
+					"name": "CreateSpace",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"key\": \"NEWSPACE\",\n  \"name\": \"New Space\",\n  \"description\": {\n    \"plain\": {\n      \"value\": \"This is a new space\",\n      \"representation\": \"plain\"\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/space",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "space"]
+						},
+						"description": "Создаёт новое пространство. Тело запроса: key — уникальный ключ нового пространства (задан литералом NEWSPACE — намеренно отличается от {{space_key}}, которая указывает на уже существующее рабочее пространство для остальных методов коллекции); name — отображаемое имя; description.plain.value — текстовое описание."
+					},
+					"response": []
+				},
+				{
+					"name": "DeleteSpace",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/space/{{space_key}}",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "space", "{{space_key}}"]
+						},
+						"description": "Безвозвратно удаляет пространство {{space_key}} со всем содержимым. Операция асинхронная — ход выполнения можно отследить методом ListLongRunningTasks."
+					},
+					"response": []
+				},
+				{
+					"name": "GetSpaceContent",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/space/{{space_key}}/content?depth=all&limit=25&expand=body.storage",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "space", "{{space_key}}", "content"],
+							"query": [
+								{ "key": "depth", "value": "all", "description": "Глубина выборки дочернего содержимого: root — только страницы верхнего уровня; all — вся иерархия страниц." },
+								{ "key": "limit", "value": "25", "description": "Максимальное количество элементов содержимого в ответе." },
+								{ "key": "expand", "value": "body.storage", "description": "Дополнительные поля для раскрытия. body.storage — содержимое страницы в формате storage (XHTML-подобная разметка Confluence)." }
+							]
+						},
+						"description": "Возвращает содержимое (страницы, блог-посты) пространства {{space_key}}, сгруппированное по типу контента."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📝 Pages (Content)",
+			"item": [
+				{
+					"name": "GetPageById",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var json = pm.response.json();",
+									"    pm.collectionVariables.set('page_title', json.title);",
+									"    pm.collectionVariables.set('page_id', json.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}?expand=body.storage,version,ancestors,space",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}"],
+							"query": [
+								{ "key": "expand", "value": "body.storage,version,ancestors,space", "description": "Дополнительные поля для раскрытия: body.storage — содержимое в формате storage; version — данные текущей версии (в т.ч. version.number, нужный для последующего UpdatePage); ancestors — цепочка родительских страниц; space — пространство, которому принадлежит страница." }
+							]
+						},
+						"description": "Возвращает страницу по её {{page_id}}. Тест-скрипт после успешного ответа автоматически сохраняет id и title страницы в переменные коллекции page_id/page_title — удобно для последующих запросов, ссылающихся на текущую страницу."
+					},
+					"response": []
+				},
+				{
+					"name": "GetPageByTitle",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content?title={{page_title}}&spaceKey={{space_key}}&expand=body.storage,version",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content"],
+							"query": [
+								{ "key": "title", "value": "{{page_title}}", "description": "Точное название искомой страницы (регистрозависимое точное совпадение)." },
+								{ "key": "spaceKey", "value": "{{space_key}}", "description": "Ключ пространства, в котором искать страницу." },
+								{ "key": "expand", "value": "body.storage,version", "description": "Дополнительные поля для раскрытия: body.storage — содержимое; version — данные текущей версии." }
+							]
+						},
+						"description": "Ищет страницу по точному названию {{page_title}} в пространстве {{space_key}} и возвращает найденное содержимое (список из 0 или более результатов)."
+					},
+					"response": []
+				},
+				{
+					"name": "CreatePage",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var json = pm.response.json();",
+									"    pm.collectionVariables.set('page_id', json.id);",
+									"    console.log('Created page ID: ' + json.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"page\",\n  \"title\": \"New Page Title\",\n  \"space\": {\n    \"key\": \"{{space_key}}\"\n  },\n  \"ancestors\": [\n    {\n      \"id\": \"{{ancestor_id}}\"\n    }\n  ],\n  \"body\": {\n    \"storage\": {\n      \"value\": \"<h1>Hello World</h1><p>This page was created via API.</p>\",\n      \"representation\": \"storage\"\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content"]
+						},
+						"description": "Создаёт новую страницу. Тело запроса: type — тип содержимого (page или blogpost); title — заголовок; space.key — пространство назначения ({{space_key}}); ancestors[0].id — id родительской страницы ({{ancestor_id}}; массив можно не указывать, тогда страница создаётся на верхнем уровне пространства); body.storage.value — содержимое в формате storage, body.storage.representation — всегда storage для этого формата. Тест-скрипт после успешного ответа сохраняет id новой страницы в переменную коллекции page_id."
+					},
+					"response": []
+				},
+				{
+					"name": "UpdatePage",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": \"{{page_id}}\",\n  \"type\": \"page\",\n  \"title\": \"Updated Page Title\",\n  \"space\": {\n    \"key\": \"{{space_key}}\"\n  },\n  \"ancestors\": [\n    {\n      \"id\": \"{{ancestor_id}}\"\n    }\n  ],\n  \"body\": {\n    \"storage\": {\n      \"value\": \"<h1>Updated Content</h1><p>Modified via API.</p>\",\n      \"representation\": \"storage\"\n    }\n  },\n  \"version\": {\n    \"number\": 2,\n    \"message\": \"Updated via Postman\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}"]
+						},
+						"description": "Универсальное обновление страницы {{page_id}}: изменяет заголовок, содержимое и (опционально) родителя за один вызов — объединяет исходные методы «Update Page» и «Move Page», которые обращались к одному и тому же эндпоинту PUT /content/{id} с разными наборами полей. Тело запроса: id/type — идентификатор и тип обновляемого содержимого; title — новый заголовок; space.key — пространство (не меняется при обычном обновлении, требуется API); ancestors[0].id — id новой родительской страницы; укажите его только если нужно переместить страницу, иначе удалите поле ancestors целиком, чтобы не менять текущего родителя; body.storage.value — новое содержимое; version.number — ОБЯЗАТЕЛЬНО текущий номер версии + 1 (актуальный номер версии — поле version.number в ответе GetPageById), иначе запрос будет отклонён с конфликтом версий; version.message — необязательный комментарий к версии."
+					},
+					"response": []
+				},
+				{
+					"name": "DeletePage",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}?status=current",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}"],
+							"query": [
+								{ "key": "status", "value": "current", "description": "Статус удаляемой версии содержимого. current — переместить текущую (опубликованную) страницу в корзину; draft — удалить черновик." }
+							]
+						},
+						"description": "Удаляет страницу {{page_id}} (перемещает в корзину пространства; окончательное удаление из корзины выполняется отдельно через интерфейс Confluence)."
+					},
+					"response": []
+				},
+				{
+					"name": "GetPageChildren",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/child/page?limit=25&expand=version",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "child", "page"],
+							"query": [
+								{ "key": "limit", "value": "25", "description": "Максимальное количество дочерних страниц в ответе." },
+								{ "key": "expand", "value": "version", "description": "Раскрыть данные версии каждой дочерней страницы." }
+							]
+						},
+						"description": "Возвращает список дочерних страниц, непосредственно вложенных в страницу {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "GetPageHistory",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/version?limit=10",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "version"],
+							"query": [
+								{ "key": "limit", "value": "10", "description": "Максимальное количество версий в ответе." }
+							]
+						},
+						"description": "Возвращает список сохранённых версий страницы {{page_id}} с авторами и датами изменений."
+					},
+					"response": []
+				},
+				{
+					"name": "GetPageProperties",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/property",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "property"]
+						},
+						"description": "Возвращает список произвольных свойств (content properties — пары ключ/значение метаданных), сохранённых на странице {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "SetPageProperty",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"key\": \"my-property\",\n  \"value\": {\n    \"custom_field\": \"custom_value\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/property",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "property"]
+						},
+						"description": "Создаёт новое произвольное свойство на странице {{page_id}}. Тело запроса: key — имя свойства (должно быть уникальным для страницы — для изменения уже существующего свойства используется отдельный эндпоинт PUT .../property/{key} с указанием version); value — произвольный JSON-объект со значением свойства."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔍 Search (CQL)",
+			"item": [
+				{
+					"name": "SearchContentByCql",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/search?cql=type%3Dpage%20AND%20space%3D{{space_key}}&limit=25&start=0&expand=body.storage,version",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "search"],
+							"query": [
+								{ "key": "cql", "value": "type=page AND space={{space_key}}", "description": "Текст запроса на языке CQL (Confluence Query Language). Пример ищет страницы в пространстве {{space_key}}. Другие операторы: title~\"keyword\" (частичное совпадение заголовка), label=\"my-label\", created>=\"2024-01-01\" и т.д. Параметр специфичен для этого метода, задан литералом." },
+								{ "key": "limit", "value": "25", "description": "Максимальное количество результатов в ответе." },
+								{ "key": "start", "value": "0", "description": "Смещение (0-based) для постраничного вывода." },
+								{ "key": "expand", "value": "body.storage,version", "description": "Дополнительные поля для раскрытия у найденного содержимого." }
+							]
+						},
+						"description": "Поиск объектов содержимого (страниц, блог-постов, комментариев, вложений) по запросу CQL. В отличие от SearchSite, ищет только среди сущностей типа «content» и всегда возвращает их структурированные данные (не даёт сниппеты/подсветку совпадений)."
+					},
+					"response": []
+				},
+				{
+					"name": "SearchSite",
+					"protocolProfileBehavior": {
+						"disableBodyPruning": true
+					},
+					"request": {
+						"method": "GET",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": ""
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/search?cql=siteSearch ~ \"финанс\" AND type = \"page\"&limit=10",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "search"],
+							"query": [
+								{ "key": "cql", "value": "siteSearch ~ \"финанс\" AND type = \"page\"", "description": "Текст запроса CQL для общего (site) поиска. Пример ищет страницы, содержащие слово «финанс», через полнотекстовый оператор siteSearch. В отличие от SearchContentByCql, этот эндпоинт покрывает более широкий набор сущностей (включая пользователей, пространства) и возвращает результаты с подсветкой совпадений (excerpt)." },
+								{ "key": "limit", "value": "10", "description": "Максимальное количество результатов в ответе." }
+							]
+						},
+						"description": "Общий полнотекстовый поиск по сайту Confluence (аналог поля поиска в интерфейсе). protocolProfileBehavior.disableBodyPruning — техническая настройка Postman, не позволяющая клиенту убрать пустое тело у GET-запроса."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🏷️ Labels",
+			"item": [
+				{
+					"name": "GetPageLabels",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/label",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "label"]
+						},
+						"description": "Возвращает список меток (labels), присвоенных странице {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "AddPageLabels",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "[\n  { \"prefix\": \"global\", \"name\": \"my-label\" },\n  { \"prefix\": \"global\", \"name\": \"another-label\" }\n]"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/label",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "label"]
+						},
+						"description": "Добавляет одну или несколько меток к странице {{page_id}}. Тело запроса — массив объектов: prefix — пространство имён метки (global — обычная метка; my — личная метка пользователя); name — имя метки. Существующие метки сохраняются."
+					},
+					"response": []
+				},
+				{
+					"name": "RemovePageLabel",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/label/label-to-remove",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "label", "label-to-remove"]
+						},
+						"description": "Удаляет со страницы {{page_id}} метку, имя которой указано последним сегментом пути (в примере — label-to-remove). Параметр специфичен для этого метода и задан литералом — замените на реальное имя метки."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "💬 Comments",
+			"item": [
+				{
+					"name": "GetPageComments",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/child/comment?expand=body.storage,version&limit=25",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "child", "comment"],
+							"query": [
+								{ "key": "expand", "value": "body.storage,version", "description": "Дополнительные поля для раскрытия: body.storage — текст комментария; version — данные версии." },
+								{ "key": "limit", "value": "25", "description": "Максимальное количество комментариев в ответе." }
+							]
+						},
+						"description": "Возвращает список комментариев верхнего уровня страницы {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "AddPageComment",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"comment\",\n  \"container\": {\n    \"id\": \"{{page_id}}\",\n    \"type\": \"page\"\n  },\n  \"body\": {\n    \"storage\": {\n      \"value\": \"<p>This is a comment added via API.</p>\",\n      \"representation\": \"storage\"\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content"]
+						},
+						"description": "Добавляет комментарий к странице. Тело запроса: type — всегда comment; container.id/container.type — страница, к которой относится комментарий ({{page_id}} / page); body.storage.value — текст комментария в формате storage."
+					},
+					"response": []
+				},
+				{
+					"name": "DeleteComment",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/2001",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "2001"]
+						},
+						"description": "Удаляет комментарий по его id содержимого (в примере — 2001, замените на реальный id комментария, который можно получить из ответа GetPageComments). Параметр специфичен для этого метода и задан литералом."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📎 Attachments",
+			"item": [
+				{
+					"name": "GetPageAttachments",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/child/attachment?limit=25&expand=version",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "child", "attachment"],
+							"query": [
+								{ "key": "limit", "value": "25", "description": "Максимальное количество вложений в ответе." },
+								{ "key": "expand", "value": "version", "description": "Раскрыть данные версии каждого вложения." }
+							]
+						},
+						"description": "Возвращает список вложений (файлов), прикреплённых к странице {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "UploadAttachment",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "X-Atlassian-Token", "value": "nocheck", "description": "Обязательный заголовок для form-data запросов к API вложений — отключает проверку XSRF-токена, без него Confluence отклонит запрос." }
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "value": "", "type": "file", "description": "Локальный файл для загрузки в качестве нового вложения страницы." },
+								{ "key": "comment", "value": "Uploaded via API", "type": "text", "description": "Комментарий к загружаемой версии вложения." },
+								{ "key": "minorEdit", "value": "true", "type": "text", "description": "true — не уведомлять наблюдателей страницы об этом изменении; false — уведомить." }
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/child/attachment",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "child", "attachment"]
+						},
+						"description": "Загружает новый файл как вложение к странице {{page_id}}. Если файл с таким же именем уже существует — создаётся его новая версия (эквивалентно UpdateAttachment)."
+					},
+					"response": []
+				},
+				{
+					"name": "UpdateAttachment",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "X-Atlassian-Token", "value": "nocheck", "description": "Обязательный заголовок для form-data запросов к API вложений — отключает проверку XSRF-токена." }
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{ "key": "file", "value": "", "type": "file", "description": "Локальный файл — новая версия содержимого вложения." },
+								{ "key": "comment", "value": "Updated via API", "type": "text", "description": "Комментарий к новой версии вложения." },
+								{ "key": "minorEdit", "value": "true", "type": "text", "description": "true — не уведомлять наблюдателей страницы об этом изменении; false — уведомить." }
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/child/attachment/{{attachment_id}}/data",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "child", "attachment", "{{attachment_id}}", "data"]
+						},
+						"description": "Загружает новую версию (данные) для уже существующего вложения {{attachment_id}} страницы {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "DownloadAttachment",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/child/attachment/{{attachment_id}}/download",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "child", "attachment", "{{attachment_id}}", "download"]
+						},
+						"description": "Скачивает бинарное содержимое вложения {{attachment_id}} страницы {{page_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "DeleteAttachment",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{attachment_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{attachment_id}}"]
+						},
+						"description": "Удаляет вложение {{attachment_id}} целиком (как отдельную сущность содержимого, со всеми его версиями)."
+					},
+					"response": []
+				}
+			],
+			"variable": [
+				{ "key": "attachment_id", "value": "", "type": "string", "description": "Id вложения (content id вложения, не страницы). Общий параметр для методов UpdateAttachment, DownloadAttachment, DeleteAttachment этой папки. Значение можно получить из ответа GetPageAttachments." }
+			]
+		},
+		{
+			"name": "👤 Users & Groups",
+			"item": [
+				{
+					"name": "GetUserByAccountId",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/user?accountId={{user_account_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "user"],
+							"query": [
+								{ "key": "accountId", "value": "{{user_account_id}}", "description": "Идентификатор учётной записи пользователя (accountId, для Confluence Cloud) либо username/userKey для Server/Data Center." }
+							]
+						},
+						"description": "Возвращает профиль пользователя по его {{user_account_id}}."
+					},
+					"response": []
+				},
+				{
+					"name": "GetGroupMembers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/group/my-group/member?limit=50",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "group", "my-group", "member"],
+							"query": [
+								{ "key": "limit", "value": "50", "description": "Максимальное количество участников группы в ответе." }
+							]
+						},
+						"description": "Возвращает список пользователей — участников группы, указанной сегментом пути (в примере — my-group, замените на реальное имя группы). Параметр специфичен для этого метода и задан литералом."
+					},
+					"response": []
+				},
+				{
+					"name": "ListGroups",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/group?limit=50",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "group"],
+							"query": [
+								{ "key": "limit", "value": "50", "description": "Максимальное количество групп в ответе." }
+							]
+						},
+						"description": "Возвращает список всех групп пользователей на сайте Confluence."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔒 Permissions & Restrictions",
+			"item": [
+				{
+					"name": "GetContentRestrictions",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/restriction",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "restriction"]
+						},
+						"description": "Возвращает действующие ограничения доступа (read/update) на странице {{page_id}}: какие пользователи и группы имеют право просмотра/редактирования."
+					},
+					"response": []
+				},
+				{
+					"name": "AddReadRestriction",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"results\": [\n    {\n      \"operation\": \"read\",\n      \"restrictions\": {\n        \"user\": {\n          \"results\": [\n            { \"accountId\": \"{{user_account_id}}\" }\n          ]\n        },\n        \"group\": {\n          \"results\": []\n        }\n      }\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/{{page_id}}/restriction",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "{{page_id}}", "restriction"]
+						},
+						"description": "Полностью заменяет ограничение на чтение страницы {{page_id}}, разрешая доступ только перечисленным пользователям и группам. Тело запроса: results[].operation — тип ограничения (read); restrictions.user.results[].accountId — пользователи, которым разрешён доступ ({{user_account_id}}); restrictions.group.results — группы, которым разрешён доступ (пустой массив = ни одной группы). Запрос заменяет весь список разрешённых пользователей/групп для операции read, а не добавляет к нему."
+					},
+					"response": []
+				},
+				{
+					"name": "GetSpacePermissions",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/space/{{space_key}}?expand=permissions",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "space", "{{space_key}}"],
+							"query": [
+								{ "key": "expand", "value": "permissions", "description": "Раскрывает список прав доступа, настроенных на уровне пространства {{space_key}}." }
+							]
+						},
+						"description": "Возвращает список прав доступа (permissions), настроенных для пространства {{space_key}}."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📊 Blueprints & Templates",
+			"item": [
+				{
+					"name": "GetContentTemplates",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/template/page?spaceKey={{space_key}}&limit=25",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "template", "page"],
+							"query": [
+								{ "key": "spaceKey", "value": "{{space_key}}", "description": "Ключ пространства, шаблоны страниц которого нужно получить." },
+								{ "key": "limit", "value": "25", "description": "Максимальное количество шаблонов в ответе." }
+							]
+						},
+						"description": "Возвращает список пользовательских шаблонов страниц пространства {{space_key}} (включая их templateId, нужный для CreateContentFromTemplate)."
+					},
+					"response": []
+				},
+				{
+					"name": "CreateContentFromTemplate",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"contentTemplateId\": \"TEMPLATE_ID_HERE\",\n  \"title\": \"Page from Template\",\n  \"space\": {\n    \"key\": \"{{space_key}}\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/content/blueprint/instance",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "content", "blueprint", "instance"]
+						},
+						"description": "Создаёт новую страницу на основе шаблона (blueprint/template). Тело запроса: contentTemplateId — id шаблона (замените TEMPLATE_ID_HERE значением, полученным из GetContentTemplates); title — заголовок новой страницы; space.key — пространство назначения."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📋 Content Body Convert",
+			"item": [
+				{
+					"name": "ConvertStorageToView",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"value\": \"<p>Some <strong>storage</strong> format content</p>\",\n  \"representation\": \"storage\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/contentbody/convert/view",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "contentbody", "convert", "view"]
+						},
+						"description": "Преобразует переданный фрагмент содержимого из формата storage в готовый для отображения HTML (view). Тело запроса: value — исходный текст; representation — формат исходного текста (storage)."
+					},
+					"response": []
+				},
+				{
+					"name": "ConvertWikiToStorage",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"value\": \"h1. Wiki Heading\\n\\nSome *bold* text.\",\n  \"representation\": \"wiki\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/rest/api/contentbody/convert/storage",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "contentbody", "convert", "storage"]
+						},
+						"description": "Преобразует текст из устаревшего wiki-синтаксиса Confluence в формат storage, пригодный для использования в теле CreatePage/UpdatePage. Тело запроса: value — исходный текст в wiki-разметке; representation — формат исходного текста (wiki)."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "⚡ Long-Running Tasks",
+			"item": [
+				{
+					"name": "ListLongRunningTasks",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/rest/api/longtask?limit=10",
+							"host": ["{{base_url}}"],
+							"path": ["rest", "api", "longtask"],
+							"query": [
+								{ "key": "limit", "value": "10", "description": "Максимальное количество задач в ответе." }
+							]
+						},
+						"description": "Возвращает список длительных асинхронных операций (например, удаление пространства DeleteSpace) с их статусом и процентом выполнения."
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📝 Confluence API v2 (Cloud)",
+			"description": "Более новая версия части эндпоинтов (страницы, пространства), доступная только в Confluence Cloud. Использует числовые id пространств (spaceId) вместо строковых ключей (spaceKey) и отдаёт данные в формате, отличном от v1 — поэтому не объединена с одноимёнными методами раздела «📝 Pages (Content)», а сохранена как самостоятельная подпапка.",
+			"item": [
+				{
+					"name": "ListPagesV2",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v2/pages?space-id=&limit=25&sort=title",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v2", "pages"],
+							"query": [
+								{ "key": "space-id", "value": "", "description": "Числовой id пространства (не путать со строковым space_key из v1) — ограничивает выборку страницами этого пространства. Если не указан, возвращаются страницы всех доступных пространств." },
+								{ "key": "limit", "value": "25", "description": "Максимальное количество страниц в ответе." },
+								{ "key": "sort", "value": "title", "description": "Поле сортировки результатов, например title, -title (по убыванию), created-date, -created-date." }
+							]
+						},
+						"description": "Возвращает список страниц через API v2. Доступно только для Confluence Cloud."
+					},
+					"response": []
+				},
+				{
+					"name": "GetPageByIdV2",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v2/pages/{{page_id}}?body-format=storage",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v2", "pages", "{{page_id}}"],
+							"query": [
+								{ "key": "body-format", "value": "storage", "description": "Формат тела страницы в ответе: storage (XHTML-разметка Confluence) или atlas_doc_format (JSON-представление, используемое редактором Cloud)." }
+							]
+						},
+						"description": "Возвращает страницу по {{page_id}} через API v2."
+					},
+					"response": []
+				},
+				{
+					"name": "CreatePageV2",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"spaceId\": \"SPACE_ID_NUMERIC\",\n  \"status\": \"current\",\n  \"title\": \"New v2 Page\",\n  \"parentId\": \"{{ancestor_id}}\",\n  \"body\": {\n    \"representation\": \"storage\",\n    \"value\": \"<p>Created via API v2</p>\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v2/pages",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v2", "pages"]
+						},
+						"description": "Создаёт новую страницу через API v2. Тело запроса: spaceId — числовой id пространства (замените SPACE_ID_NUMERIC; отличается от строкового {{space_key}} из v1); status — current (опубликована сразу) или draft; title — заголовок; parentId — id родительской страницы ({{ancestor_id}}, необязателен); body.representation/body.value — формат и содержимое."
+					},
+					"response": []
+				},
+				{
+					"name": "UpdatePageV2",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Content-Type", "value": "application/json", "description": "Тип тела запроса — JSON." }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": \"{{page_id}}\",\n  \"status\": \"current\",\n  \"title\": \"Updated v2 Page\",\n  \"body\": {\n    \"representation\": \"storage\",\n    \"value\": \"<p>Updated via API v2</p>\"\n  },\n  \"version\": {\n    \"number\": 2,\n    \"message\": \"Updated via v2 API\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v2/pages/{{page_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v2", "pages", "{{page_id}}"]
+						},
+						"description": "Обновляет страницу {{page_id}} через API v2. Тело запроса: id/status/title/body — аналогично CreatePageV2; version.number — обязательно текущий номер версии + 1 (см. GetPageByIdV2), иначе запрос будет отклонён."
+					},
+					"response": []
+				},
+				{
+					"name": "ListSpacesV2",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v2/spaces?limit=25",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v2", "spaces"],
+							"query": [
+								{ "key": "limit", "value": "25", "description": "Максимальное количество пространств в ответе." }
+							]
+						},
+						"description": "Возвращает список пространств через API v2. Доступно только для Confluence Cloud."
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{api_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [""]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [""]
+			}
+		}
+	],
+	"variable": [
+		{ "key": "base_url", "value": "https://your-domain.atlassian.net/wiki", "type": "string", "description": "Базовый URL Confluence. Для Cloud — https://<domain>.atlassian.net/wiki; для Server/Data Center — адрес вашего сервера (обычно без /wiki). Общий параметр для всех методов коллекции." },
+		{ "key": "username", "value": "your-email@example.com", "type": "string", "description": "Email пользователя (логин) — используется только если переключить авторизацию коллекции с Bearer-токена на Basic Auth (стандартный способ для Confluence Cloud: email + API token). При текущей настройке auth (Bearer {{api_token}}) не используется." },
+		{ "key": "api_token", "value": "YOUR_API_TOKEN", "type": "string", "description": "Токен доступа: Personal Access Token (Server/Data Center) или API token (Cloud, вместе с {{username}} при Basic Auth). Подставляется в заголовок Authorization на уровне коллекции — общий параметр для всех методов." },
+		{ "key": "space_key", "value": "DS", "type": "string", "description": "Строковый ключ текущего рабочего пространства (v1 API). Общий параметр для методов работы с пространствами, страницами, шаблонами и правами доступа (раздел v1)." },
+		{ "key": "page_id", "value": "", "type": "string", "description": "Id текущей рабочей страницы. Общий параметр для методов работы с конкретной страницей и её дочерними ресурсами (версии, свойства, метки, комментарии, вложения, ограничения) в разделах v1 и v2. Автоматически заполняется тест-скриптами методов GetPageById и CreatePage." },
+		{ "key": "page_title", "value": "", "type": "string", "description": "Заголовок текущей рабочей страницы. Общий параметр для GetPageByTitle; автоматически заполняется тест-скриптом метода GetPageById." },
+		{ "key": "ancestor_id", "value": "", "type": "string", "description": "Id родительской страницы. Общий параметр для методов создания/перемещения страниц в разделах v1 (CreatePage, UpdatePage) и v2 (CreatePageV2)." },
+		{ "key": "user_account_id", "value": "", "type": "string", "description": "Id учётной записи пользователя (accountId). Общий параметр для GetUserByAccountId и AddReadRestriction." }
+	]
+}

@@ -96,8 +96,12 @@ class SecurityEngine {
   // страница вики, ответ MCP-сервера.
   static EXTERNAL_SOURCES = new Set([
     'http_fetch', 'proxy_fetch', 'sandbox_fetch', 'read_file', 'search_files',
-    'confluence_get_page', 'confluence_search',
-    'xwiki_get_page', 'xwiki_search',
+    // Вики: содержимое страниц, обсуждения и значения объектов пишут люди
+    // по ту сторону — для агента это такой же внешний текст, как страница
+    // из сети. Перечни страниц и пространств сюда не входят: там имена,
+    // а не содержимое.
+    'confluence_get_page', 'confluence_search', 'confluence_comments',
+    'xwiki_get_page', 'xwiki_search', 'xwiki_comments', 'xwiki_objects',
     'import_skill_from_text',
     // Артефакт — сохранённый результат прежнего вызова: его содержимое
     // пришло извне ровно так же, просто раньше.
@@ -159,9 +163,13 @@ class SecurityEngine {
     // поэтому это не 'network' (та категория существует ради случая, когда
     // хост выбирает модель — см. http_fetch). Чтение читает, запись пишет.
     confluence_status: 'read', confluence_search: 'read', confluence_get_page: 'read',
-    confluence_list_spaces: 'read',
+    confluence_list_spaces: 'read', confluence_list_pages: 'read',
+    // Преобразование разметки ничего не меняет: сервер отдаёт обратно тот
+    // же текст в другом формате.
+    confluence_convert_markup: 'read',
     xwiki_status: 'read', xwiki_search: 'read', xwiki_get_page: 'read',
-    xwiki_list_spaces: 'read',
+    xwiki_list_spaces: 'read', xwiki_list_wikis: 'read', xwiki_list_pages: 'read',
+    xwiki_history: 'read',
 
     // Запись
     create_folder: 'write', rename_folder: 'write', move_folder: 'write',
@@ -170,6 +178,13 @@ class SecurityEngine {
     create_skill: 'write', update_skill: 'write', link_skill_tools: 'write',
     confluence_configure: 'write', confluence_create_page: 'write', confluence_update_page: 'write',
     xwiki_configure: 'write', xwiki_create_page: 'write', xwiki_update_page: 'write',
+    // Инструменты с несколькими действиями (list/add/remove, list/download,
+    // list/get/set) числятся по самому весомому из них: категория у вызова
+    // одна, а разрешение, выданное «чтобы посмотреть», не должно заодно
+    // разрешать запись. Вложения — тоже запись: файл ложится на диск
+    // пользователя (та же причина, что у export_chat).
+    confluence_labels: 'write', confluence_comments: 'write', confluence_attachments: 'write',
+    xwiki_comments: 'write', xwiki_attachments: 'write', xwiki_objects: 'write',
     persistent_memory: 'write', export_chat: 'write', export_chats: 'write',
     // Резервная копия: инструмент только открывает форму, всю работу
     // делает пользователь в ней. Спрашивать про открытие окна не о чем,
@@ -183,6 +198,9 @@ class SecurityEngine {
 
     // Разрушительное
     delete_folder: 'destroy',
+    // Страница вики — общая, а не своя: в Confluence она уходит в корзину
+    // пространства, в xWiki исчезает совсем.
+    confluence_delete_page: 'destroy', xwiki_delete_page: 'destroy',
     import_chat: 'destroy', import_chats: 'destroy',
 
     // Сеть

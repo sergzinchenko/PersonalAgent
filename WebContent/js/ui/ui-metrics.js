@@ -300,7 +300,11 @@ Object.assign(UI.prototype, {
     // компактный режим.
     const skillsMode = this.skillsPanelMode || 'active';
     const enabled = skills.filter(s => s.enabled);
-    const shown = skillsMode === 'all' ? skills : enabled;
+    // По алфавиту — как и везде в списках навыков: панель перерисовывается
+    // при каждом включении, и порядок «как легло в базу» переставлял бы
+    // фишки местами прямо под курсором.
+    const shown = (skillsMode === 'all' ? skills : enabled)
+      .slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
     const hiddenCount = skills.length - shown.length;
 
     // Системный навык показываем, но кликом не переключаем: он действует
