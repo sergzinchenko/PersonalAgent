@@ -593,15 +593,27 @@ Object.assign(UI.prototype, {
     const host = document.getElementById('tool-track-host');
     if (!host) return;
 
-    // Место внутри текущего шага плана. Его готовит renderPlanPanel:
-    // пустой контейнер есть всегда, когда панель видна и шаг в работе.
-    const inPlan = document.querySelector('#plan-panel:not([hidden]) .plan-track');
-    const mount = inPlan || host;
+    // Куда рисовать: внутрь текущего шага плана (место готовит
+    // renderPlanPanel) или над полем ввода.
+    //
+    // В скрытом режиме в план не переезжаем. Там лента — это одна строка
+    // общего счёта, и внутри шага плана она выглядит служебной вставкой
+    // посреди списка дел: шаги перестают читаться подряд, а сама строка
+    // ничего не добавляет к тому, что уже видно в строке состояния.
+    // Мини-план вызовов внутри шага имеет смысл, когда вызовы названы, —
+    // то есть в кратком и подробном режимах.
+    //
+    // Место внутри шага ищем ВСЕГДА, даже когда рисовать собираемся не
+    // туда: иначе оставленное там содержимое живёт вечно. Так и было —
+    // переключение режима на «только общий ход» оставляло в шаге плана
+    // прежний список вызовов, который больше никто не обновлял.
+    const planSlot = document.querySelector('#plan-panel:not([hidden]) .plan-track');
+    const inPlan = (this.toolVerbosity || 'hidden') === 'hidden' ? null : planSlot;
 
     if (!run || !run.track.length) {
       host.hidden = true;
       host.innerHTML = '';
-      if (inPlan) inPlan.innerHTML = '';
+      if (planSlot) planSlot.innerHTML = '';
       return;
     }
 
@@ -613,8 +625,9 @@ Object.assign(UI.prototype, {
     } else {
       host.hidden = false;
       host.innerHTML = html;
+      if (planSlot) planSlot.innerHTML = '';
     }
-    this._bindToolTrack(mount);
+    this._bindToolTrack(inPlan || host);
   },
 
   _toolTrackHtml(run) {
@@ -634,8 +647,13 @@ Object.assign(UI.prototype, {
       `</div>`;
 
     if (mode === 'hidden') {
+      // Только общий ход: сколько вызовов сделано из скольких и сколько
+      // осталось текущему до таймаута. Имя инструмента здесь не нужно —
+      // оно уже стоит строкой выше, в строке состояния («Выполняю
+      // инструмент: …»), и повторять его значит занимать место тем же
+      // самым.
       return `<div class="tool-track tt-hidden">${head}` +
-        (current ? `<div class="tt-current">${this._escHtml(current.name)}<span class="tt-countdown" data-countdown></span></div>` : '') +
+        (current ? `<div class="tt-current">выполняется<span class="tt-countdown" data-countdown></span></div>` : '') +
         `</div>`;
     }
 

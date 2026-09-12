@@ -996,6 +996,12 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   font-size: 11px;
   color: var(--text-secondary);
 }
+/* Шаг плана — сетка «отметка | текст», и место в ней надо указывать
+   явно: без этого лента вызовов попадала в первую колонку шириной 18px
+   и переносилась по одному-два символа на строку. Занимает всю ширину
+   шага, включая колонку отметки: в узкой панели каждый пиксель на счету. */
+.plan-step .plan-track { grid-column: 1 / -1; }
+.plan-step .plan-track:empty { display: none; }
 .plan-step.plan-done .plan-title { color: var(--text-muted); text-decoration: line-through; }
 .plan-step.plan-doing .plan-title { color: var(--accent-light); font-weight: 600; }
 .plan-step.plan-failed .plan-mark { color: var(--danger); }

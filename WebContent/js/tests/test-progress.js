@@ -45,7 +45,13 @@ class FakeDB {
 
 (async () => {
   const rawHtml = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
-  const html = rawHtml.replace(/<script src="[^"]+"><\/script>\s*/g, '');
+  // Стили подключаем настоящие: часть проверок ниже — про место элемента
+  // в сетке, а без CSS такой дефект не виден в принципе. Дважды уже
+  // ловили: пропущенное grid-column уводило элемент в чужую колонку.
+  const css = fs.readFileSync(path.join(ROOT, 'css/styles.css'), 'utf8');
+  const html = rawHtml
+    .replace(/<script src="[^"]+"><\/script>\s*/g, '')
+    .replace('</head>', '<style>' + css + '</style></head>');
   const dom = new JSDOM(html, { url: 'https://localhost/', runScripts: 'dangerously', pretendToBeVisual: true });
   const { window } = dom;
   const document = window.document;
@@ -157,6 +163,24 @@ class FakeDB {
   ok('у текущего шага есть место под ленту', !!slot);
   ok('лента переехала туда', slot.textContent.includes('read_file'), slot.textContent.trim().slice(0, 80));
   ok('и не дублируется над полем ввода', document.getElementById('tool-track-host').hidden === true);
+
+  // Место в сетке шага задано явно — иначе лента попадает в колонку
+  // отметки шириной 18px и переносится по одному-два символа на строку.
+  ok('у ленты внутри шага есть своё место в сетке',
+     window.getComputedStyle(slot).gridColumn === '1 / -1',
+     window.getComputedStyle(slot).gridColumn);
+
+  // В скрытом режиме внутри плана ленте не место: там одна строка общего
+  // счёта, и она разрывала бы список шагов служебной вставкой.
+  ui.toolVerbosity = 'hidden';
+  ui._renderToolTrack('c1');
+  ok('в режиме «только общий ход» лента не лезет в план',
+     slot.innerHTML === '', slot.innerHTML);
+  ok('и остаётся над полем ввода',
+     document.getElementById('tool-track-host').hidden === false);
+  ui.toolVerbosity = 'compact';
+  ui._renderToolTrack('c1');
+  ok('в кратком режиме возвращается в шаг плана', slot.textContent.includes('read_file'));
 
   // ══════════════════════════════════════════════
   console.log('\n── Управление работой из панели плана ──');
