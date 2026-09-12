@@ -626,6 +626,11 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 }
 .limits-finding .lf-hint { font-size: 11px; color: var(--text-muted); }
 
+/* Параметры вызова в краткой строке: приглушены, чтобы имя инструмента
+   читалось первым, но и не прятались — ради них строка и нужна. */
+.tool-args { color: var(--text-muted); font-size: 11px; }
+.tool-err { color: var(--danger); font-size: 11px; }
+
 /* ── Разделитель дня в переписке ──
    Дата стоит один раз на день, а не в каждой подписи: в подписи она
    превращалась бы в шум, а без неё время «14:32» в недельной переписке

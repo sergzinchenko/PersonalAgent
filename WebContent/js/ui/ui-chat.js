@@ -264,7 +264,11 @@ Object.assign(UI.prototype, {
         return `<div class="message tool-call tool-plan"><div class="tool-compact">` +
                `${msg.isError ? '❌' : '🗂'} ${this._escHtml(msg.planLabel)}${this._toolStamp(msg)}</div></div>`;
       }
-      return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}${this._toolStamp(msg)}</div>`;
+      // Краткий вид после перезагрузки: имя, параметры (подпись сохранена
+      // при вызове) и время. Результат — кнопкой, если он был вынесен.
+      const args = msg.argsLabel ? `<span class="tool-args">${this._escHtml(msg.argsLabel)}</span>` : '';
+      return `<div class="message tool-call">${msg.isError ? '❌' : '🔧'} ${this._escHtml(msg.name)}${args}` +
+             `${args ? '' : ' → ' + body}${more}${this._toolStamp(msg)}</div>`;
     }
     if (msg.role === 'system') {
       // Свёрнутая часть переписки — служебная запись со своим видом
@@ -450,6 +454,9 @@ Object.assign(UI.prototype, {
       statusTimer: null,
     };
     this._chatRuns.set(chatId, run);
+    // Отметка «панель с лентой закрыта крестиком» относилась к прошлой
+    // работе: новый ход показывает её снова.
+    if (this._planPanelDismissed === 'track') this._planPanelDismissed = null;
     // Журнал хода: с этого момента обрыв (закрытая вкладка, сбой,
     // перезагрузка) будет виден при следующем запуске, и работу можно
     // будет продолжить с места остановки — см. ui-resume.js.
@@ -610,6 +617,19 @@ Object.assign(UI.prototype, {
     const planSlot = document.querySelector('#plan-panel:not([hidden]) .plan-track');
     const inPlan = (this.toolVerbosity || 'hidden') === 'hidden' ? null : planSlot;
 
+    // Панель могла быть ещё закрыта: первый вызов инструмента — это и
+    // есть повод её открыть. Открывает её renderPlanPanel (он знает про
+    // план, крестик и заголовок), а он в конце позовёт нас обратно —
+    // уже с готовым местом. Флаг против повторного входа: без него
+    // получилась бы рекурсия на каждый вызов инструмента.
+    if (!inPlan && !planSlot && run && run.track.length &&
+        (this.toolVerbosity || 'hidden') !== 'hidden' && !this._trackPanelPending) {
+      this._trackPanelPending = true;
+      Promise.resolve(this.renderPlanPanel?.())
+        .finally(() => { this._trackPanelPending = false; });
+      return;
+    }
+
     if (!run || !run.track.length) {
       host.hidden = true;
       host.innerHTML = '';
@@ -632,29 +652,33 @@ Object.assign(UI.prototype, {
 
   _toolTrackHtml(run) {
     const mode = this.toolVerbosity || 'hidden';
-    const done = run.track.filter(t => t.status === 'done' || t.status === 'error').length;
     const total = run.track.length;
-    const current = run.track.find(t => t.status === 'running');
+    const finished = run.track.filter(t => t.status === 'done' || t.status === 'error').length;
+    const runningIdx = run.track.findIndex(t => t.status === 'running');
+    const current = runningIdx >= 0 ? run.track[runningIdx] : null;
     const limit = this.limits.maxToolCallsPerTurn | 0;
 
-    // Общая строка — она же единственная в скрытом режиме. Отвечает на
-    // вопрос «работа идёт или всё встало», не называя ничего лишнего.
+    // ── Счёт по ВСЕМУ списку, а не по выполненному ──
+    // Модель заказывает вызовы пачкой, и весь состав известен заранее.
+    // Пока идёт третий из десяти, «2 из 10» (сделано из всего) отвечает
+    // на вопрос «сколько позади», а человеку нужен другой: «где мы
+    // сейчас». Поэтому числитель — номер текущего вызова, и только
+    // когда ничего не выполняется, это число сделанных.
+    const position = current ? runningIdx + 1 : finished;
     const head =
       `<div class="tt-head">` +
         `<span class="tt-title">🔧 Инструменты</span>` +
-        `<span class="tt-count">${done} из ${total}${total > done ? '' : ' · шаг завершён'}</span>` +
+        `<span class="tt-count">${position} из ${total}` +
+          (current ? `<span class="tt-countdown" data-countdown></span>` : (finished >= total ? ' · шаг завершён' : '')) +
+        `</span>` +
         (limit > 0 ? `<span class="tt-budget" title="Потолок вызовов за один ответ">всего за ход: ${run.turnToolCalls} из ${limit}</span>` : '') +
       `</div>`;
 
     if (mode === 'hidden') {
-      // Только общий ход: сколько вызовов сделано из скольких и сколько
-      // осталось текущему до таймаута. Имя инструмента здесь не нужно —
-      // оно уже стоит строкой выше, в строке состояния («Выполняю
-      // инструмент: …»), и повторять его значит занимать место тем же
-      // самым.
-      return `<div class="tool-track tt-hidden">${head}` +
-        (current ? `<div class="tt-current">выполняется<span class="tt-countdown" data-countdown></span></div>` : '') +
-        `</div>`;
+      // Только общий ход: на каком вызове из скольких мы сейчас и сколько
+      // этому вызову осталось до таймаута. Имя инструмента здесь не
+      // нужно — оно уже стоит строкой выше, в строке состояния.
+      return `<div class="tool-track tt-hidden">${head}</div>`;
     }
 
     // Длинный ход даёт десятки вызовов. Показываем хвост: прошлые шаги
@@ -1701,7 +1725,7 @@ Object.assign(UI.prototype, {
             // ради одного их вида.
             ...(PLAN_TOOLS.has(tc.function.name)
               ? { planLabel: this._planCallLabel(tc.function.arguments, resultStr, isError) }
-              : {}),
+              : { argsLabel: this._toolArgsLabel(tc.function.arguments) }),
           };
           await this.agent.db.put('messages', toolMsg);
           await this._runJournalPut(chatId, {
@@ -1917,10 +1941,54 @@ Object.assign(UI.prototype, {
         </details>
       `;
     }
-    // compact
-    return `<div class="tool-compact">${icon} ${this._escHtml(name)} → ` +
-           `${this._escHtml(resultStr.substring(0, 300))}${resultStr.length > 300 ? '…' : ''}</div>` +
+    // ── Краткий вид: чем вызвали, а не что ответило ──
+    // Раньше здесь стояло начало результата. Триста символов чужого JSON
+    // не говорят ни о чём («{"ok":true,"results":[{"id":"...»), а вот
+    // ПАРАМЕТРЫ отвечают на единственный вопрос, который возникает к
+    // строке вызова: что именно агент сделал — какой файл прочитал, что
+    // искал, куда записал. Ответ целиком доступен рядом: подробный режим
+    // и кнопка артефакта.
+    const err = isError ? this._toolErrorBrief(resultStr) : '';
+    return `<div class="tool-compact">${icon} ${this._escHtml(name)}` +
+           `<span class="tool-args">${this._escHtml(this._toolArgsLabel(argsRaw))}</span>` +
+           (err ? ` <span class="tool-err">${this._escHtml(err)}</span>` : '') +
+           `</div>` +
            `<span class="tool-meta">${elapsedMs} мс</span>` + artifactBtn + subBtn;
+  },
+
+  // ── Параметры вызова одной строкой ──
+  // «(file: "отчёт.docx", mode: "text")». Значения режутся до 20 символов:
+  // строка вызова в переписке должна опознаваться взглядом, а не читаться
+  // как документ; полные аргументы есть в подробном режиме.
+  _toolArgsLabel(argsRaw) {
+    let obj = argsRaw;
+    if (typeof obj === 'string') {
+      try { obj = JSON.parse(obj); } catch (_) { obj = null; }
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return '';
+    const parts = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === undefined || v === null || v === '') continue;
+      let val = typeof v === 'string' ? v : JSON.stringify(v);
+      val = String(val).replace(/\s+/g, ' ').trim();
+      if (val.length > 20) val = val.slice(0, 20) + '…';
+      parts.push(`${k}: "${val}"`);
+      // Десяток параметров в одну строку не помещается ни у кого.
+      if (parts.length >= 6) { parts.push('…'); break; }
+    }
+    return parts.length ? ' (' + parts.join(', ') + ')' : '';
+  },
+
+  // Короткая причина отказа: без неё неудачный вызов в кратком виде
+  // отличается от удачного только значком.
+  _toolErrorBrief(resultStr) {
+    let obj = resultStr;
+    if (typeof obj === 'string') {
+      try { obj = JSON.parse(obj); } catch (_) { obj = null; }
+    }
+    const msg = (obj && (obj.error || obj.message)) || '';
+    const s = String(msg).replace(/\s+/g, ' ').trim();
+    return s.length > 80 ? s.slice(0, 80) + '…' : s;
   },
 
 

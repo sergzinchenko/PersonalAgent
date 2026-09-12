@@ -123,13 +123,31 @@ class FakeDB {
   ui._renderToolTrack('c1');
   const host = document.getElementById('tool-track-host');
   ok('лента показана над полем ввода', host && host.hidden === false);
+  // Счёт идёт по всему списку: выполняется второй из трёх — значит
+  // «2 из 3», а не «1 из 3» (сделано из всего). Человеку нужен ответ на
+  // вопрос «где мы сейчас», а не «сколько позади».
   ok('в скрытом режиме — только общий счёт, без имён',
-     host.textContent.includes('1 из 3') && !host.textContent.includes('search_files'),
+     host.textContent.includes('2 из 3') && !host.textContent.includes('search_files'),
      host.textContent.trim());
+  ok('счётчик показывает текущий вызов, а не число выполненных',
+     !host.textContent.includes('1 из 3'), host.textContent.trim());
 
+  // ── Кратко и подробно: лента уходит в правую панель ──
+  // Ход работы должен быть в одном месте, а не в двух углах экрана:
+  // там же, где план задачи. Плана ещё нет — панель показывает одну
+  // ленту и открывается сама.
   ui.toolVerbosity = 'compact';
   ui._renderToolTrack('c1');
-  const rows = Array.from(document.querySelectorAll('#tool-track-host .tt-row'));
+  await tick(6);
+  ok('панель открылась сама, чтобы показать вызовы',
+     document.getElementById('plan-panel').hidden === false);
+  ok('и назвалась по содержимому',
+     document.querySelector('#plan-panel .plan-panel-title').textContent.includes('Вызовы'),
+     document.querySelector('#plan-panel .plan-panel-title').textContent);
+  ok('над полем ввода ленты при этом нет',
+     document.getElementById('tool-track-host').hidden === true);
+
+  const rows = Array.from(document.querySelectorAll('#plan-panel .tt-row'));
   ok('в кратком режиме видна вся последовательность шага', rows.length === 3, String(rows.length));
   ok('выполненный отмечен и показывает своё время',
      rows[0].className.includes('tt-done') && rows[0].textContent.includes('120 мс'), rows[0].textContent);
@@ -139,7 +157,7 @@ class FakeDB {
   // Обратный отсчёт: считается от таймаута ОДНОГО вызова.
   ui.limits.toolTimeoutSeconds = 30;
   ui._updateToolCountdown(run);
-  const cd = document.querySelector('#tool-track-host [data-countdown]');
+  const cd = document.querySelector('#plan-panel [data-countdown]');
   ok('у текущего вызова идёт обратный отсчёт', !!cd && /\d+ с/.test(cd.textContent), cd && cd.textContent);
   ok('и он отсчитывает от таймаута вызова, а не от начала хода',
      parseInt(cd.textContent, 10) <= 30 && parseInt(cd.textContent, 10) >= 24, cd.textContent);
@@ -147,7 +165,7 @@ class FakeDB {
 
   ui.toolVerbosity = 'detailed';
   ui._renderToolTrack('c1');
-  const details = document.querySelectorAll('#tool-track-host details.tt-details');
+  const details = document.querySelectorAll('#plan-panel details.tt-details');
   ok('в подробном режиме вызовы разворачиваются', details.length >= 1, String(details.length));
   ok('и по умолчанию свёрнуты', Array.from(details).every(d => !d.open));
   ok('внутри — аргументы и ответ',
@@ -159,6 +177,9 @@ class FakeDB {
   await agent.tasks.start('c1', 2);
   await ui.renderPlanPanel();
   ok('панель плана открыта', document.getElementById('plan-panel').hidden === false);
+  ok('и теперь называется планом',
+     document.querySelector('#plan-panel .plan-panel-title').textContent.includes('План'),
+     document.querySelector('#plan-panel .plan-panel-title').textContent);
   const slot = document.querySelector('#plan-panel .plan-step.plan-doing .plan-track');
   ok('у текущего шага есть место под ленту', !!slot);
   ok('лента переехала туда', slot.textContent.includes('read_file'), slot.textContent.trim().slice(0, 80));
@@ -176,7 +197,7 @@ class FakeDB {
   ui._renderToolTrack('c1');
   ok('в режиме «только общий ход» лента не лезет в план',
      slot.innerHTML === '', slot.innerHTML);
-  ok('и остаётся над полем ввода',
+  ok('и возвращается к полю ввода',
      document.getElementById('tool-track-host').hidden === false);
   ui.toolVerbosity = 'compact';
   ui._renderToolTrack('c1');
@@ -237,6 +258,22 @@ class FakeDB {
   const toolMsg = { id: 't1', chatId: 'c1', role: 'tool', name: 'read_file', content: '{}', timestamp: now };
   ok('у вызова инструмента в переписке тоже есть время',
      /msg-time/.test(ui._renderMessage(toolMsg)), ui._renderMessage(toolMsg));
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Краткая строка вызова: чем вызвали ──');
+  const label = ui._toolArgsLabel('{"file":"очень-длинное-имя-файла-которое-не-влезет.docx","mode":"text"}');
+  ok('параметры перечислены парами «имя: значение»', /file: "/.test(label) && /mode: "text"/.test(label), label);
+  ok('значение обрезано до 20 символов', /очень-длинное-имя-фа…/.test(label), label);
+  ok('пустые параметры не показываются', ui._toolArgsLabel('{"a":"","b":null,"c":"да"}') === ' (c: "да")',
+     ui._toolArgsLabel('{"a":"","b":null,"c":"да"}'));
+  ok('не JSON — не ломает строку', ui._toolArgsLabel('не json') === '');
+
+  const withArgs = { id: 't2', chatId: 'c1', role: 'tool', name: 'read_file',
+    content: '{"ok":true}', argsLabel: ' (file: "a.txt")', timestamp: now };
+  const rendered = ui._renderMessage(withArgs);
+  ok('в переписке видно имя и параметры, а не начало ответа',
+     rendered.includes('read_file') && /file: .?a\.txt/.test(rendered) && !rendered.includes('ok'),
+     rendered);
 
   console.log('\n==============================================');
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);

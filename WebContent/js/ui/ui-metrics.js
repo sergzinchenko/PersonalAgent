@@ -419,14 +419,20 @@ Object.assign(UI.prototype, {
   },
 
 
-  // ── Панель плана справа ──
-  // Показывает то же, что уходит модели в каждом запросе: цель, шаги,
-  // текущий шаг и выясненные по дороге факты. Пока плана нет — панели
-  // нет: пустая колонка отнимала бы у переписки треть ширины ни за что.
+  // ── Правая панель ──
+  // Одно место для ответа на вопрос «чем агент занят»: план задачи, а
+  // внутри его текущего шага — вызовы инструментов, из которых шаг и
+  // состоит. Плана нет, а вызовы идут — панель показывает только их:
+  // держать ход работы в двух разных углах экрана значит заставлять
+  // сопоставлять их глазами.
+  //
+  // Пока показывать нечего — панели нет: пустая колонка отнимала бы у
+  // переписки треть ширины ни за что.
   async renderPlanPanel() {
     const app = document.getElementById('app');
     const panel = document.getElementById('plan-panel');
     const body = document.getElementById('plan-panel-body');
+    const titleEl = panel ? panel.querySelector('.plan-panel-title') : null;
     if (!app || !panel || !body) return;
 
     let plan = null;
@@ -438,14 +444,36 @@ Object.assign(UI.prototype, {
         : null;
     } catch (_) { /* панель не должна ронять чат */ }
 
-    // Панель, закрытую крестиком, не возвращаем до смены плана —
-    // иначе она всплывала бы снова после каждого отмеченного шага.
-    if (!plan || this._planPanelDismissed === plan.id) {
+    // Лента вызовов идёт в панель только тогда, когда вызовы названы:
+    // в режиме «только общий ход» это одна строка счёта, и её место —
+    // над полем ввода (см. _renderToolTrack).
+    const run = this.currentChatId ? this._chatRuns.get(this.currentChatId) : null;
+    const wantTrack = !!(run && run.track && run.track.length &&
+                         (this.toolVerbosity || 'hidden') !== 'hidden');
+
+    const planDismissed = plan && this._planPanelDismissed === plan.id;
+    const trackDismissed = this._planPanelDismissed === 'track';
+
+    // ── Панель только с вызовами ──
+    // Плана нет (или он закрыт крестиком), а работа идёт: показываем
+    // ленту одну. Для пользователя это та же «панель хода работы»,
+    // просто без оглавления задачи.
+    if ((!plan || planDismissed) && wantTrack && !trackDismissed) {
+      if (titleEl) titleEl.textContent = '🔧 Вызовы инструментов';
+      if (!body.querySelector('.plan-track')) body.innerHTML = '<div class="plan-track"></div>';
+      panel.hidden = false;
+      app.classList.add('plan-open');
+      this._renderToolTrack?.(this.currentChatId);
+      return;
+    }
+
+    if (!plan || planDismissed) {
       app.classList.remove('plan-open');
       panel.hidden = true;
       body.innerHTML = '';
       return;
     }
+    if (titleEl) titleEl.textContent = '🗂 План задачи';
 
     const mark = { done: '✔', doing: '▶', failed: '✖', todo: '·' };
     const done = plan.steps.filter(s => s.status === 'done').length;
@@ -484,6 +512,7 @@ Object.assign(UI.prototype, {
         <span class="plan-bar"><span style="width:${pct}%"></span></span>
       </div>
       <div class="plan-list">${steps}</div>
+      ${plan.steps.some(s => s.status === 'doing') ? '' : '<div class="plan-track"></div>'}
       ${plan.facts.length ? `
         <div class="plan-facts">
           <div class="plan-facts-title">Выяснено по ходу работы</div>
@@ -541,9 +570,12 @@ Object.assign(UI.prototype, {
     const app = document.getElementById('app');
     const panel = document.getElementById('plan-panel');
     // Запоминаем ИМЕННО закрытый план: следующий должен показаться сам.
+    // Если плана не было и закрыли панель с одной лентой вызовов —
+    // запоминаем это отдельной отметкой, и до конца хода панель не
+    // возвращается, а лента уходит к полю ввода.
     Promise.resolve(this.agent.tasks?.active(this.currentChatId))
-      .then(p => { this._planPanelDismissed = p?.id || null; })
-      .catch(() => {});
+      .then(p => { this._planPanelDismissed = p?.id || 'track'; })
+      .catch(() => { this._planPanelDismissed = 'track'; });
     app?.classList.remove('plan-open');
     if (panel) panel.hidden = true;
     // Лента вызовов жила внутри панели — возвращаем её к полю ввода,
