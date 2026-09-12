@@ -493,16 +493,18 @@ Object.assign(UI.prototype, {
       } catch (_) { /* журнал хода не критичен для панели */ }
     }
 
-    // У шага «в работе» — пустой контейнер под ленту вызовов
-    // инструментов: её наполняет _renderToolTrack (см. ui-chat.js).
-    // Вызовы и есть то, из чего состоит шаг, поэтому их место здесь,
-    // а не отдельным списком в другом углу экрана.
+    // ── Место под вызовы инструментов у КАЖДОГО шага ──
+    // Наполняет его _renderToolTrack (см. ui-chat.js), и кладёт туда
+    // только вызовы этого шага: вызовы и есть то, из чего шаг состоит.
+    // Пустые места не видны (.plan-track:empty), поэтому лишними они не
+    // выглядят, зато выполненный шаг сохраняет свою историю — видно, чем
+    // именно он был сделан.
     const steps = plan.steps.map(s => `
       <div class="plan-step plan-${s.status}">
         <span class="plan-mark">${mark[s.status] || '·'}</span>
         <span class="plan-title">${s.n}. ${this._escHtml(s.title)}</span>
         ${s.note ? `<div class="plan-note">${this._escHtml(s.note)}</div>` : ''}
-        ${s.status === 'doing' ? '<div class="plan-track"></div>' : ''}
+        <div class="plan-track" data-step="${s.n}"></div>
       </div>`).join('');
 
     body.innerHTML = `
@@ -512,7 +514,7 @@ Object.assign(UI.prototype, {
         <span class="plan-bar"><span style="width:${pct}%"></span></span>
       </div>
       <div class="plan-list">${steps}</div>
-      ${plan.steps.some(s => s.status === 'doing') ? '' : '<div class="plan-track"></div>'}
+      <div class="plan-track"></div>
       ${plan.facts.length ? `
         <div class="plan-facts">
           <div class="plan-facts-title">Выяснено по ходу работы</div>

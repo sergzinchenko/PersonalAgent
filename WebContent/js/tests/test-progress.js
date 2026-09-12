@@ -175,15 +175,46 @@ class FakeDB {
   console.log('\n── Лента переезжает внутрь шага плана ──');
   const plan = await agent.tasks.create('c1', 'Собрать отчёт', ['Найти файлы', 'Прочитать', 'Свести']);
   await agent.tasks.start('c1', 2);
+
+  // Вызовы приписаны шагам: первый сделан на шаге 1, два других — на
+  // шаге 2. Именно так их и расставляет цикл вызовов (см. planStep).
+  run.track[0].planStep = 1;
+  run.track[1].planStep = 2;
+  run.track[2].planStep = 2;
+
   await ui.renderPlanPanel();
   ok('панель плана открыта', document.getElementById('plan-panel').hidden === false);
   ok('и теперь называется планом',
      document.querySelector('#plan-panel .plan-panel-title').textContent.includes('План'),
      document.querySelector('#plan-panel .plan-panel-title').textContent);
+
   const slot = document.querySelector('#plan-panel .plan-step.plan-doing .plan-track');
   ok('у текущего шага есть место под ленту', !!slot);
+  ok('и оно помечено номером шага', slot.dataset.step === '2', slot.dataset.step);
   ok('лента переехала туда', slot.textContent.includes('read_file'), slot.textContent.trim().slice(0, 80));
   ok('и не дублируется над полем ввода', document.getElementById('tool-track-host').hidden === true);
+
+  // Главное: у каждого шага — СВОИ вызовы, а не общий список за ход.
+  const slot1 = document.querySelector('#plan-panel .plan-track[data-step="1"]');
+  ok('у первого шага — только его вызов',
+     slot1.textContent.includes('list_files') && !slot1.textContent.includes('read_file'),
+     slot1.textContent.trim().slice(0, 80));
+  ok('а у текущего — только его',
+     !slot.textContent.includes('list_files') && slot.textContent.includes('search_files'),
+     slot.textContent.trim().slice(0, 80));
+  ok('счёт в шаге считает вызовы этого шага', slot.textContent.includes('1 из 2'),
+     slot.textContent.trim().slice(0, 60));
+  const slot3 = document.querySelector('#plan-panel .plan-track[data-step="3"]');
+  ok('у шага без вызовов место пустует', slot3 && slot3.innerHTML === '');
+
+  // Вызов вне шагов плана виден отдельно, а не приписывается чужому шагу.
+  run.track[2].planStep = null;
+  ui._renderToolTrack('c1');
+  const loose = document.querySelector('#plan-panel .plan-list ~ .plan-track');
+  ok('вызов вне шагов ушёл в общее место',
+     loose && loose.textContent.includes('search_files'), loose && loose.textContent.trim());
+  run.track[2].planStep = 2;
+  ui._renderToolTrack('c1');
 
   // Место в сетке шага задано явно — иначе лента попадает в колонку
   // отметки шириной 18px и переносится по одному-два символа на строку.
@@ -201,7 +232,8 @@ class FakeDB {
      document.getElementById('tool-track-host').hidden === false);
   ui.toolVerbosity = 'compact';
   ui._renderToolTrack('c1');
-  ok('в кратком режиме возвращается в шаг плана', slot.textContent.includes('read_file'));
+  ok('в кратком режиме возвращается в шаг плана',
+     document.querySelector('#plan-panel .plan-track[data-step="2"]').textContent.includes('read_file'));
 
   // ══════════════════════════════════════════════
   console.log('\n── Управление работой из панели плана ──');

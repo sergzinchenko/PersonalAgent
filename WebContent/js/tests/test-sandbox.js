@@ -664,9 +664,13 @@ class FakeDB {
     // «залипшего» от прошлой осечки не осталось.
     sb._send = () => {};
     const p = sb.run('return 1;', {}, { timeoutMs: 0 });
-    await tick();
+    // Ждём готовности не «несколько тиков», а по факту: между запуском
+    // и появлением _resolveReady стоит создание кадра, и на загруженной
+    // машине оно не укладывалось в фиксированное число тиков — проверка
+    // падала примерно раз из трёх, ничего при этом не найдя.
+    for (let i = 0; i < 50 && !sb._resolveReady; i++) await tick(1);
     if (sb._resolveReady) sb._resolveReady(true);
-    await tick();
+    for (let i = 0; i < 50 && !sb.pending.size; i++) await tick(1);
     const runMsg = sb.pending.size ? Array.from(sb.pending.keys())[0] : null;
     ok('после осечки песочница снова принимает задания', !!runMsg);
     sb.destroy();

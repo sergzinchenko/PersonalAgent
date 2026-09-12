@@ -614,16 +614,18 @@ Object.assign(UI.prototype, {
     // туда: иначе оставленное там содержимое живёт вечно. Так и было —
     // переключение режима на «только общий ход» оставляло в шаге плана
     // прежний список вызовов, который больше никто не обновлял.
-    const planSlot = document.querySelector('#plan-panel:not([hidden]) .plan-track');
-    const inPlan = (this.toolVerbosity || 'hidden') === 'hidden' ? null : planSlot;
+    // Мест в панели столько, сколько шагов: у каждого своё, с номером.
+    // Плюс одно без номера — под вызовы, сделанные вне шагов плана (или
+    // когда плана нет вовсе).
+    const slots = Array.from(document.querySelectorAll('#plan-panel:not([hidden]) .plan-track'));
+    const usePanel = (this.toolVerbosity || 'hidden') !== 'hidden';
 
     // Панель могла быть ещё закрыта: первый вызов инструмента — это и
     // есть повод её открыть. Открывает её renderPlanPanel (он знает про
     // план, крестик и заголовок), а он в конце позовёт нас обратно —
-    // уже с готовым местом. Флаг против повторного входа: без него
+    // уже с готовыми местами. Флаг против повторного входа: без него
     // получилась бы рекурсия на каждый вызов инструмента.
-    if (!inPlan && !planSlot && run && run.track.length &&
-        (this.toolVerbosity || 'hidden') !== 'hidden' && !this._trackPanelPending) {
+    if (usePanel && !slots.length && run && run.track.length && !this._trackPanelPending) {
       this._trackPanelPending = true;
       Promise.resolve(this.renderPlanPanel?.())
         .finally(() => { this._trackPanelPending = false; });
@@ -633,29 +635,42 @@ Object.assign(UI.prototype, {
     if (!run || !run.track.length) {
       host.hidden = true;
       host.innerHTML = '';
-      if (planSlot) planSlot.innerHTML = '';
+      slots.forEach(el => { el.innerHTML = ''; });
       return;
     }
 
-    const html = this._toolTrackHtml(run);
-    if (inPlan) {
-      inPlan.innerHTML = html;
+    if (usePanel && slots.length) {
+      // ── Каждому шагу — его собственные вызовы ──
+      // Общий список под текущим шагом врал бы дважды: приписывал шагу
+      // чужую работу и терял связь «что делалось, когда делали это».
+      for (const el of slots) {
+        const n = el.dataset.step ? parseInt(el.dataset.step, 10) : null;
+        const mine = run.track.filter(t => (t.planStep ?? null) === n);
+        el.innerHTML = mine.length ? this._toolTrackHtml(run, mine) : '';
+        if (mine.length) this._bindToolTrack(el);
+      }
       host.hidden = true;
       host.innerHTML = '';
-    } else {
-      host.hidden = false;
-      host.innerHTML = html;
-      if (planSlot) planSlot.innerHTML = '';
+      return;
     }
-    this._bindToolTrack(inPlan || host);
+
+    host.hidden = false;
+    host.innerHTML = this._toolTrackHtml(run, run.track);
+    slots.forEach(el => { el.innerHTML = ''; });
+    this._bindToolTrack(host);
   },
 
-  _toolTrackHtml(run) {
+  // entries — какие именно вызовы показывать: весь ход (над полем ввода)
+  // или только вызовы одного шага плана (в панели). Счёт и обратный
+  // отсчёт считаются по переданному набору, иначе у шага показывались бы
+  // чужие числа.
+  _toolTrackHtml(run, entries) {
     const mode = this.toolVerbosity || 'hidden';
-    const total = run.track.length;
-    const finished = run.track.filter(t => t.status === 'done' || t.status === 'error').length;
-    const runningIdx = run.track.findIndex(t => t.status === 'running');
-    const current = runningIdx >= 0 ? run.track[runningIdx] : null;
+    const list = entries || run.track;
+    const total = list.length;
+    const finished = list.filter(t => t.status === 'done' || t.status === 'error').length;
+    const runningIdx = list.findIndex(t => t.status === 'running');
+    const current = runningIdx >= 0 ? list[runningIdx] : null;
     const limit = this.limits.maxToolCallsPerTurn | 0;
 
     // ── Счёт по ВСЕМУ списку, а не по выполненному ──
@@ -684,8 +699,8 @@ Object.assign(UI.prototype, {
     // Длинный ход даёт десятки вызовов. Показываем хвост: прошлые шаги
     // уже отработаны, а «что сейчас и что дальше» — в конце списка.
     const MAX_ROWS = 12;
-    const rows = run.track.slice(-MAX_ROWS);
-    const hiddenCount = run.track.length - rows.length;
+    const rows = list.slice(-MAX_ROWS);
+    const hiddenCount = list.length - rows.length;
 
     const mark = { pending: '·', running: '▶', done: '✔', error: '✖' };
     const body = rows.map((t, i) => {
@@ -701,7 +716,7 @@ Object.assign(UI.prototype, {
       // Подробный режим: аргументы и ответ рядом с вызовом, но свёрнуто —
       // развёрнутый по умолчанию ответ инструмента занимает весь экран.
       if (mode !== 'detailed' || t.status === 'pending') return row;
-      const idx = run.track.length - rows.length + i;
+      const idx = run.track.indexOf(t);
       return `<details class="tt-details" data-tt="${idx}">` +
         `<summary>${row}</summary>` +
         `<div class="tt-io">` +
@@ -753,6 +768,17 @@ Object.assign(UI.prototype, {
       e.preventDefault();
       this.openSubtaskChat(b.dataset.subchat);
     }));
+  },
+
+  // Номер шага плана, который сейчас в работе, или null. Нужен, чтобы
+  // приписать вызов инструмента шагу: в панели каждый шаг показывает
+  // СВОИ вызовы, а не общий список за весь ход.
+  async _currentPlanStep(chatId) {
+    try {
+      const plan = await this.agent.tasks?.active(chatId);
+      const doing = plan && plan.steps.find(st => st.status === 'doing');
+      return doing ? doing.n : null;
+    } catch (_) { return null; }
   },
 
   // Короткая запись аргументов вызова для ленты: полные уходят в
@@ -1596,6 +1622,11 @@ Object.assign(UI.prototype, {
         		    continue; // Пропускаем текущую итерацию, если tc undefined - из-за null в списках от некоторых LLM
           }
           const trackItem = run.track.find(t => t.step === run.trackStep && t.name === tc.function.name && t.status === 'pending');
+          // Шаг плана определяем в момент ИСПОЛНЕНИЯ, а не когда вызовы
+          // ставились в очередь: в той же пачке модель могла сначала
+          // закрыть один шаг и открыть следующий (task_plan), и всё, что
+          // идёт после, относится уже к новому шагу.
+          if (trackItem) trackItem.planStep = await this._currentPlanStep(chatId);
 
           // ── Прерывание пользователем ──
           if (run.stopRequested) {
