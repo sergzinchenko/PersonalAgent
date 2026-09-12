@@ -56,17 +56,87 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
     const transport = p.transport === 'proxy' ? 'proxy' : 'direct';
 
     // ── Откуда описание ──
+    //
+    // ЧЕТЫРЕ ИСТОЧНИКА, И ТРИ ИЗ НИХ НЕ ИДУТ ЧЕРЕЗ КОНТЕКСТ. Описание
+    // API — это мегабайты: swagger крупного сервиса, коллекция Postman
+    // на три сотни запросов. Единственный источник, который проходит
+    // через модель, — source: она должна была сначала ПРОЧИТАТЬ текст
+    // (read_file), то есть уместить его в ответ инструмента, а потом
+    // ПЕРЕДАТЬ обратно, то есть уместить второй раз в аргументы вызова.
+    // На большом файле это не срабатывает никогда: чтение упирается в
+    // предел ответа инструмента или уезжает в артефакт, и в source
+    // попадает обрывок. Разобрать обрывок нельзя, а выглядит он как
+    // «формат не распознан» — то есть как ошибка в самом файле.
+    //
+    // Поэтому у описания есть три пути в обход модели: url (скачиваем
+    // сами), file (читаем файл пользователя сами) и artifact_id (берём
+    // уже сохранённый вне контекста результат чтения). Модель называет
+    // ИСТОЧНИК, а не переносит содержимое.
     let text = typeof p.source === 'string' ? p.source : '';
+    let sourceKind = text ? 'source' : null;
+
+    if (!text && p.file) {
+      if (!this.files) return { error: 'FilesEngine не подключён — читать файл нечем' };
+      const record = await this.files.resolve(p.file);
+      if (!record) {
+        return { error: 'Файл не найден: ' + p.file,
+          hint: 'Посмотри перечень доступных файлов инструментом list_files.' };
+      }
+      // Предел выше обычного чтения: описание API целиком нужно здесь и
+      // сейчас, но в переписку оно не попадёт ни одним символом.
+      const res = await this.files.read(record.id, { maxBytes: 16 * 1024 * 1024 });
+      if (res.error) return res;
+      if (res.truncated) {
+        return {
+          error: `Файл «${res.name}» больше 16 МБ — прочитан не целиком, разбирать обрывок нельзя.`,
+          hint: 'Такое описание надо резать на части до импорта или указать url, откуда его взять.',
+        };
+      }
+      text = res.text || '';
+      sourceKind = 'file';
+    }
+
+    if (!text && p.artifact_id) {
+      if (!this.artifacts) return { error: 'Артефакты недоступны' };
+      const rec = await this.artifacts.get(String(p.artifact_id));
+      if (!rec) return { error: 'Артефакт не найден: ' + p.artifact_id };
+      text = rec.text || '';
+      sourceKind = 'artifact';
+    }
+
     if (!text && p.url) {
       const got = await this._fetchApiSpec(p.url, transport);
       if (got.error) return got;
       text = got.text;
+      sourceKind = 'url';
     }
+
     if (!text) {
       return {
-        error: 'Нужен источник описания: url или source (текст файла).',
-        hint: 'Если файл лежит у пользователя — сначала прочитай его read_file и передай текст в source.',
+        error: 'Нужен источник описания: file (файл пользователя), url, artifact_id или source.',
+        hint: 'Файл пользователя передавай через file — имя или id из list_files. ' +
+          'Читать его read_file и пересылать текст в source не нужно и на большом описании ' +
+          'не сработает: текст обрежется по пределу ответа инструмента.',
       };
+    }
+
+    // ── Обрывок вместо описания ──
+    // Самая частая и самая непонятная поломка: модель прочитала большой
+    // файл, получила усечённый текст и передала его сюда. Разбор
+    // споткнётся и скажет «формат не определён» — то есть соврёт, потому
+    // что с файлом всё в порядке. Ловим это ДО разбора и говорим, что
+    // делать вместо.
+    if (sourceKind === 'source') {
+      const cut = ApiImportEngine.looksTruncated(text);
+      if (cut) {
+        return {
+          error: 'Текст в source оборван: ' + cut + '.',
+          hint: 'Так бывает, когда описание читали read_file и пересылали сюда — оно не помещается ' +
+            'в ответ инструмента. Вызови api_import заново с file: "<имя файла>" (или artifact_id, ' +
+            'если чтение ушло в артефакт): тогда файл прочитает само приложение, целиком и мимо контекста.',
+          truncatedSource: true,
+        };
+      }
     }
 
     const spec = eng.parse(text, { format: p.format, baseUrl: p.baseUrl });
@@ -103,6 +173,8 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerApiImportHandlers() {
     const overview = {
       format: spec.format,
       formatLabel: ApiImportEngine.FORMATS[spec.format] || spec.format,
+      source: sourceKind,
+      sourceChars: text.length,
       api: spec.name,
       baseUrl: spec.baseUrl,
       operationsFound: spec.endpoints.length,
@@ -454,7 +526,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function apiImportDefs() {
         'в отдельной папке набора, навык описывает работу с ними, всё — выключенным.\n' +
         'Форматы: OpenAPI/Swagger (JSON), коллекция Postman (v2), WSDL 1.1 (SOAP), HAR (записанные ' +
         'запросы браузера), экспорт Insomnia, интроспекция GraphQL. Формат определяется сам.\n' +
-        'Источник: url (скачаю сам) или source (текст описания, например прочитанный read_file).\n' +
+        'Источник — назови его, а не пересылай содержимое: file (файл пользователя, имя или id ' +
+        'из list_files — приложение прочитает его само), url (скачаю сам), artifact_id (если чтение ' +
+        'уже ушло в артефакт). source (текст целиком) оставлен для мелких описаний: большое через ' +
+        'него не пройдёт — оно обрежется по пределу ответа инструмента, и получится обрывок.\n' +
         'СНАЧАЛА вызывай с dryRun: true — узнаешь, сколько операций внутри. Если их много, импортируй ' +
         'частями (only/limit/offset) и веди план задачи (task_plan): описание на сотни операций ' +
         'не нужно ни пользователю, ни контексту целиком.\n' +
@@ -471,7 +546,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function apiImportDefs() {
         type: 'object',
         properties: {
           url: { type: 'string', description: 'Адрес описания API (swagger.json, ?wsdl, экспорт коллекции)' },
-          source: { type: 'string', description: 'Текст описания, если файл уже прочитан' },
+          file: { type: 'string', description: 'Файл пользователя с описанием: имя или id из list_files. ' +
+            'Читается приложением целиком, в контекст не попадает — предпочтительный способ для локальных файлов' },
+          artifact_id: { type: 'string', description: 'id артефакта, если описание уже прочитано и сохранено вне контекста' },
+          source: { type: 'string', description: 'Текст описания целиком. Только для небольших: крупное придёт обрывком' },
           format: {
             type: 'string',
             enum: ['auto', 'openapi', 'postman', 'wsdl', 'har', 'insomnia', 'graphql'],

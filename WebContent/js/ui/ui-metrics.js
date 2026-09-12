@@ -452,11 +452,29 @@ Object.assign(UI.prototype, {
     const failed = plan.steps.filter(s => s.status === 'failed').length;
     const pct = plan.steps.length ? Math.round((done / plan.steps.length) * 100) : 0;
 
+    // ── Управление работой, а не только планом ──
+    // План отвечает на вопрос «что делается», и логично, что остановить
+    // и продолжить работу можно там же, где на неё смотрят. Кнопка ⏹ у
+    // поля ввода никуда не делась — это второй вход в то же действие.
+    const running = this._chatRuns.has(this.currentChatId);
+    let resumable = false;
+    if (!running) {
+      try {
+        const j = await this.agent.db.get('runs', this.currentChatId);
+        resumable = !!(j && j.status === 'interrupted');
+      } catch (_) { /* журнал хода не критичен для панели */ }
+    }
+
+    // У шага «в работе» — пустой контейнер под ленту вызовов
+    // инструментов: её наполняет _renderToolTrack (см. ui-chat.js).
+    // Вызовы и есть то, из чего состоит шаг, поэтому их место здесь,
+    // а не отдельным списком в другом углу экрана.
     const steps = plan.steps.map(s => `
       <div class="plan-step plan-${s.status}">
         <span class="plan-mark">${mark[s.status] || '·'}</span>
         <span class="plan-title">${s.n}. ${this._escHtml(s.title)}</span>
         ${s.note ? `<div class="plan-note">${this._escHtml(s.note)}</div>` : ''}
+        ${s.status === 'doing' ? '<div class="plan-track"></div>' : ''}
       </div>`).join('');
 
     body.innerHTML = `
@@ -472,24 +490,49 @@ Object.assign(UI.prototype, {
           <ul>${plan.facts.map(f => `<li>${this._escHtml(f)}</li>`).join('')}</ul>
         </div>` : ''}
       <div class="plan-panel-actions">
-        <button class="btn btn-secondary btn-sm btn-block" id="plan-panel-finish">Прекратить план</button>
+        ${running
+          ? `<button class="btn btn-secondary btn-sm btn-block" id="plan-panel-stop">⏸ Остановить работу</button>`
+          : (resumable
+            ? `<button class="btn btn-primary btn-sm btn-block" id="plan-panel-resume">▶ Продолжить работу</button>`
+            : '')}
+        <button class="btn btn-secondary btn-sm btn-block" id="plan-panel-finish">✕ Прервать план</button>
       </div>
       <div class="plan-panel-hint">
         План хранится отдельно от переписки: он переживает и подрезку истории,
         и перезагрузку страницы. Агент видит ровно то же, что показано здесь.
+        ${running
+          ? 'Остановка прерывает текущий ход — сделанное остаётся, работу можно продолжить.'
+          : (resumable ? 'Работа остановлена на полпути — кнопка выше продолжит её с этого же места.' : '')}
       </div>`;
 
     document.getElementById('plan-panel-finish')?.addEventListener('click', async () => {
       const yes = await this._confirm(
-        'Прекратить план? Агент перестанет получать эту сводку в каждом запросе.',
-        { title: 'Прекратить план' });
+        'Прервать план? Агент перестанет получать эту сводку в каждом запросе. ' +
+        'Уже сделанное останется, но работа по плану дальше не пойдёт.',
+        { title: 'Прервать план', danger: true });
       if (!yes) return;
+      // Прервать план при идущем ходе — значит прервать и сам ход:
+      // иначе агент продолжал бы работать по плану, которого уже нет.
+      if (this._chatRuns.has(this.currentChatId)) this.stopAgent();
       await this.agent.tasks.finish(this.currentChatId, 'cancelled');
+      this.updateChatToolbar();
+    });
+
+    document.getElementById('plan-panel-stop')?.addEventListener('click', () => {
+      this.stopAgent();
+      this.updateChatToolbar();
+    });
+
+    document.getElementById('plan-panel-resume')?.addEventListener('click', async () => {
+      await this.resumeRun?.(this.currentChatId);
       this.updateChatToolbar();
     });
 
     panel.hidden = false;
     app.classList.add('plan-open');
+    // Лента вызовов рисуется после панели: её место — внутри текущего
+    // шага, и до перерисовки панели этого места не существует.
+    this._renderToolTrack?.(this.currentChatId);
   },
 
   // Крестик в шапке панели. План при этом не трогается — скрыт только
@@ -503,6 +546,9 @@ Object.assign(UI.prototype, {
       .catch(() => {});
     app?.classList.remove('plan-open');
     if (panel) panel.hidden = true;
+    // Лента вызовов жила внутри панели — возвращаем её к полю ввода,
+    // иначе вместе с планом исчез бы и ход работы.
+    this._renderToolTrack?.(this.currentChatId);
   },
 
 

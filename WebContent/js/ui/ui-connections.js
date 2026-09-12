@@ -294,6 +294,10 @@ Object.assign(UI.prototype, {
       () => this._backToProviders(), () => this._backToProviders(), { wide: true });
 
     const res = await reg.fetchAvailable(connId);
+    // Пределы, названные самим провайдером, держим до открытия редактора
+    // модели: там они подставятся в поле окна контекста вместо догадки
+    // по имени (см. showModelEditor).
+    this._modelMeta = res.meta || {};
     const body = document.getElementById('mp_body');
     if (!body) return;
 
@@ -382,7 +386,25 @@ Object.assign(UI.prototype, {
 
     const name = m ? m.name : (presetName || '');
     const tier = m ? m.tier : LLMRegistry.guessTier(name);
-    const ctx = m ? m.contextWindow : LLMRegistry.guessContextWindow(name);
+    // Окно контекста: у уже сохранённой модели — своё, у новой — то, что
+    // сообщил сам провайдер в /models, и лишь в последнюю очередь догадка
+    // по имени. Порядок именно такой: догадка по имени врёт на локальных
+    // сборках, где одно и то же имя запускают с разным пределом.
+    const fromProvider = (!m && this._modelMeta && this._modelMeta[name])
+      ? this._modelMeta[name].contextWindow : 0;
+    const ctx = m ? m.contextWindow : (fromProvider || LLMRegistry.guessContextWindow(name));
+    const ctxSource = m ? (m.contextWindowSource || 'manual') : (fromProvider ? 'provider' : 'guess');
+    const SOURCE_LABEL = {
+      manual: 'задано вручную',
+      provider: 'сообщил провайдер',
+      error: 'исправлено по отказу провайдера',
+      observed: 'уточнено по факту работы',
+      guess: 'подставлено по имени модели — проверьте',
+    };
+    // max_tokens — это ПОТОЛОК ОТВЕТА, а не размер окна. Раньше он по
+    // умолчанию равнялся окну, и получалось невозможное: под ответ
+    // отведено всё окно целиком, а на историю не остаётся ничего.
+    const defTokens = ctx ? Math.max(1024, Math.min(8192, Math.floor(ctx / 4))) : 4096;
 
     const tierOptions = Object.entries(LLMRegistry.TIERS).map(([k, t]) =>
       `<option value="${k}" ${tier === k ? 'selected' : ''}>${t.icon} ${this._escHtml(t.label)} — ${this._escHtml(t.hint)}</option>`
@@ -409,10 +431,14 @@ Object.assign(UI.prototype, {
         <div class="form-group" style="flex:1;">
           <label>Окно контекста</label>
           <input type="number" id="me_ctx" min="0" value="${ctx}" placeholder="0 — неизвестно">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;display:flex;gap:6px;align-items:center;">
+            <span id="me_ctx_src">${this._escHtml(SOURCE_LABEL[ctxSource] || '')}</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="me_ctx_detect">Определить</button>
+          </div>
         </div>
         <div class="form-group" style="flex:1;">
           <label>max_tokens</label>
-          <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : (ctx || 4096)}">
+          <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : defTokens}">
         </div>
         <div class="form-group" style="flex:1;">
           <label>Температура</label>
@@ -424,10 +450,16 @@ Object.assign(UI.prototype, {
         <input id="me_notes" value="${this._escHtml(m ? m.notes : '')}" placeholder="например: дорогая, беречь — или: только для черновиков">
       </div>
       <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
-        Окно контекста API не сообщает, поэтому оно задаётся здесь: по нему считается
-        индикатор заполнения и подрезается история длинных чатов. max_tokens по умолчанию
-        равен окну контекста и следует за ним при правке — уменьшите вручную, если нужен
-        меньший потолок длины ответа.
+        <b>Это два разных предела, и нужны оба.</b>
+        <b>Окно контекста</b> — сколько токенов модель принимает ВСЕГО: запрос вместе с ответом.
+        По нему приложение подрезает историю, сворачивает переписку и рисует индикатор
+        заполнения; провайдеру оно не отправляется.
+        <b>max_tokens</b> — потолок длины ОТВЕТА, он уходит в каждый запрос: упёршись в него,
+        модель обрывает ответ на полуслове.
+        Разумно держать max_tokens в пределах четверти окна: ровно столько же места
+        приложение вычитает из бюджета истории, резервируя его под ответ.
+        Окно определяется автоматически — из списка моделей провайдера, из текста его отказа
+        и по фактически прошедшим запросам; кнопка «Определить» спрашивает провайдера заново.
       </div>
     `, async () => {
       const nm = document.getElementById('me_name').value.trim();
@@ -463,7 +495,33 @@ Object.assign(UI.prototype, {
     document.getElementById('me_ctx')?.addEventListener('input', (e) => {
       if (tokensTouched) return;
       const tokensInput = document.getElementById('me_tokens');
-      if (tokensInput) tokensInput.value = e.target.value || 4096;
+      const v = parseInt(e.target.value, 10) || 0;
+      // Следуем за окном, но четвертью, а не целиком: max_tokens, равный
+      // окну, не оставляет места ни под запрос, ни под историю.
+      if (tokensInput) tokensInput.value = v ? Math.max(1024, Math.min(8192, Math.floor(v / 4))) : 4096;
+    });
+    // Ручное определение: спрашиваем у провайдера список моделей и берём
+    // предел из карточки нужной. Работает там, где провайдер его отдаёт
+    // (локальные сборки, шлюзы); у остальных честно говорим, что нечего.
+    document.getElementById('me_ctx_detect')?.addEventListener('click', async () => {
+      const src = document.getElementById('me_ctx_src');
+      const nameNow = document.getElementById('me_name')?.value.trim();
+      if (!nameNow) { if (src) src.textContent = 'сначала укажите идентификатор модели'; return; }
+      if (src) src.textContent = 'спрашиваю провайдера…';
+      const res = await reg.fetchAvailable(connId);
+      if (res.error) { if (src) src.textContent = 'не вышло: ' + res.error; return; }
+      const found = res.meta && res.meta[nameNow] && res.meta[nameNow].contextWindow;
+      if (found) {
+        const ctxInput = document.getElementById('me_ctx');
+        if (ctxInput) {
+          ctxInput.value = found;
+          ctxInput.dispatchEvent(new Event('input'));
+        }
+        if (src) src.textContent = SOURCE_LABEL.provider;
+      } else if (src) {
+        src.textContent = 'провайдер предел не сообщает — задайте вручную ' +
+          '(он уточнится сам по первому же удачному запросу)';
+      }
     });
   },
 

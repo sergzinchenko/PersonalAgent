@@ -128,6 +128,14 @@ Object.assign(UI.prototype, {
           </div>
         </div>
         </div>
+
+        <!-- Проверка сочетаний. Пересчитывается на каждое изменение поля:
+             смысл не в том, чтобы отчитаться при сохранении, а в том,
+             чтобы противоречие было видно в момент, когда его создают. -->
+        <div class="form-group" id="limits-check-block">
+          <label>Проверка ограничений</label>
+          <div id="limits-check"></div>
+        </div>
       </div>
 
       <div class="settings-tab-panel" data-settings-panel="display" hidden>
@@ -163,14 +171,20 @@ Object.assign(UI.prototype, {
           </div>
         </div>
         <div class="form-group">
-          <label>Детализация вызовов инструментов в чате</label>
+          <label>Как показывать работу инструментов</label>
           <select id="s_tool_verbosity">
-            <option value="hidden" ${this.toolVerbosity === 'hidden' ? 'selected' : ''}>Скрывать — не показывать вызовы</option>
-            <option value="compact" ${this.toolVerbosity === 'compact' ? 'selected' : ''}>Кратко — имя и начало результата</option>
-            <option value="detailed" ${this.toolVerbosity === 'detailed' ? 'selected' : ''}>Подробно — аргументы, полный результат, время</option>
+            <option value="hidden" ${this.toolVerbosity === 'hidden' ? 'selected' : ''}>Только общий ход (по умолчанию)</option>
+            <option value="compact" ${this.toolVerbosity === 'compact' ? 'selected' : ''}>Кратко — список вызовов с временем</option>
+            <option value="detailed" ${this.toolVerbosity === 'detailed' ? 'selected' : ''}>Подробно — с аргументами и ответами</option>
           </select>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-            Влияет только на отображение. Вызовы выполняются и сохраняются в истории в любом случае.
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5;">
+            Пока агент работает, ход вызовов виден всегда — над полем ввода, а при открытом
+            плане задачи — внутри его текущего шага. Настройка задаёт подробность:<br>
+            <b>Только общий ход</b> — сколько вызовов сделано из скольких; в переписку они не пишутся.<br>
+            <b>Кратко</b> — список вызовов: что выполнено, что выполняется сейчас (с обратным
+            отсчётом до таймаута) и сколько занял каждый.<br>
+            <b>Подробно</b> — то же плюс аргументы и ответы, свёрнутые в раскрывающиеся блоки.<br>
+            Вызовы выполняются и сохраняются в истории при любом варианте.
           </div>
         </div>
         <div class="form-group">
@@ -582,6 +596,92 @@ Object.assign(UI.prototype, {
       if (filesCtx) filesCtx.value = this.filesContextMode || 'brief';
       const skMode = document.getElementById('s_skills_mode');
       if (skMode) skMode.value = this.skillsPanelMode || 'active';
+
+      // ── Непротиворечивость ограничений ──
+      // Считаем по тем значениям, что СЕЙЧАС в полях, а не по сохранённым:
+      // пользователь должен видеть последствия правки до того, как нажмёт
+      // «Сохранить».
+      const limitFields = {
+        maxToolSteps: 's_max_steps',
+        maxTurnSeconds: 's_max_turn_sec',
+        toolTimeoutSeconds: 's_tool_timeout_sec',
+        maxToolCallsPerTurn: 's_max_calls',
+        maxToolResponseChars: 's_max_resp_chars',
+        artifactThresholdChars: 's_artifact_threshold',
+        subtaskMaxSteps: 's_subtask_steps',
+      };
+      const readLimits = () => {
+        const out = {};
+        for (const [key, id] of Object.entries(limitFields)) {
+          out[key] = parseInt(document.getElementById(id)?.value, 10) || 0;
+        }
+        out.contextCompaction = !!document.getElementById('s_ctx_compaction')?.checked;
+        return out;
+      };
+      const renderLimitsCheck = () => {
+        const mount = document.getElementById('limits-check');
+        if (!mount || typeof LimitsAdvisor === 'undefined') return;
+        const model = this.agent.models?.describe?.() || null;
+        const findings = LimitsAdvisor.analyze(readLimits(), model);
+        const verdict = LimitsAdvisor.verdict(findings);
+
+        if (!findings.length) {
+          mount.innerHTML = '<div class="limits-ok">✔ Значения согласованы между собой' +
+            (model && model.contextWindow ? ` и с окном контекста модели (${this._fmtLimit(model.contextWindow)})` : '') +
+            '.</div>';
+          return;
+        }
+
+        const icon = { error: '⛔', warn: '⚠️', info: 'ℹ️' };
+        mount.innerHTML =
+          `<div class="limits-verdict limits-${verdict}">` +
+            (verdict === 'error'
+              ? 'Есть сочетания, при которых ограничения не работают так, как написано:'
+              : 'Работать будет, но стоит посмотреть:') +
+          '</div>' +
+          findings.map((f, i) => `
+            <div class="limits-finding limits-${f.level}">
+              <div class="lf-title">${icon[f.level] || ''} ${this._escHtml(f.title)}</div>
+              <div class="lf-why">${this._escHtml(f.why)}</div>
+              ${f.fix && f.fix.action !== 'detect' && !String(f.fix.field).startsWith('model.')
+                ? `<button type="button" class="btn btn-secondary btn-sm" data-fix="${i}">
+                     Поставить ${f.fix.value === true ? 'галочку' : this._escHtml(String(f.fix.value))}
+                   </button>`
+                : ''}
+              ${f.fix && String(f.fix.field).startsWith('model.')
+                ? '<div class="lf-hint">Это поле карточки модели — ⚙ Провайдеры и модели.</div>'
+                : ''}
+            </div>`).join('') +
+          (findings.some(f => f.fix && f.fix.action !== 'detect' && !String(f.fix.field).startsWith('model.'))
+            ? '<button type="button" class="btn btn-secondary btn-sm" id="limits-fix-all">Применить все рекомендации</button>'
+            : '');
+
+        const apply = (field, value) => {
+          if (field === 'contextCompaction') {
+            const cb = document.getElementById('s_ctx_compaction');
+            if (cb) cb.checked = !!value;
+            return;
+          }
+          const el = document.getElementById(limitFields[field]);
+          if (el) el.value = value;
+        };
+
+        mount.querySelectorAll('[data-fix]').forEach(b => b.addEventListener('click', () => {
+          const f = findings[parseInt(b.dataset.fix, 10)];
+          if (f && f.fix) apply(f.fix.field, f.fix.value);
+          renderLimitsCheck();
+        }));
+        document.getElementById('limits-fix-all')?.addEventListener('click', () => {
+          const patch = LimitsAdvisor.recommend(readLimits(), model);
+          for (const [field, value] of Object.entries(patch)) apply(field, value);
+          renderLimitsCheck();
+        });
+      };
+      Object.values(limitFields).forEach(id => {
+        document.getElementById(id)?.addEventListener('input', renderLimitsCheck);
+      });
+      document.getElementById('s_ctx_compaction')?.addEventListener('change', renderLimitsCheck);
+      renderLimitsCheck();
 
       const secMode = document.getElementById('s_sec_mode');
       const syncSecHint = () => {

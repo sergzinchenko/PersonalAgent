@@ -3,6 +3,12 @@
 // ============================================================
 //
 // Ядро диалога: отправка сообщения, цикл tool-calling с лимитами, прерывание, копирование кода, голосовой ввод.
+//
+// PLAN_NUDGE_DEPTH — с какой итерации подряд идущих вызовов инструментов
+// работа считается многошаговой и требует плана (см. _generateResponse).
+// Два — это ещё ответ с уточнением, три — уже работа: пользователь ждёт
+// и не знает, чего именно.
+const PLAN_NUDGE_DEPTH = 2;
 
 // Инструменты чтения артефактов: их собственный результат в артефакт НЕ
 // выносится, даже если он большой. Иначе чтение куска артефакта плодило
@@ -58,7 +64,7 @@ Object.assign(UI.prototype, {
           <div class="text">Начните диалог</div>
         </div>`;
     } else {
-      container.innerHTML = messages.map(m => this._renderMessage(m)).join('');
+      container.innerHTML = this._renderMessageList(messages);
       container.scrollTop = container.scrollHeight;
     }
 
@@ -78,6 +84,10 @@ Object.assign(UI.prototype, {
     // хода нигде, кроме run-объекта, не хранятся — достаём их оттуда.
     const run = this._chatRuns.get(chatId);
     if (run) {
+      // Лента вызовов живёт в run, а не в DOM, — значит, при возврате
+      // в чат её надо нарисовать заново, иначе работа выглядела бы
+      // остановившейся ровно из-за того, что на неё посмотрели.
+      this._renderToolTrack(chatId);
       if (run.partialContent) {
         const el = document.createElement('div');
         el.className = 'message assistant';
@@ -179,6 +189,53 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ── Лента с разделителями дней ──
+  // Раньше под сообщением стояло только время «14:32», и в чате, который
+  // ведут неделю, это время ничего не значило: вчерашний ответ выглядел
+  // так же, как сегодняшний. Дата в каждой подписи — лишний шум, поэтому
+  // она стоит один раз на день, отдельной строкой, как в мессенджерах.
+  _renderMessageList(messages) {
+    let lastDay = null;
+    const out = [];
+    for (const m of messages) {
+      const day = m.timestamp ? this._dayKey(m.timestamp) : null;
+      if (day && day !== lastDay) {
+        out.push(`<div class="day-divider"><span>${this._escHtml(this._dayLabel(m.timestamp))}</span></div>`);
+        lastDay = day;
+      }
+      out.push(this._renderMessage(m));
+    }
+    return out.join('');
+  },
+
+  _dayKey(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  },
+
+  // «Сегодня», «Вчера» или дата словами. Для давних сообщений — с годом:
+  // «12 сентября» без года в переписке двухлетней давности обманчиво.
+  _dayLabel(ts) {
+    const d = new Date(ts);
+    const now = new Date();
+    const key = this._dayKey(ts);
+    if (key === this._dayKey(now.getTime())) return 'Сегодня';
+    if (key === this._dayKey(now.getTime() - 86400000)) return 'Вчера';
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return d.toLocaleDateString('ru-RU', sameYear
+      ? { day: 'numeric', month: 'long', weekday: 'short' }
+      : { day: 'numeric', month: 'long', year: 'numeric' });
+  },
+
+  // Полные дата и время — в подсказку: точное значение нужно редко, но
+  // когда нужно, искать его больше негде.
+  _fullStamp(ts) {
+    return new Date(ts).toLocaleString('ru-RU', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  },
+
   _renderMessage(msg) {
     if (msg.role === 'tool') {
       const body = this._escHtml(typeof msg.content === 'string'
@@ -205,9 +262,9 @@ Object.assign(UI.prototype, {
       // не краткость, а неправда.
       if (msg.planLabel) {
         return `<div class="message tool-call tool-plan"><div class="tool-compact">` +
-               `${msg.isError ? '❌' : '🗂'} ${this._escHtml(msg.planLabel)}</div></div>`;
+               `${msg.isError ? '❌' : '🗂'} ${this._escHtml(msg.planLabel)}${this._toolStamp(msg)}</div></div>`;
       }
-      return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}</div>`;
+      return `<div class="message tool-call">🔧 Tool: ${this._escHtml(msg.name)} → ${body}${more}${this._toolStamp(msg)}</div>`;
     }
     if (msg.role === 'system') {
       // Свёрнутая часть переписки — служебная запись со своим видом
@@ -225,6 +282,16 @@ Object.assign(UI.prototype, {
     return `<div class="message ${roleClass}" data-msg-id="${this._escHtml(msg.id || '')}">${content}${this._msgFooter(msg)}</div>`;
   },
 
+  // Время вызова инструмента — мелко, в конце строки. Без него длинный
+  // ход выглядит как один момент времени: видно, что вызовов было
+  // двадцать, но не видно, растянулись они на минуту или на полчаса.
+  _toolStamp(msg) {
+    if (!msg.timestamp) return '';
+    const t = new Date(msg.timestamp).toLocaleTimeString('ru-RU',
+      { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return ` <span class="msg-time tool-stamp" title="${this._escHtml(this._fullStamp(msg.timestamp))}">${t}</span>`;
+  },
+
   // Подпись под сообщением: время, модель-автор ответа и длительность.
   // Модель берётся из самой записи, а не из текущих настроек, — иначе
   // старые ответы «переприписывались» бы новой моделью после смены.
@@ -238,7 +305,12 @@ Object.assign(UI.prototype, {
   _msgFooterInner(msg) {
     const parts = [];
     if (msg.timestamp) {
-      parts.push(new Date(msg.timestamp).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }));
+      // Секунды важнее, чем кажется: на цепочке из инструментов между
+      // двумя записями проходит меньше минуты, и без них порядок
+      // событий по подписям не восстановить. Полная дата — в подсказке.
+      const t = new Date(msg.timestamp).toLocaleTimeString('ru-RU',
+        { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      parts.push(`<span class="msg-time" title="${this._escHtml(this._fullStamp(msg.timestamp))}">${t}</span>`);
     }
     if (msg.role === 'user' && msg.turnDurationMs != null) {
       // Для запроса пользователя показываем полное время обработки —
@@ -364,6 +436,12 @@ Object.assign(UI.prototype, {
       streamEl: null,         // DOM-узел этого текста, если чат сейчас виден
       turnToolCalls: 0,
       turnUserMsgId: userMsg.id,
+      // ── Лента вызовов инструментов ──
+      // Что модель собралась вызвать на этом шаге, что из этого уже
+      // выполнено и сколько заняло. Живёт в run, а не в DOM: чат могут
+      // закрыть и открыть посреди хода, а ход от этого не прерывается.
+      track: [],
+      trackStep: 0,
       stopRequested: false,
       abortCtl: null,
       // Контроллер запроса подзадачи, пока она выполняется: «⏹» должен
@@ -438,6 +516,9 @@ Object.assign(UI.prototype, {
         // Ближе к исчерпанию бюджета подсвечиваем — обрыв не должен
         // становиться неожиданностью.
         timer.classList.toggle('near-limit', budget > 0 && sec >= budget * 0.75);
+        // Тем же тиком — обратный отсчёт текущего вызова инструмента:
+        // заводить второй секундный таймер ради соседней строки незачем.
+        this._updateToolCountdown(run);
       }, 1000);
     }
 
@@ -486,14 +567,173 @@ Object.assign(UI.prototype, {
   // таймер, снимает панель статуса и разблокирует ввод — но только если
   // это всё ещё влияет на то, что сейчас видно, — и обновляет индикатор
   // в списке чатов в любом случае.
+  // ── Лента вызовов инструментов ──
+  //
+  // ЗАЧЕМ. Вызовы инструментов — самая долгая и самая непрозрачная часть
+  // ответа. По умолчанию они больше не пишутся в переписку (скрытый
+  // режим — см. toolVerbosity): переписка для разговора, а не для
+  // протокола работы. Но «ничего не показывать» и «не показывать в
+  // переписке» — разные вещи: пока агент работает, пользователь должен
+  // видеть, ЧТО именно выполняется, сколько уже сделано и не завис ли
+  // текущий вызов. Для этого и лента.
+  //
+  // ТРИ УРОВНЯ ПОДРОБНОСТИ — это одна и та же лента, свёрнутая по-разному:
+  //   hidden   — одна строка: сколько вызовов сделано и сколько в шаге;
+  //   compact  — сами вызовы: отметка, имя, время каждого;
+  //   detailed — то же плюс аргументы и ответ в раскрывающейся строке.
+  //
+  // ГДЕ ОНА ЖИВЁТ. Если открыта панель плана — внутри текущего шага
+  // плана: вызовы и есть то, из чего шаг состоит, и разносить их по
+  // разным углам экрана значит заставлять сопоставлять их глазами.
+  // Панели плана нет (или план скрыт) — над полем ввода, рядом со
+  // строкой состояния.
+  _renderToolTrack(chatId) {
+    if (chatId !== this.currentChatId) return;
+    const run = this._chatRuns.get(chatId);
+    const host = document.getElementById('tool-track-host');
+    if (!host) return;
+
+    // Место внутри текущего шага плана. Его готовит renderPlanPanel:
+    // пустой контейнер есть всегда, когда панель видна и шаг в работе.
+    const inPlan = document.querySelector('#plan-panel:not([hidden]) .plan-track');
+    const mount = inPlan || host;
+
+    if (!run || !run.track.length) {
+      host.hidden = true;
+      host.innerHTML = '';
+      if (inPlan) inPlan.innerHTML = '';
+      return;
+    }
+
+    const html = this._toolTrackHtml(run);
+    if (inPlan) {
+      inPlan.innerHTML = html;
+      host.hidden = true;
+      host.innerHTML = '';
+    } else {
+      host.hidden = false;
+      host.innerHTML = html;
+    }
+    this._bindToolTrack(mount);
+  },
+
+  _toolTrackHtml(run) {
+    const mode = this.toolVerbosity || 'hidden';
+    const done = run.track.filter(t => t.status === 'done' || t.status === 'error').length;
+    const total = run.track.length;
+    const current = run.track.find(t => t.status === 'running');
+    const limit = this.limits.maxToolCallsPerTurn | 0;
+
+    // Общая строка — она же единственная в скрытом режиме. Отвечает на
+    // вопрос «работа идёт или всё встало», не называя ничего лишнего.
+    const head =
+      `<div class="tt-head">` +
+        `<span class="tt-title">🔧 Инструменты</span>` +
+        `<span class="tt-count">${done} из ${total}${total > done ? '' : ' · шаг завершён'}</span>` +
+        (limit > 0 ? `<span class="tt-budget" title="Потолок вызовов за один ответ">всего за ход: ${run.turnToolCalls} из ${limit}</span>` : '') +
+      `</div>`;
+
+    if (mode === 'hidden') {
+      return `<div class="tool-track tt-hidden">${head}` +
+        (current ? `<div class="tt-current">${this._escHtml(current.name)}<span class="tt-countdown" data-countdown></span></div>` : '') +
+        `</div>`;
+    }
+
+    // Длинный ход даёт десятки вызовов. Показываем хвост: прошлые шаги
+    // уже отработаны, а «что сейчас и что дальше» — в конце списка.
+    const MAX_ROWS = 12;
+    const rows = run.track.slice(-MAX_ROWS);
+    const hiddenCount = run.track.length - rows.length;
+
+    const mark = { pending: '·', running: '▶', done: '✔', error: '✖' };
+    const body = rows.map((t, i) => {
+      const time = t.status === 'running'
+        ? `<span class="tt-countdown" data-countdown></span>`
+        : (t.ms != null ? `<span class="tt-ms">${this._fmtDuration(t.ms)}</span>` : '');
+      const row =
+        `<div class="tt-row tt-${t.status}">` +
+          `<span class="tt-mark">${mark[t.status] || '·'}</span>` +
+          `<span class="tt-name">${this._escHtml(t.name)}</span>` +
+          time +
+        `</div>`;
+      // Подробный режим: аргументы и ответ рядом с вызовом, но свёрнуто —
+      // развёрнутый по умолчанию ответ инструмента занимает весь экран.
+      if (mode !== 'detailed' || t.status === 'pending') return row;
+      const idx = run.track.length - rows.length + i;
+      return `<details class="tt-details" data-tt="${idx}">` +
+        `<summary>${row}</summary>` +
+        `<div class="tt-io">` +
+          `<div class="tt-io-label">Аргументы</div><pre>${this._escHtml(t.args || '{}')}</pre>` +
+          (t.result != null
+            ? `<div class="tt-io-label">Ответ</div><pre>${this._escHtml(t.result)}</pre>` +
+              (t.artifactId ? `<button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(t.artifactId)}">📄 полностью</button>` : '') +
+              (t.subChatId ? `<button class="btn btn-secondary btn-sm" data-subchat="${this._escHtml(t.subChatId)}">💬 переписка подзадачи</button>` : '')
+            : '') +
+        `</div>` +
+      `</details>`;
+    }).join('');
+
+    return `<div class="tool-track tt-${mode}">${head}` +
+      (hiddenCount > 0 ? `<div class="tt-more">…ещё ${hiddenCount} раньше</div>` : '') +
+      `<div class="tt-rows">${body}</div></div>`;
+  },
+
+  // Обратный отсчёт у текущего вызова. Считается от таймаута ОДНОГО
+  // вызова, а не от бюджета хода: именно он оборвёт этот вызов, и
+  // именно его исчерпание выглядит как «агент завис».
+  _updateToolCountdown(run) {
+    const el = document.querySelector('[data-countdown]');
+    if (!el) return;
+    const cur = run.track.find(t => t.status === 'running');
+    if (!cur || !cur.startedAt) { el.textContent = ''; return; }
+    const sec = Math.floor((Date.now() - cur.startedAt) / 1000);
+    const cap = this.limits.toolTimeoutSeconds | 0;
+    if (cap > 0) {
+      const left = Math.max(0, cap - sec);
+      el.textContent = `${left} с`;
+      el.classList.toggle('near-limit', left <= Math.max(3, Math.round(cap * 0.25)));
+      el.title = `Вызов прервётся по таймауту через ${left} с (предел одного вызова — ${cap} с)`;
+    } else {
+      el.textContent = `${sec} с`;
+      el.title = 'Таймаут одного вызова не задан';
+    }
+  },
+
+  // Лента живёт вне ленты сообщений, поэтому общий делегированный
+  // обработчик #chat-messages (см. ui-core.js) до её кнопок не достаёт —
+  // вешаем те же два действия здесь.
+  _bindToolTrack(mount) {
+    mount.querySelectorAll('[data-artifact]').forEach(b => b.addEventListener('click', (e) => {
+      e.preventDefault();
+      this.showArtifact(b.dataset.artifact);
+    }));
+    mount.querySelectorAll('[data-subchat]').forEach(b => b.addEventListener('click', (e) => {
+      e.preventDefault();
+      this.openSubtaskChat(b.dataset.subchat);
+    }));
+  },
+
+  // Короткая запись аргументов вызова для ленты: полные уходят в
+  // переписку, здесь нужен опознавательный знак, а не документ.
+  _briefArgs(args) {
+    let s;
+    try { s = typeof args === 'string' ? args : JSON.stringify(args); }
+    catch (_) { s = String(args); }
+    s = s || '{}';
+    return s.length > 400 ? s.slice(0, 400) + '…' : s;
+  },
+
   // Снимает строку состояния. Раньше её уносило вместе с содержимым
   // ленты (innerHTML при loadChat) — теперь она вне ленты и обязана
   // сниматься явно, иначе висела бы над чужим, ничего не делающим чатом.
   _hideStatusBar() {
     const host = document.getElementById('agent-status-host');
-    if (!host) return;
-    host.hidden = true;
-    host.innerHTML = '';
+    if (host) { host.hidden = true; host.innerHTML = ''; }
+    // Лента вызовов показывает ход, а не историю: история остаётся в
+    // переписке. Оставленная после хода, она изображала бы работу,
+    // которой уже нет.
+    const track = document.getElementById('tool-track-host');
+    if (track) { track.hidden = true; track.innerHTML = ''; }
   },
 
   // keepJournal — ход прерван, но продолжить его осмысленно (упёрся в
@@ -1094,7 +1334,27 @@ Object.assign(UI.prototype, {
       // которое она заменяет, занимало бы всю переписку.
       try {
         const plan = await this.agent.tasks?.active(chatId);
-        if (plan) systemPrompt += this.agent.tasks.digest(plan);
+        if (plan) {
+          systemPrompt += this.agent.tasks.digest(plan);
+        } else if (depth >= PLAN_NUDGE_DEPTH) {
+          // ── Работа оказалась многошаговой, а плана нет ──
+          // Завести план — решение модели, и на коротком вопросе он не
+          // нужен. Но «многошаговость» выясняется не в начале, а по
+          // ходу: третья итерация с вызовами инструментов подряд — это
+          // уже не ответ, а работа, и у пользователя нет никакого
+          // способа увидеть, что происходит и сколько осталось.
+          // Просьбу повторяем на каждом следующем шаге, пока плана нет:
+          // однократная тонет в длинном контексте ровно там, где она
+          // нужнее всего.
+          systemPrompt +=
+            '\n\n# Эта работа стала многошаговой\n' +
+            `Ты уже ${depth} раза подряд вызывал инструменты, а плана задачи нет. ` +
+            'Заведи его СЕЙЧАС: task_plan action=create с целью и шагами (2–10 пунктов), ' +
+            'включая то, что уже сделано, — отметь эти шаги выполненными. ' +
+            'Дальше отмечай шаги по мере работы. План видит и пользователь: он показывает, ' +
+            'чем ты занят и сколько осталось, и позволяет остановить работу осмысленно. ' +
+            'Без плана длинная работа выглядит для него молчанием.\n';
+        }
       } catch (_) { /* план не критичен для ответа */ }
 
       // ── Упоминание файлов в системном промпте ──
@@ -1231,6 +1491,25 @@ Object.assign(UI.prototype, {
         contextTokens = est.prompt_tokens;
       }
       await this._recordContextSize(chatId, contextTokens, !result.usage);
+
+      // ── Окно контекста уточняется по факту ──
+      // Запрос ПРОШЁЛ, значит окно модели не меньше того, что в него
+      // поместилось. Если в настройках стоит меньше (угадали по имени,
+      // ошиблись, сменили модель за тем же именем), подрезка режет
+      // историю зря — и делает это молча. Точные цифры приходят только
+      // от провайдера, но «не меньше» — уже достаточно, чтобы не врать
+      // в меньшую сторону. Значение, введённое человеком, при этом
+      // остаётся главным (см. learnContextWindow).
+      if (result.usage && this.agent.models?.learnContextWindow) {
+        const seen = (result.usage.prompt_tokens || 0) + (result.usage.completion_tokens || 0);
+        try {
+          const upd = await this.agent.models.learnContextWindow(chatRef, seen, 'observed');
+          if (upd.changed) {
+            this._toast(`Окно контекста модели уточнено по факту работы: ${upd.from || '—'} → ${upd.to} токенов.`);
+          }
+        } catch (_) { /* уточнение не должно мешать ответу */ }
+      }
+
       if (chatId === this.currentChatId) this.updateChatToolbar();
       await this._checkContextThresholds(chatId, contextTokens, chatRef);
 
@@ -1252,10 +1531,29 @@ Object.assign(UI.prototype, {
         };
         await this.agent.db.put('messages', assistantMsg);
 
+        // Весь набор вызовов этого шага известен заранее — значит, можно
+        // показать не только «выполняется X», но и что будет дальше.
+        // Ради этого лента и заводится здесь, до исполнения.
+        run.trackStep++;
+        for (const tc of result.tool_calls) {
+          if (!tc || !tc.function) continue;
+          run.track.push({
+            id: tc.id || uid(),
+            name: tc.function.name,
+            step: run.trackStep,
+            status: 'pending',
+            ms: null,
+            args: this._briefArgs(tc.function.arguments),
+            result: null,
+          });
+        }
+        this._renderToolTrack(chatId);
+
         for (const tc of result.tool_calls) {
           if (tc === undefined) {
         		    continue; // Пропускаем текущую итерацию, если tc undefined - из-за null в списках от некоторых LLM
           }
+          const trackItem = run.track.find(t => t.step === run.trackStep && t.name === tc.function.name && t.status === 'pending');
 
           // ── Прерывание пользователем ──
           if (run.stopRequested) {
@@ -1301,6 +1599,11 @@ Object.assign(UI.prototype, {
           );
 
           const startedAt = performance.now();
+          if (trackItem) {
+            trackItem.status = 'running';
+            trackItem.startedAt = Date.now();
+            this._renderToolTrack(chatId);
+          }
           const toolResult = await this.agent.tools.executeTool(
             tc.function.name,
             tc.function.arguments,
@@ -1336,6 +1639,15 @@ Object.assign(UI.prototype, {
               // повод терять результат: отдаём как раньше, целиком.
               console.error('Артефакт не сохранён, результат уходит в контекст целиком', e);
             }
+          }
+
+          if (trackItem) {
+            trackItem.status = isError ? 'error' : 'done';
+            trackItem.ms = elapsedMs;
+            trackItem.artifactId = artifactId;
+            trackItem.subChatId = subChatId;
+            trackItem.result = String(resultStr || '').slice(0, 600);
+            this._renderToolTrack(chatId);
           }
 
           await this._recordToolCall(chatId, tc.function.name, elapsedMs, isError);
@@ -1459,10 +1771,29 @@ Object.assign(UI.prototype, {
           `Запрос прерван: превышен лимит времени на ответ (${L.maxTurnSeconds} с). ` +
           (run.partialContent.trim() ? 'Полученная часть ответа сохранена.' : ''), 'time');
       } else {
+        // ── Отказ по переполнению контекста ──
+        // Провайдер в таком отказе САМ называет предел — это самый точный
+        // источник из возможных. Раньше сообщение просто показывалось как
+        // есть, и пользователь шёл искать нужную цифру в документации,
+        // хотя она стояла прямо в тексте ошибки.
+        let ctxNote = '';
+        try {
+          const declared = LLMRegistry.contextFromError(error.message);
+          if (declared && this.agent.models?.learnContextWindow) {
+            const upd = await this.agent.models.learnContextWindow(chatRef, declared, 'error');
+            if (upd.changed) {
+              ctxNote = `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;">` +
+                `Провайдер назвал предел в самом отказе: окно контекста модели исправлено ` +
+                `на ${declared} токенов (было ${upd.from || 'не задано'}). ` +
+                `Следующий запрос будет подрезан под него — попробуйте продолжить.</div>`;
+            }
+          }
+        } catch (_) { /* разбор ошибки не должен порождать вторую ошибку */ }
+
         const errContainer = dom();
         if (errContainer) {
           errContainer.insertAdjacentHTML('beforeend',
-            `<div class="message system">❌ ${this._escHtml('Ошибка: ' + error.message)}</div>`);
+            `<div class="message system">❌ ${this._escHtml('Ошибка: ' + error.message)}${ctxNote}</div>`);
           errContainer.scrollTop = errContainer.scrollHeight;
         }
         // Сбой сети или отказ провайдера тоже не должен стоить работы:
@@ -1480,7 +1811,11 @@ Object.assign(UI.prototype, {
       // keepJournal: остановка по ограничению или сбою оставляет запись
       // журнала — по ней ход можно продолжить, в том числе после
       // перезагрузки страницы (см. renderResumeOffer).
-      if (depth === 0) this._endRun(chatId, { keepJournal: run.stoppedByLimit || null });
+      if (depth === 0) {
+        this._endRun(chatId, {
+          keepJournal: run.stoppedByLimit || (run.stoppedByUser ? 'user' : null),
+        });
+      }
     }
 
     // Ход завершён (цепочка вызовов инструментов раскручена) — записываем
@@ -1548,13 +1883,20 @@ Object.assign(UI.prototype, {
       try { argsPretty = JSON.stringify(JSON.parse(argsRaw), null, 2); } catch (_) {}
       let resPretty = resultStr;
       try { resPretty = JSON.stringify(JSON.parse(resultStr), null, 2); } catch (_) {}
+      // Свёрнуто по умолчанию: развёрнутый ответ инструмента занимает
+      // экран целиком, и переписка между двумя такими блоками перестаёт
+      // читаться. Заголовок с именем, временем и признаком ошибки виден
+      // всегда — этого хватает, чтобы решить, надо ли разворачивать.
       return `
-        <div><strong>${icon} ${this._escHtml(name)}</strong> <span class="tool-meta">${elapsedMs} мс</span></div>
-        <div class="tool-section">Аргументы:</div>
-        <pre class="tool-pre">${this._escHtml(argsPretty)}</pre>
-        <div class="tool-section">Результат:</div>
-        <pre class="tool-pre">${this._escHtml(resPretty)}</pre>
-        ${artifactBtn}${subBtn}
+        <details class="tool-detail">
+          <summary><strong>${icon} ${this._escHtml(name)}</strong>
+            <span class="tool-meta">${elapsedMs} мс</span></summary>
+          <div class="tool-section">Аргументы:</div>
+          <pre class="tool-pre">${this._escHtml(argsPretty)}</pre>
+          <div class="tool-section">Результат:</div>
+          <pre class="tool-pre">${this._escHtml(resPretty)}</pre>
+          ${artifactBtn}${subBtn}
+        </details>
       `;
     }
     // compact
@@ -1657,9 +1999,27 @@ Object.assign(UI.prototype, {
     // выглядит как зависание.
     this._showStatus(chatId, 'Останавливаю…', 'жду завершения текущей операции');
 
+    // ── Остановка — это пауза, а не отмена ──
+    // Раньше «⏹» закрывал ход насовсем: журнал стирался, и вернуться к
+    // многошаговой работе было нечем — приходилось просить то же самое
+    // заново, оплачивая уже сделанное второй раз. Теперь остановка
+    // помечает ход продолжаемым, как и остановка по ограничению.
+    run.stoppedByUser = true;
+
     const container = document.getElementById('chat-messages');
-    container.insertAdjacentHTML('beforeend',
-      '<div class="message system">⏹ Работа агента прервана пользователем.</div>');
+    const id = 'stopped_' + uid();
+    container.insertAdjacentHTML('beforeend', `
+      <div class="message system" id="${id}">
+        ⏹ Работа агента остановлена вами. Сделанное сохранено.
+        <div style="margin-top:8px;">
+          <button class="btn btn-primary btn-sm" data-resume-stop="1">▶ Продолжить с этого места</button>
+        </div>
+      </div>`);
+    document.getElementById(id)?.querySelector('[data-resume-stop]')
+      ?.addEventListener('click', (e) => {
+        e.target.closest('.message')?.remove();
+        this.resumeRun(chatId);
+      });
     container.scrollTop = container.scrollHeight;
   },
 

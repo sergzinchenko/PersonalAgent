@@ -273,6 +273,10 @@ Object.assign(UI.prototype, {
       subtaskAbort: null,
       statusTimer: null,
       resumed: true,
+      // Лента вызовов заводится и здесь: продолженный ход ничем не
+      // отличается от обычного, и показывать его надо так же.
+      track: [],
+      trackStep: 0,
     };
     this._chatRuns.set(chatId, run);
     // Причину прошлой остановки снимаем: иначе следующий обрыв — уже

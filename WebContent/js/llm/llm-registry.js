@@ -201,6 +201,10 @@ class LLMRegistry {
       label: String(model.label || '').trim(),        // как называть в интерфейсе
       tier: LLMRegistry.TIERS[model.tier] ? model.tier : 'balanced',
       contextWindow: parseInt(model.contextWindow) || 0,
+      // Откуда взялось окно: manual (ввёл человек), provider, error,
+      // observed. Нужен, чтобы автоопределение не спорило с тем, что
+      // пользователь задал руками (см. learnContextWindow).
+      contextWindowSource: model.contextWindowSource || 'manual',
       maxTokens: parseInt(model.maxTokens) || 4096,
       temperature: model.temperature ?? 0.7,
       notes: String(model.notes || '').slice(0, 300),
@@ -271,6 +275,7 @@ class LLMRegistry {
       tierLabel: tier.label,
       tierIcon: tier.icon,
       contextWindow: r.model.contextWindow,
+      contextWindowSource: r.model.contextWindowSource || 'manual',
       maxTokens: r.model.maxTokens,
       temperature: r.model.temperature,
       notes: r.model.notes,
@@ -302,10 +307,22 @@ class LLMRegistry {
         return { error: 'Провайдер ответил ' + resp.status + (body ? ': ' + body.slice(0, 200) : '') };
       }
       const data = await resp.json();
-      const ids = (data.data || data.models || [])
-        .map(m => (typeof m === 'string' ? m : m.id || m.name))
-        .filter(Boolean);
-      return { models: Array.from(new Set(ids)).sort() };
+      const raw = (data.data || data.models || []);
+      const ids = raw.map(m => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean);
+      // ── Окно контекста, если провайдер его сообщает ──
+      // OpenAI не сообщает, а вот всё, что разворачивают у себя (vLLM,
+      // llama.cpp, LM Studio, Ollama, шлюзы вроде OpenRouter), кладёт
+      // предел прямо в карточку модели — просто под разными именами.
+      // Пользоваться этим дешевле, чем угадывать по имени модели.
+      const meta = {};
+      for (const m of raw) {
+        if (!m || typeof m === 'string') continue;
+        const id = m.id || m.name;
+        if (!id) continue;
+        const ctx = LLMRegistry.contextFromModelEntry(m);
+        if (ctx) meta[id] = { contextWindow: ctx };
+      }
+      return { models: Array.from(new Set(ids)).sort(), meta };
     } catch (e) {
       // Браузер отдаёт одинаковый TypeError и на недоступный сервер,
       // и на запрет CORS — без подсказки причину ищут не там.
@@ -325,9 +342,100 @@ class LLMRegistry {
     return { ok: true, name: conn.name, latencyMs: Date.now() - t0, modelCount: res.models.length };
   }
 
-  // Подсказка окна контекста по имени модели. Провайдеры этот предел в
-  // API не сообщают, поэтому при добавлении модели поле подставляется
-  // из таблицы, а пользователь при необходимости правит.
+  // ── Окно контекста из карточки модели в /models ──
+  // Имена полей у всех разные, поэтому просто перебираем известные.
+  // Берём максимум: некоторые сборки отдают и общий предел, и предел
+  // одного запроса, и первый — то, что нам нужно.
+  static contextFromModelEntry(entry) {
+    const keys = ['context_length', 'max_context_length', 'max_model_len', 'context_window',
+                  'n_ctx', 'max_input_tokens', 'max_tokens'];
+    const nested = [entry, entry.meta, entry.capabilities, entry.limits, entry.model_info,
+                    entry.top_provider, entry.architecture].filter(o => o && typeof o === 'object');
+    let best = 0;
+    for (const obj of nested) {
+      for (const k of keys) {
+        const v = parseInt(obj[k], 10);
+        // Отсекаем очевидную ерунду: окно меньше тысячи токенов — это
+        // почти наверняка не окно, а предел ответа или чужое поле.
+        if (Number.isFinite(v) && v >= 1000 && v > best) best = v;
+      }
+    }
+    return best;
+  }
+
+  // ── Окно контекста из ответа об ошибке ──
+  // Самый точный источник из всех: провайдер отказал и сам назвал предел.
+  // Ловим и английские формулировки OpenAI-совместимых серверов, и то,
+  // что пишут локальные сборки.
+  static contextFromError(text) {
+    const t = String(text || '');
+    const patterns = [
+      /maximum context length is (\d{3,})/i,
+      /context length of (\d{3,})/i,
+      /context window of (\d{3,})/i,
+      /max(?:imum)?[ _-]?(?:context|seq(?:uence)?)[ _-]?(?:length|len)[^\d]{0,20}(\d{3,})/i,
+      /model'?s max(?:imum)? (?:context )?(?:length|tokens?)[^\d]{0,20}(\d{3,})/i,
+      /n_ctx[^\d]{0,10}(\d{3,})/i,
+    ];
+    for (const re of patterns) {
+      const m = t.match(re);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n >= 1000) return n;
+      }
+    }
+    return 0;
+  }
+
+  // ── Уточнение окна по факту работы ──
+  // source:
+  //   'provider' — сказал сам провайдер в /models;
+  //   'error'    — назвал в тексте отказа (самое надёжное, ставим как есть);
+  //   'observed' — столько токенов запрос УЖЕ прошёл, значит окно не меньше.
+  //
+  // Правило простое и намеренно осторожное: заданное человеком вручную
+  // не перетираем ничем, кроме ответа об отказе, — он единственный
+  // означает «ваше значение неверно», а не «может быть больше».
+  async learnContextWindow(ref, value, source = 'observed') {
+    const r = this.resolve(ref || this.currentRef || this.defaultRef);
+    const n = parseInt(value, 10);
+    if (!r || !Number.isFinite(n) || n < 1000) return { changed: false };
+
+    const cur = parseInt(r.model.contextWindow, 10) || 0;
+    const curSource = r.model.contextWindowSource || (cur ? 'manual' : 'unknown');
+
+    let next = 0;
+    if (source === 'error') {
+      // Провайдер прямо назвал предел — он главнее всего, включая
+      // введённое руками: с неверным значением чат просто не работает.
+      next = n;
+    } else if (!cur) {
+      next = n;
+    } else if (source === 'observed' && n > cur) {
+      // Запрос на n токенов ПРОШЁЛ, а в настройках окно меньше — значит,
+      // настройки занижены, и подрезка режет историю зря. Поднимаем до
+      // фактически достигнутого с небольшим запасом.
+      next = Math.ceil((n * 1.05) / 1000) * 1000;
+    } else if (source === 'provider' && curSource !== 'manual' && n !== cur) {
+      next = n;
+    }
+
+    if (!next || next === cur) return { changed: false, contextWindow: cur };
+
+    await this.saveModel(r.conn.id, {
+      ...r.model,
+      contextWindow: next,
+      contextWindowSource: source,
+    });
+    // Шлюз держит копию параметров применённой модели — обновляем, иначе
+    // изменение подхватится только после переключения модели.
+    if ((this.currentRef || this.defaultRef) === r.ref) this.applyRef(r.ref);
+    return { changed: true, from: cur, to: next, source };
+  }
+
+  // Подсказка окна контекста по имени модели. Многие провайдеры этот
+  // предел в API не сообщают, поэтому при добавлении модели поле
+  // подставляется из таблицы, а пользователь при необходимости правит.
   static guessContextWindow(modelName) {
     const m = String(modelName || '').toLowerCase();
     const table = [

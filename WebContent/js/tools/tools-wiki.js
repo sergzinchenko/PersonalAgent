@@ -751,17 +751,26 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerWikiHandlers() {
   this.registerHandler('builtin_xwiki_list_pages', async (params) => {
     const space = String(params.space || '').trim();
     if (!space) return { error: 'Нужен space — пространство, страницы которого перечислить' };
+    // Страницами, а не целиком: в пространстве корпоративной вики их
+    // бывают сотни, и разница между «показать» и «вывалить» здесь та же,
+    // что и у таблиц (см. xwiki_livetable).
+    const number = intIn(params.limit, 50, 1, 200);
+    const start = intIn(params.offset, 0, 0, 1000000);
     const r = await this._wikiRequest('xwiki', {
-      path: (await xwikiRoot(params)) + spaceSegments(space) + '/pages?media=json',
+      path: (await xwikiRoot(params)) + spaceSegments(space) +
+            `/pages?media=json&start=${start}&number=${number}`,
     });
     if (r.error) return r;
     const items = r.data.pageSummaries || r.data.pages || [];
     return {
       space,
       count: items.length,
+      offset: start,
       pages: items.map((p) => ({
         page: p.name, title: p.title, fullName: p.fullName, parent: p.parent || undefined,
       })),
+      more: items.length >= number
+        ? `Показаны не все: повтори с offset = ${start + items.length}` : undefined,
     };
   });
 
@@ -1026,6 +1035,188 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerWikiHandlers() {
     }
 
     return { error: 'action должен быть list, get или set' };
+  });
+
+  // ── Классы xWiki ──
+  // Класс — это схема: набор свойств, которыми описан объект. Для
+  // LiveTable он же отвечает на два вопроса, без которых запрос
+  // составить нельзя: какие таблицы вообще есть (classname) и какие у
+  // них колонки (collist). Поэтому перечень классов и свойств — не
+  // справочная роскошь, а первый шаг работы с таблицами.
+  this.registerHandler('builtin_xwiki_classes', async (params) => {
+    const action = String(params.action || 'list').toLowerCase();
+    const root = await xwikiRoot(params);
+
+    if (action === 'list') {
+      const r = await this._wikiRequest('xwiki', { path: root + '/classes?media=json' });
+      if (r.error) return r;
+      const all = (r.data.classes || []).map((c) => c.id || c.name).filter(Boolean);
+      // Классов на установке бывают сотни (свои, системные, из
+      // приложений). Целиком они в контекст не помещаются и не нужны:
+      // ищут почти всегда по куску имени.
+      const only = String(params.only || '').trim().toLowerCase();
+      const matched = only ? all.filter((n) => n.toLowerCase().includes(only)) : all;
+      const limit = intIn(params.limit, 50, 1, 500);
+      const offset = intIn(params.offset, 0, 0, 100000);
+      const page = matched.slice(offset, offset + limit);
+      return {
+        wiki: params.wiki || (await this._wikiConfig('xwiki')).wiki,
+        total: all.length,
+        matching: matched.length,
+        offset,
+        classes: page,
+        more: offset + page.length < matched.length
+          ? `Показаны не все: повтори с offset = ${offset + page.length}` : undefined,
+        note: 'Колонки конкретного класса — action: "properties". Эту пару (класс → колонки) ' +
+          'стоит один раз положить в память агента, чтобы не спрашивать её при каждом запросе.',
+      };
+    }
+
+    const className = String(params.class_name || '').trim();
+    if (!className) return { error: 'Нужен class_name — полное имя класса, например DataFlowManage.Code.DataFlowManageClass' };
+
+    // Значения атрибута свойства нужны не все: у StaticList в них лежит
+    // список допустимых значений (именно значения, а не подписи — по
+    // подписи фильтр не сработает), у DBList — запрос-источник.
+    const attrs = (prop) => {
+      const out = {};
+      for (const a of (prop.attributes || [])) {
+        if (['values', 'prettyName', 'multiSelect', 'separator', 'sql', 'classname', 'picker'].includes(a.name)) {
+          out[a.name] = a.value;
+        }
+      }
+      return out;
+    };
+
+    if (action === 'property') {
+      const prop = String(params.property || '').trim();
+      if (!prop) return { error: 'Нужен property — имя свойства' };
+      const r = await this._wikiRequest('xwiki', {
+        path: root + '/classes/' + encodeURIComponent(className) +
+              '/properties/' + encodeURIComponent(prop) + '?media=json',
+      });
+      if (r.error) return r;
+      return { className, property: r.data.name || prop, type: r.data.type, ...attrs(r.data) };
+    }
+
+    if (action === 'properties') {
+      const r = await this._wikiRequest('xwiki', {
+        path: root + '/classes/' + encodeURIComponent(className) + '/properties?media=json',
+      });
+      if (r.error) return r;
+      const list = r.data.properties || r.data.propertys || [];
+      return {
+        className,
+        count: list.length,
+        properties: list.map((pr) => ({ name: pr.name, type: pr.type, ...attrs(pr) })),
+        note: 'Имена свойств — это и есть колонки для xwiki_livetable (collist) и ключи фильтров. ' +
+          'Служебные колонки документа доступны всегда: doc.fullName, doc.title, doc.author, doc.date, doc.creationDate.',
+      };
+    }
+
+    return { error: 'action должен быть list, properties или property' };
+  });
+
+  // ── LiveTable ──
+  // Справочники и реестры в xWiki живут не страницами, а таблицами
+  // LiveTable: сотни объектов одного класса с фильтрами и сортировкой.
+  // Достучаться до них через REST нельзя — объекты REST отдаёт только
+  // постранично, то есть «выбрать по условию» превратилось бы в обход
+  // всего пространства. LiveTable отвечает на такой вопрос одним
+  // запросом, и именно поэтому он здесь, хотя формально это не REST API,
+  // а AJAX-служба интерфейса (адрес из коллекции: /wiki/{вика}/get/...).
+  //
+  // Отсюда же ограничение: набор колонок и допустимые значения фильтров
+  // задаёт класс, а не этот инструмент, — их берут у xwiki_classes.
+  this.registerHandler('builtin_xwiki_livetable', async (params) => {
+    const className = String(params.class_name || '').trim();
+    if (!className) {
+      return {
+        error: 'Нужен class_name — полное имя класса (Пространство.Класс).',
+        hint: 'Не знаешь имя — посмотри xwiki_classes action: "list", ' +
+          'а колонки этого класса — action: "properties".',
+      };
+    }
+
+    const cfg = await this._wikiConfig('xwiki');
+    if (!cfg.configured) return notConfigured('xwiki');
+    const wiki = String(params.wiki || cfg.wiki || 'xwiki').trim();
+
+    // Колонки: без них сервис вернёт только служебные поля документа.
+    const columns = (Array.isArray(params.columns) ? params.columns : String(params.columns || '')
+      .split(',')).map((c) => String(c || '').trim()).filter(Boolean);
+    const collist = columns.length ? columns : ['doc.fullName', 'doc.title', 'doc.author', 'doc.date'];
+
+    // Пагинация: страницами, а не «всё сразу». Таблица на тысячи строк
+    // не поместится ни в ответ инструмента, ни в контекст, а общее число
+    // строк сервис возвращает сам — по нему и видно, сколько осталось.
+    const limit = intIn(params.limit, 15, 1, 100);
+    const offset = intIn(params.offset, 0, 0, 1000000);
+
+    const q = [
+      'outputSyntax=plain',
+      'transprefix=',
+      'classname=' + encodeURIComponent(className),
+      'collist=' + encodeURIComponent(collist.join(',')),
+      'queryFilters=' + encodeURIComponent(String(params.query_filters || 'currentlanguage,hidden')),
+      'limit=' + limit,
+      'startIndex=' + offset,
+    ];
+    if (params.sort) {
+      q.push('sort=' + encodeURIComponent(String(params.sort)));
+      q.push('dir=' + (String(params.dir).toLowerCase() === 'asc' ? 'asc' : 'desc'));
+    }
+    // Фильтры — это обычные параметры запроса «колонка=значение».
+    // Ключи не проверяем по схеме класса намеренно: у LiveTable есть и
+    // служебные колонки (doc.*), и свои у каждого приложения, а
+    // неизвестный фильтр сервис просто не применит.
+    const filters = (params.filters && typeof params.filters === 'object') ? params.filters : {};
+    for (const [k, v] of Object.entries(filters)) {
+      if (v === undefined || v === null || v === '') continue;
+      q.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+    }
+
+    const r = await this._wikiRequest('xwiki', {
+      path: `/wiki/${encodeURIComponent(wiki)}/get/XWiki/LiveTableResults?` + q.join('&'),
+    });
+    if (r.error) {
+      return {
+        ...r,
+        hint: r.status === 404
+          ? 'LiveTable живёт не в /rest, а в самом приложении. Проверь имя вики (xwiki_status) ' +
+            'и что адрес в настройках указывает на корень xWiki, а не на /rest.'
+          : r.hint,
+      };
+    }
+
+    const data = r.data || {};
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const total = Number(data.totalrows ?? rows.length);
+
+    // Пустой ответ на непустой таблице почти всегда означает одно:
+    // отфильтровали по подписи вместо значения либо ошиблись в имени
+    // класса. Молча вернуть «ничего не найдено» здесь — значит отправить
+    // пользователя искать несуществующую проблему в данных.
+    const emptyHint = (!rows.length && !offset)
+      ? 'Ничего не найдено. Проверь имя класса (xwiki_classes action: "list") и значения фильтров: ' +
+        'у свойств типа StaticList фильтровать надо по значению (value), а не по подписи (label) — ' +
+        'допустимые значения показывает xwiki_classes action: "property".'
+      : undefined;
+
+    return {
+      wiki, className, columns: collist,
+      filters: Object.keys(filters).length ? filters : undefined,
+      sort: params.sort || undefined,
+      total,
+      offset,
+      returned: rows.length,
+      rows,
+      more: offset + rows.length < total
+        ? `Показаны строки ${offset + 1}–${offset + rows.length} из ${total}. ` +
+          `Следующая страница: offset = ${offset + rows.length}.`
+        : undefined,
+      hint: emptyHint,
+    };
   });
 });
 
@@ -1302,6 +1493,8 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function wikiDefs() {
         type: 'object',
         properties: {
           space: { type: 'string', description: 'Пространство, например Main или Docs.Team' },
+          limit: { type: 'number', description: 'Сколько страниц вернуть (1–200, по умолчанию 50)' },
+          offset: { type: 'number', description: 'Сколько пропустить — следующая страница списка' },
           wiki: { type: 'string', description: 'Другая вика, если не та, что в настройках' },
         },
         required: ['space'],
@@ -1454,6 +1647,67 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function wikiDefs() {
           wiki: { type: 'string', description: 'Другая вика, если не та, что в настройках' },
         },
         required: ['page'],
+      },
+      enabled: false, builtin: true,
+    },
+    {
+      id: 'builtin_xwiki_classes',
+      name: 'xwiki_classes',
+      description: 'Классы xWiki — схемы, по которым устроены объекты и таблицы. ' +
+        'action "list" — какие классы есть (сузить: only), "properties" — свойства класса: ' +
+        'это и есть доступные колонки и ключи фильтров для xwiki_livetable, ' +
+        '"property" — одно свойство подробно: для типа StaticList видны ДОПУСТИМЫЕ ЗНАЧЕНИЯ, ' +
+        'по которым только и работает фильтрация. ' +
+        'Выясненную пару «класс → колонки» сохраняй в память агента (persistent_memory), ' +
+        'чтобы не спрашивать её заново в каждом разговоре.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'properties', 'property'], description: 'Что сделать (по умолчанию list)' },
+          class_name: { type: 'string', description: 'Полное имя класса, например DataFlowManage.Code.DataFlowManageClass' },
+          property: { type: 'string', description: 'Имя свойства — для action: property' },
+          only: { type: 'string', description: 'Для list: показать только классы, в имени которых есть эта строка' },
+          limit: { type: 'number', description: 'Для list: сколько имён вернуть (1–500, по умолчанию 50)' },
+          offset: { type: 'number', description: 'Для list: сколько пропустить — следующая страница' },
+          wiki: { type: 'string', description: 'Другая вика, если не та, что в настройках' },
+        },
+        required: [],
+      },
+      enabled: false, builtin: true,
+    },
+    {
+      id: 'builtin_xwiki_livetable',
+      name: 'xwiki_livetable',
+      description: 'Читает таблицу LiveTable — так в xWiki устроены реестры и справочники: ' +
+        'множество объектов одного класса с фильтрами, сортировкой и пагинацией. ' +
+        'Обычные страницы для этого не годятся: данные лежат в объектах, а не в тексте.\n' +
+        'ПОРЯДОК: 1) имя класса — xwiki_classes action: "list"; 2) колонки — action: "properties"; ' +
+        '3) допустимые значения фильтра — action: "property"; 4) сюда. ' +
+        'Если эти справочники уже лежат в памяти агента — бери оттуда, не спрашивая сервер заново.\n' +
+        'ПАГИНАЦИЯ ОБЯЗАТЕЛЬНА: бери страницами по 15–50 строк и смотри total в ответе. ' +
+        'Запрашивать таблицу целиком нельзя — она не поместится ни в ответ, ни в контекст.\n' +
+        'Фильтры задаются как «колонка: значение»; у свойств StaticList фильтруй по значению, ' +
+        'а не по видимой подписи.',
+      parameters: {
+        type: 'object',
+        properties: {
+          class_name: { type: 'string', description: 'Полное имя класса таблицы (Пространство.Класс)' },
+          columns: {
+            type: 'array', items: { type: 'string' },
+            description: 'Колонки результата и их порядок. По умолчанию служебные: doc.fullName, doc.title, doc.author, doc.date',
+          },
+          filters: {
+            type: 'object',
+            description: 'Отбор строк: «колонка: значение». Работает и по служебным колонкам (doc.title), и по свойствам класса',
+          },
+          sort: { type: 'string', description: 'Колонка сортировки' },
+          dir: { type: 'string', enum: ['asc', 'desc'], description: 'Направление сортировки (по умолчанию desc)' },
+          limit: { type: 'number', description: 'Размер страницы (1–100, по умолчанию 15)' },
+          offset: { type: 'number', description: 'Смещение от начала набора, 0-based — следующая страница' },
+          query_filters: { type: 'string', description: 'Системные фильтры LiveTable, по умолчанию currentlanguage,hidden' },
+          wiki: { type: 'string', description: 'Другая вика, если не та, что в настройках' },
+        },
+        required: ['class_name'],
       },
       enabled: false, builtin: true,
     },

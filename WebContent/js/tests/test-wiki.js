@@ -128,6 +128,7 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
     'xwiki_configure', 'xwiki_status', 'xwiki_list_wikis', 'xwiki_list_spaces', 'xwiki_list_pages',
     'xwiki_search', 'xwiki_get_page', 'xwiki_create_page', 'xwiki_update_page', 'xwiki_delete_page',
     'xwiki_history', 'xwiki_comments', 'xwiki_attachments', 'xwiki_objects',
+    'xwiki_classes', 'xwiki_livetable',
   ];
   ok('заведены все инструменты Confluence', CONFLUENCE_TOOLS.every(n => names.includes(n)),
      CONFLUENCE_TOOLS.filter(n => !names.includes(n)).join(', '));
@@ -445,8 +446,9 @@ const { SkillsEngine, SecurityEngine, ToolsEngine } = sandbox;
      skills.toolIdsOf(sc).length === CONFLUENCE_TOOLS.length, String(skills.toolIdsOf(sc).length));
   ok('навык xWiki заведён и выключен', !!sx && sx.enabled === false);
   ok('к нему привязаны все его инструменты',
-     XWIKI_TOOLS.every(n => skills.toolIdsOf(sx).includes(idOf(n))) &&
-     skills.toolIdsOf(sx).length === XWIKI_TOOLS.length, String(skills.toolIdsOf(sx).length));
+     XWIKI_TOOLS.every(n => skills.toolIdsOf(sx).includes(idOf(n))), String(skills.toolIdsOf(sx).length));
+  // Плюс память: справочники «класс → колонки» агент хранит именно в ней.
+  ok('и память — для справочников классов', skills.toolIdsOf(sx).includes('builtin_memory'));
   ok('промпты объясняют, чем исходник отличается от текста',
      /storage/.test(sc.systemPrompt) && /source/.test(sx.systemPrompt));
   ok('и предупреждают, что содержимое вложения агенту не передаётся',

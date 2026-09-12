@@ -585,6 +585,151 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 }
 .agent-status .status-timer.near-limit { color: var(--warning); }
 
+/* ── Проверка ограничений (вкладка «Ограничения») ──
+   Замечание должно читаться как разбор, а не как ошибка формы: сначала
+   что не так, потом почему, и рядом — готовое значение. */
+.limits-ok { font-size: 12px; color: var(--success, var(--accent-light)); }
+.limits-verdict { font-size: 12px; margin-bottom: 8px; }
+.limits-verdict.limits-error { color: var(--danger); }
+.limits-verdict.limits-warn { color: var(--warning); }
+.limits-finding {
+  border-left: 3px solid var(--border);
+  padding: 6px 0 6px 10px;
+  margin-bottom: 8px;
+}
+.limits-finding.limits-error { border-left-color: var(--danger); }
+.limits-finding.limits-warn { border-left-color: var(--warning); }
+.limits-finding .lf-title { font-size: 12px; color: var(--text-primary); }
+.limits-finding .lf-why {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 2px 0 6px;
+}
+.limits-finding .lf-hint { font-size: 11px; color: var(--text-muted); }
+
+/* ── Разделитель дня в переписке ──
+   Дата стоит один раз на день, а не в каждой подписи: в подписи она
+   превращалась бы в шум, а без неё время «14:32» в недельной переписке
+   не значит ничего. */
+.day-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: lowercase;
+}
+.day-divider::before,
+.day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.msg-time { font-variant-numeric: tabular-nums; cursor: help; }
+.tool-stamp { float: right; color: var(--text-muted); font-size: 11px; }
+
+/* ── Лента вызовов инструментов ──
+   Живёт над полем ввода рядом со строкой состояния, а при открытой
+   панели плана переезжает внутрь текущего шага (см. _renderToolTrack).
+   Поэтому оформление не привязано к месту: те же правила работают и в
+   узкой колонке плана. */
+#tool-track-host { margin-bottom: 8px; }
+.tool-track {
+  max-width: 90%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.plan-track .tool-track {
+  max-width: none;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+}
+.tool-track .tt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tool-track .tt-title { color: var(--text-primary); }
+.tool-track .tt-count { font-variant-numeric: tabular-nums; }
+.tool-track .tt-budget {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.tool-track .tt-more { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.tool-track .tt-rows { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.tool-track .tt-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 6px;
+}
+.tool-track .tt-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.tool-track .tt-ms,
+.tool-track .tt-countdown {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tool-track .tt-countdown.near-limit { color: var(--warning); }
+.tool-track .tt-current { margin-top: 4px; display: flex; gap: 8px; align-items: center; }
+/* Выполняется сейчас — единственная строка, которую надо найти глазами
+   мгновенно; выполненные приглушены, чтобы не спорить с ней за внимание. */
+.tool-track .tt-running .tt-name { color: var(--accent-light); font-weight: 600; }
+.tool-track .tt-done .tt-name { color: var(--text-muted); }
+.tool-track .tt-error .tt-mark,
+.tool-track .tt-error .tt-name { color: var(--danger); }
+.tool-track .tt-pending .tt-mark,
+.tool-track .tt-pending .tt-name { opacity: 0.6; }
+.tool-track .tt-details > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.tool-track .tt-details > summary::-webkit-details-marker { display: none; }
+.tool-track .tt-details[open] > summary .tt-name { white-space: normal; }
+.tool-track .tt-io { padding: 4px 0 6px 20px; }
+.tool-track .tt-io-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.tool-track .tt-io pre {
+  margin: 2px 0;
+  padding: 6px 8px;
+  max-height: 200px;
+  overflow: auto;
+  background: var(--bg-primary);
+  border-radius: var(--radius);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Подробный блок вызова в самой переписке — тоже свёрнут по умолчанию:
+   развёрнутый ответ инструмента занимал экран целиком. */
+.tool-call .tool-detail > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tool-call .tool-detail > summary::-webkit-details-marker { display: none; }
+.tool-call .tool-detail > summary::before { content: '▸'; color: var(--text-muted); }
+.tool-call .tool-detail[open] > summary::before { content: '▾'; }
+
 .status-spinner {
   width: 12px;
   height: 12px;

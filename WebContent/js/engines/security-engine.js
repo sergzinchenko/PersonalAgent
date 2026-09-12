@@ -101,7 +101,7 @@ class SecurityEngine {
     // из сети. Перечни страниц и пространств сюда не входят: там имена,
     // а не содержимое.
     'confluence_get_page', 'confluence_search', 'confluence_comments',
-    'xwiki_get_page', 'xwiki_search', 'xwiki_comments', 'xwiki_objects',
+    'xwiki_get_page', 'xwiki_search', 'xwiki_comments', 'xwiki_objects', 'xwiki_livetable',
     'import_skill_from_text',
     // Артефакт — сохранённый результат прежнего вызова: его содержимое
     // пришло извне ровно так же, просто раньше.
@@ -170,6 +170,9 @@ class SecurityEngine {
     xwiki_status: 'read', xwiki_search: 'read', xwiki_get_page: 'read',
     xwiki_list_spaces: 'read', xwiki_list_wikis: 'read', xwiki_list_pages: 'read',
     xwiki_history: 'read',
+    // Схемы классов и таблицы LiveTable только читаются: изменить объект
+    // через них нельзя (для этого есть xwiki_objects).
+    xwiki_classes: 'read', xwiki_livetable: 'read',
 
     // Запись
     create_folder: 'write', rename_folder: 'write', move_folder: 'write',

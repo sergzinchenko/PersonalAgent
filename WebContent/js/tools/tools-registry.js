@@ -60,7 +60,8 @@ ToolsEngine.PLACEMENT = {
     'builtin_xwiki_list_spaces', 'builtin_xwiki_list_pages', 'builtin_xwiki_search',
     'builtin_xwiki_get_page', 'builtin_xwiki_create_page', 'builtin_xwiki_update_page',
     'builtin_xwiki_delete_page', 'builtin_xwiki_history', 'builtin_xwiki_comments',
-    'builtin_xwiki_attachments', 'builtin_xwiki_objects',
+    'builtin_xwiki_attachments', 'builtin_xwiki_objects', 'builtin_xwiki_classes',
+    'builtin_xwiki_livetable',
   ],
 };
 
