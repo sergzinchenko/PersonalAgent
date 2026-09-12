@@ -259,9 +259,12 @@ class UI {
     const resizer = document.getElementById('sidebar-resizer');
 
     toggle?.addEventListener('click', () => {
+      // Сворачивается список, а не панель: строка поиска и кнопки
+      // остаются (см. .sidebar-collapsed в styles.css). Подпись кнопки
+      // говорит именно это — иначе обещание не совпадает с действием.
       const collapsed = app.classList.toggle('sidebar-collapsed');
       toggle.textContent = collapsed ? '▸' : '◧';
-      toggle.title = collapsed ? 'Развернуть панель' : 'Свернуть панель';
+      toggle.title = collapsed ? 'Развернуть список' : 'Свернуть список';
       this._saveLayout({ collapsed });
     });
 
@@ -329,7 +332,7 @@ class UI {
     if (layout.collapsed) {
       document.getElementById('app')?.classList.add('sidebar-collapsed');
       const t = document.getElementById('sidebar-toggle');
-      if (t) { t.textContent = '▸'; t.title = 'Развернуть панель'; }
+      if (t) { t.textContent = '▸'; t.title = 'Развернуть список'; }
     }
   }
 

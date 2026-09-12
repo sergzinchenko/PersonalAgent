@@ -190,12 +190,21 @@ body {
   position: relative;
 }
 
-/* Свёрнутое состояние: панель убирается целиком, ширину колонки
-   обнуляем на #app (см. .sidebar-collapsed), поэтому здесь достаточно
-   спрятать содержимое. */
-#app.sidebar-collapsed { grid-template-columns: 0 1fr 0; }
-#app.sidebar-collapsed.plan-open { grid-template-columns: 0 1fr var(--plan-w); }
-#app.sidebar-collapsed #sidebar { display: none; }
+/* ── Свёрнутое состояние ──
+   Складывается ТОЛЬКО список — дерево чатов (или инструментов, навыков,
+   промптов, файлов: смотря какая вкладка). Поиск и кнопки панели
+   остаются на месте.
+
+   Раньше убиралась вся колонка целиком, и вместе с деревом исчезали
+   строка поиска и «+ Создать» — то есть ровно то, чем пользуются и
+   со свёрнутым списком. Длинный список чатов и строка поиска — разные
+   вещи, и прятать надо первое, а не всё сразу. */
+#app.sidebar-collapsed #sidebar-list { display: none; }
+/* Кнопки уезжали вниз, потому что место между ними и поиском занимал
+   растягивающийся список. Списка нет — прижимаем их к поиску, иначе
+   свёрнутая панель выглядит как пустая колонка с кнопками внизу. */
+#app.sidebar-collapsed .sidebar-footer { margin-top: 0; border-top: none; }
+#app.sidebar-collapsed #sidebar { justify-content: flex-start; }
 
 /* Полоса для перетаскивания правой границы панели.
    Лежит поверх границы, поэтому визуально не занимает места. */
@@ -1622,9 +1631,7 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 /* ===== RESPONSIVE ===== */
 @media (max-width: 768px) {
   #app,
-  #app.plan-open,
-  #app.sidebar-collapsed,
-  #app.sidebar-collapsed.plan-open { grid-template-columns: 1fr; }
+  #app.plan-open { grid-template-columns: 1fr; }
   #sidebar { display: none; }
   /* На узком экране панель плана отняла бы у переписки половину ширины.
      План при этом не пропадает: он остаётся чипом в панели чата. */
