@@ -103,6 +103,7 @@ body {
 /* ===== HEADER ===== */
 #header {
   grid-column: 1 / -1;
+  grid-row: 1;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   display: flex;
@@ -181,7 +182,17 @@ body {
 #settings-btn:hover { background: var(--accent); color: #fff; }
 
 /* ===== SIDEBAR ===== */
+/* ── Места в сетке заданы явно ──
+   Раньше области раскладывались автоматически, по порядку в разметке, и
+   это ломалось ровно там, где нужнее всего: спрятанная через display:none
+   панель перестаёт быть элементом сетки, автоматическая раскладка
+   сдвигает всё влево — и переписка попадала в колонку шириной 0.
+   То есть кнопка сворачивания убирала вместе с панелью и сам чат.
+   С явными координатами спрятать можно что угодно: остальные останутся
+   на своих местах. */
 #sidebar {
+  grid-column: 1;
+  grid-row: 2;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -191,20 +202,16 @@ body {
 }
 
 /* ── Свёрнутое состояние ──
-   Складывается ТОЛЬКО список — дерево чатов (или инструментов, навыков,
-   промптов, файлов: смотря какая вкладка). Поиск и кнопки панели
-   остаются на месте.
-
-   Раньше убиралась вся колонка целиком, и вместе с деревом исчезали
-   строка поиска и «+ Создать» — то есть ровно то, чем пользуются и
-   со свёрнутым списком. Длинный список чатов и строка поиска — разные
-   вещи, и прятать надо первое, а не всё сразу. */
-#app.sidebar-collapsed #sidebar-list { display: none; }
-/* Кнопки уезжали вниз, потому что место между ними и поиском занимал
-   растягивающийся список. Списка нет — прижимаем их к поиску, иначе
-   свёрнутая панель выглядит как пустая колонка с кнопками внизу. */
-#app.sidebar-collapsed .sidebar-footer { margin-top: 0; border-top: none; }
-#app.sidebar-collapsed #sidebar { justify-content: flex-start; }
+   Панель убирается целиком — со списком, поиском и кнопками, — а
+   освободившуюся колонку забирает переписка: ширина первой колонки
+   становится нулевой, вторая остаётся 1fr и растягивается на всё.
+   Именно ради этого сворачивание и нужно: чтобы место доставалось
+   разговору, а не пропадало. Работает это только вместе с явными
+   координатами областей выше — без них спрятанная панель уводила за
+   собой и переписку. */
+#app.sidebar-collapsed { grid-template-columns: 0 1fr 0; }
+#app.sidebar-collapsed.plan-open { grid-template-columns: 0 1fr var(--plan-w); }
+#app.sidebar-collapsed #sidebar { display: none; }
 
 /* Полоса для перетаскивания правой границы панели.
    Лежит поверх границы, поэтому визуально не занимает места. */
@@ -377,6 +384,8 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 /* ===== MAIN CONTENT ===== */
 #main {
+  grid-column: 2;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1010,6 +1019,8 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
    Оглавление работы, а не часть переписки: поэтому вынесена из ленты
    в собственную колонку (см. #app.plan-open). */
 #plan-panel {
+  grid-column: 3;
+  grid-row: 2;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   display: flex;
@@ -1631,7 +1642,12 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 /* ===== RESPONSIVE ===== */
 @media (max-width: 768px) {
   #app,
-  #app.plan-open { grid-template-columns: 1fr; }
+  #app.plan-open,
+  #app.sidebar-collapsed,
+  #app.sidebar-collapsed.plan-open { grid-template-columns: 1fr; }
+  /* Колонка здесь одна, и явные координаты из раскладки для широкого
+     экрана увели бы переписку в несуществующую вторую. */
+  #main, #plan-panel { grid-column: 1; }
   #sidebar { display: none; }
   /* На узком экране панель плана отняла бы у переписки половину ширины.
      План при этом не пропадает: он остаётся чипом в панели чата. */
