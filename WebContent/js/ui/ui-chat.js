@@ -729,13 +729,14 @@ Object.assign(UI.prototype, {
       // «run_subtask» не говорит ничего, а «разобрать 10 файлов» —
       // ровно то, что человек хотел узнать заранее.
       const goal = t.goal || 'подзадача';
+      const short = this._firstSentence(goal) || 'подзадача';
       const progress = t.subMaxSteps
         ? `<span class="tt-sub-progress">шаг ${t.subSteps || 0} из ${t.subMaxSteps}</span>` : '';
       const canStop = t.status === 'running' && !t.subDone;
       const head =
         `<div class="tt-row tt-sub tt-${t.status}">` +
           `<span class="tt-mark">${MARK[t.status] || '·'}</span>` +
-          `<span class="tt-name">🤖 ${this._escHtml(goal)}</span>` +
+          `<span class="tt-name" title="${this._escHtml(goal)}">🤖 ${this._escHtml(short)}</span>` +
           progress + time +
           (canStop ? `<button class="tt-btn" data-stop-subtask="1" title="Прервать подзадачу — основная работа продолжится">✕</button>` : '') +
         `</div>`;
@@ -883,6 +884,25 @@ Object.assign(UI.prototype, {
       const doing = plan && plan.steps.find(st => st.status === 'doing');
       return doing ? doing.n : null;
     } catch (_) { return null; }
+  },
+
+  // ── Первое предложение ──
+  // Цель подзадачи формулируют подробно — это задание исполнителю, а не
+  // заголовок: в нём и требования к ответу, и контекст, и ограничения.
+  // Целиком оно занимает в панели несколько строк и вытесняет то, ради
+  // чего панель и нужна, — сам ход работы. Первого предложения хватает,
+  // чтобы узнать подзадачу; полный текст остаётся в подсказке.
+  _firstSentence(text, max = 120) {
+    const s = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!s) return '';
+    // Конец предложения — точка, восклицательный или вопросительный знак
+    // либо многоточие, за которыми пробел или конец строки. Сокращения
+    // («т. е.», «см.») этим правилом разрезаются неверно, но цена ошибки
+    // здесь — лишняя половина фразы, а не потерянный смысл.
+    const m = s.match(/^.*?[.!?…](?=\s|$)/);
+    let out = m ? m[0] : s;
+    if (out.length > max) out = out.slice(0, max).replace(/\s+\S*$/, '') + '…';
+    return out;
   },
 
   // Короткая запись аргументов вызова для ленты: полные уходят в
@@ -2085,7 +2105,7 @@ Object.assign(UI.prototype, {
         const body = parsed.result || '';
         return `
           <div><strong>${head}</strong> <span class="tool-meta">${this._fmtDuration(parsed.elapsed_ms || elapsedMs)}</span></div>
-          <div class="tool-section">${this._escHtml(parsed.goal || '')}</div>
+          <div class="tool-section" title="${this._escHtml(parsed.goal || '')}">${this._escHtml(this._firstSentence(parsed.goal))}</div>
           ${body ? `<div class="subtask-result">${renderMarkdown(body)}</div>` : ''}
           ${subBtn}`;
       }

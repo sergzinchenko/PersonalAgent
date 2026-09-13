@@ -222,7 +222,7 @@ Object.assign(UI.prototype, {
 
         this._showStatus(parentChatId,
           `Подзадача: шаг ${steps} из ${maxSteps}`,
-          goal.slice(0, 60) + (goal.length > 60 ? '…' : ''));
+          this._firstSentence(goal, 60));
         if (node) { node.subSteps = steps; paint(); }
 
         // Пауза действует и внутри подзадачи: иначе «приостановить»

@@ -256,6 +256,29 @@ class FakeDB {
   ok('подзадача названа своей целью, а не именем инструмента',
      step2.textContent.includes('Разобрать 10 файлов') && !step2.textContent.includes('run_subtask'),
      step2.textContent.trim().slice(0, 120));
+
+  // Цель подзадачи — задание исполнителю, а не заголовок: целиком оно
+  // занимает полпанели. Показываем первое предложение, остальное — в
+  // подсказке, чтобы ничего не потерялось.
+  ok('первое предложение выделяется верно',
+     ui._firstSentence('Прочитать файлы. Вернуть таблицу.') === 'Прочитать файлы.',
+     ui._firstSentence('Прочитать файлы. Вернуть таблицу.'));
+  ok('вопрос и восклицание тоже считаются концом',
+     ui._firstSentence('Есть ли страница SLA? Прочитай её.') === 'Есть ли страница SLA?');
+  ok('текст без точки не режется без нужды',
+     ui._firstSentence('Разобрать документ') === 'Разобрать документ');
+  ok('но длинный — обрезается по границе слова',
+     ui._firstSentence('а'.repeat(200)).endsWith('…'));
+
+  run.track[run.track.length - 1].goal =
+    'Разобрать 10 файлов MCP. Вернуть таблицу: файл, тема, ключевые выводы по каждому.';
+  ui._renderToolTrack('c1');
+  const subName = document.querySelector('#plan-panel .plan-track[data-step="2"] .tt-sub .tt-name');
+  ok('в панели видно только первое предложение цели',
+     subName.textContent.includes('Разобрать 10 файлов MCP.') && !subName.textContent.includes('Вернуть таблицу'),
+     subName.textContent.trim());
+  ok('а целиком она осталась в подсказке',
+     subName.title.includes('Вернуть таблицу'), subName.title);
   ok('виден её прогресс', step2.textContent.includes('шаг 3 из 10'), step2.textContent.trim().slice(0, 120));
   ok('вызовы подзадачи показаны вложенно',
      !!step2.querySelector('.tt-children .tt-row'), step2.innerHTML.slice(0, 200));
