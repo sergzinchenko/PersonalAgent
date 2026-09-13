@@ -314,6 +314,53 @@ class UI {
       document.documentElement.style.setProperty('--sidebar-w', '280px');
       this._saveLayout({ width: 280 });
     });
+
+    this._bindPlanResizer();
+  }
+
+  // ── Ширина панели хода работы ──
+  // Зеркало полосы у левой панели, но тянуть надо в другую сторону:
+  // панель справа, и движение курсора ВЛЕВО её расширяет. Панель бывает
+  // спрятана (плана и работы нет) — обработчик вешается один раз на
+  // существующий в разметке элемент, поэтому её появление и исчезновение
+  // ничего не ломает.
+  _bindPlanResizer() {
+    const resizer = document.getElementById('plan-resizer');
+    if (!resizer) return;
+
+    const MIN = 220, MAX = 720;
+    let startX = 0, startW = 0;
+
+    const onMove = (e) => {
+      // Знак обратный: курсор влево — панель шире.
+      const w = Math.min(MAX, Math.max(MIN, startW - (e.clientX - startX)));
+      document.documentElement.style.setProperty('--plan-w', w + 'px');
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('resizing-plan');
+      resizer.classList.remove('dragging');
+      const w = parseInt(getComputedStyle(document.documentElement)
+        .getPropertyValue('--plan-w'), 10);
+      this._saveLayout({ planWidth: w });
+    };
+
+    resizer.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      startX = e.clientX;
+      startW = document.getElementById('plan-panel').getBoundingClientRect().width;
+      document.body.classList.add('resizing-plan');
+      resizer.classList.add('dragging');
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    resizer.addEventListener('dblclick', () => {
+      document.documentElement.style.setProperty('--plan-w', '300px');
+      this._saveLayout({ planWidth: 300 });
+    });
   }
 
   async _saveLayout(patch) {
@@ -338,6 +385,9 @@ class UI {
     if (!layout) return;
     if (layout.width) {
       document.documentElement.style.setProperty('--sidebar-w', layout.width + 'px');
+    }
+    if (layout.planWidth) {
+      document.documentElement.style.setProperty('--plan-w', layout.planWidth + 'px');
     }
     if (layout.collapsed) {
       document.getElementById('app')?.classList.add('sidebar-collapsed');

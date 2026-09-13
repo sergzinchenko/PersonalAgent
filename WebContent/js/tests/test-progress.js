@@ -343,6 +343,43 @@ class FakeDB {
   ok('план прерывается', (await agent.tasks.active('c1')) === null);
 
   // ══════════════════════════════════════════════
+  console.log('\n── Ширина панели ──');
+  const savedLayout = [];
+  const realSave = ui._saveLayout;
+  ui._saveLayout = async (patch) => { savedLayout.push(patch); };
+  ui._bindPlanResizer();
+  const rz = document.getElementById('plan-resizer');
+  ok('у панели есть полоса перетаскивания', !!rz);
+
+  // jsdom не считает раскладку, поэтому ширину начала задаём сами.
+  const panelEl = document.getElementById('plan-panel');
+  panelEl.getBoundingClientRect = () => ({ width: 300 });
+  rz.dispatchEvent(new window.MouseEvent('mousedown', { clientX: 1000, bubbles: true }));
+  document.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 900 }));
+  // Панель справа: курсор влево — она шире. Знак обратный полосе у левой
+  // панели, и это единственное, что в них различается.
+  ok('движение влево расширяет панель',
+     document.documentElement.style.getPropertyValue('--plan-w') === '400px',
+     document.documentElement.style.getPropertyValue('--plan-w'));
+  document.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 0 }));
+  ok('ширина не уходит за верхний предел',
+     document.documentElement.style.getPropertyValue('--plan-w') === '720px');
+  document.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 2000 }));
+  ok('и за нижний тоже',
+     document.documentElement.style.getPropertyValue('--plan-w') === '220px');
+  document.dispatchEvent(new window.MouseEvent('mouseup', {}));
+  ok('выбранная ширина сохраняется',
+     savedLayout.some(x => x.planWidth === 220), JSON.stringify(savedLayout));
+
+  rz.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+  ok('двойной клик возвращает ширину по умолчанию',
+     document.documentElement.style.getPropertyValue('--plan-w') === '300px');
+
+  ui.applyLayout({ planWidth: 420 });
+  ok('сохранённая ширина восстанавливается при запуске',
+     document.documentElement.style.getPropertyValue('--plan-w') === '420px');
+  ui._saveLayout = realSave;
+
   console.log('\n── Мягкая пауза ──');
   const run2 = {
     startedAt: Date.now() - 10000, stage: null, partialContent: '', streamEl: null,

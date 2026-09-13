@@ -1073,6 +1073,7 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 #plan-panel {
   grid-column: 3;
   grid-row: 2;
+  position: relative;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   display: flex;
@@ -1082,6 +1083,22 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 /* Специфичнее, чем #plan-panel выше: иначе display:flex победил бы
    стандартное правило [hidden] и панель осталась бы на экране. */
 #plan-panel[hidden] { display: none; }
+
+/* Полоса для перетаскивания левой границы панели — зеркало
+   #sidebar-resizer. Лежит поверх границы, поэтому места не занимает. */
+#plan-resizer {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+#plan-resizer:hover,
+#plan-resizer.dragging { background: var(--accent); opacity: 0.55; }
+body.resizing-plan { user-select: none; cursor: col-resize; }
+body.resizing-plan #plan-panel * { pointer-events: none; }
 
 .plan-panel-header {
   display: flex;
