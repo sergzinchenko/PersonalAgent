@@ -12,7 +12,12 @@
 //     «мини-план попал не туда»;
 //   • ведение плана (task_plan) в ленту не идёт вовсе: сам план виден
 //     рядом, а его служебные вызовы собирались отдельной кучей «вне
-//     шагов» — с виду ещё один мини-план неизвестно чего.
+//     шагов» — с виду ещё один мини-план неизвестно чего;
+//   • подзадача наполняет ТРЕТИЙ уровень: её собственные шаги и вызовы
+//     видны внутри её ветки, а ветка стоит в том шаге плана, в котором
+//     подзадачу запустили. Проверяется на настоящем вызове runSubtask,
+//     а не на собранном руками узле: связь «родитель → подзадача» живёт
+//     в ссылке на текущий узел ленты и рвётся незаметно.
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
@@ -71,12 +76,27 @@ class FakeDB {
     [{ name: 'list_files', args: {} }, { name: 'read_file', args: { file: 'a.txt' } }],
     [{ name: 'task_plan', args: { action: 'done', step: 1, result: 'прочитано' } },
      { name: 'task_plan', args: { action: 'start', step: 2 } }],
-    [{ name: 'calculator', args: { expression: '2+2' } }],
+    // Второй шаг делается подзадачей: у неё свои шаги и свои вызовы.
+    [{ name: 'run_subtask', args: { goal: 'Разобрать 10 файлов. Вернуть таблицу.' } }],
     [{ name: 'format_json', args: { json: '{}' } }],
     null,
   ];
-  let step = 0;
+  // Внутри подзадачи модель отвечает по своему сценарию: один шаг с
+  // двумя вызовами, затем итог.
+  const subScript = [
+    [{ name: 'read_file', args: { file: 'b.md' } }, { name: 'read_file', args: { file: 'c.md' } }],
+    null,
+  ];
+  let step = 0, subStep = 0, inSubtask = false;
   fakeLlm.chat = async (messages, opts) => {
+    if (inSubtask) {
+      const batch = subScript[subStep++];
+      if (!batch) return { content: 'Разобрано 10 файлов.', usage: null, finish_reason: 'stop' };
+      return {
+        content: '', usage: null,
+        tool_calls: batch.map((b, i) => ({ id: 's' + subStep + '_' + i, function: { name: b.name, arguments: JSON.stringify(b.args) } })),
+      };
+    }
     const batch = script[step++];
     if (!batch) { if (opts && opts.onChunk) opts.onChunk('Готово.'); return { content: 'Готово.', usage: null, finish_reason: 'stop' }; }
     return {
@@ -93,8 +113,15 @@ class FakeDB {
       getEnabledToolsForAPI: async () => [{ type: 'function', function: { name: 'calculator' } }],
       // task_plan исполняем по-настоящему: именно он двигает шаги.
       executeTool: async (name, argsRaw) => {
+        const p = typeof argsRaw === 'string' ? JSON.parse(argsRaw || '{}') : (argsRaw || {});
+        if (name === 'run_subtask') {
+          // Подзадача выполняется настоящим кодом интерфейса: именно он
+          // дописывает свой ход в узел ленты родителя.
+          inSubtask = true;
+          try { return await ui.runSubtask('c1', p); }
+          finally { inSubtask = false; }
+        }
         if (name !== 'task_plan') return { ok: true };
-        const p = typeof argsRaw === 'string' ? JSON.parse(argsRaw) : argsRaw;
         if (p.action === 'create') return await tasks.create('c1', p.goal, p.steps);
         if (p.action === 'start') return await tasks.start('c1', p.step);
         if (p.action === 'done') return await tasks.done('c1', p.step, p.result);
@@ -141,19 +168,32 @@ class FakeDB {
   ok('работа первого шага приписана первому шагу',
      stepOf('list_files') === '1' && stepOf('read_file') === '1', last.track.join(' | '));
   ok('работа второго — второму',
-     stepOf('calculator') === '2' && stepOf('format_json') === '2', last.track.join(' | '));
+     stepOf('run_subtask') === '2' && stepOf('format_json') === '2', last.track.join(' | '));
 
   console.log('\n── В шаге видно только его ──');
-  const s1 = slotText('шаг 1'), s2 = slotText('шаг 2');
+  const s1 = slotText('шаг 1');
+  const s2 = slotText('шаг 2');
   ok('у первого шага нет чужих вызовов',
      s1.includes('list_files') && s1.includes('read_file') && !s1.includes('calculator'), s1);
-  ok('у второго — тоже', s2.includes('calculator') && !s2.includes('list_files'), s2);
+  ok('у второго — тоже', s2.includes('format_json') && !s2.includes('list_files'), s2);
   ok('счёт в шаге считает вызовы шага, а не весь ход',
      s1.includes('2 из 2') && s2.includes('2 из 2'), s1 + ' | ' + s2);
 
   console.log('\n── Ведение плана не засоряет ленту ──');
   ok('вызовов task_plan в ленте нет', !last.track.some(r => r.includes('task_plan')), last.track.join(' | '));
   ok('и куча «вне шагов» не появляется', slotText('вне шагов').trim() === '[]', slotText('вне шагов'));
+
+  console.log('\n── Третий уровень: подзадача внутри шага ──');
+  const subRow = last.track.find(r => r.includes(':run_subtask:'));
+  ok('подзадача приписана шагу, в котором её запустили',
+     !!subRow && subRow.startsWith('2:'), subRow || last.track.join(' | '));
+  ok('в панели она названа первым предложением цели',
+     s2.includes('Разобрать 10 файлов.') && !s2.includes('Вернуть таблицу'), s2);
+  ok('её собственные вызовы видны внутри ветки',
+     (s2.match(/read_file/g) || []).length >= 2, s2);
+  ok('и не приписаны шагу напрямую',
+     !last.track.some(r => r.includes(':read_file:') && r.startsWith('2:')),
+     last.track.join(' | '));
 
   console.log('\n── Вызов не прыгает между шагами ──');
   // В очереди («pending») вызов уже должен стоять у своего шага: раньше
