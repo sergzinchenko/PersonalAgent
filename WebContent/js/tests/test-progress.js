@@ -100,8 +100,11 @@ class FakeDB {
   ui.currentChatId = 'c1';
 
   // ══════════════════════════════════════════════
-  console.log('\n── Вызовы инструментов по умолчанию не засоряют переписку ──');
-  ok('по умолчанию — режим «только общий ход»', ui.toolVerbosity === 'hidden', ui.toolVerbosity);
+  console.log('\n── Настройки по умолчанию ──');
+  ok('в переписку вызовы по умолчанию не пишутся', ui.toolVerbosity === 'hidden', ui.toolVerbosity);
+  // Глубина панели — своя настройка: переписку держат чистой, а за
+  // работой при этом следят подробно.
+  ok('а панель хода по умолчанию показывает вызовы', ui.panelDepth === 'tools', ui.panelDepth);
 
   // ══════════════════════════════════════════════
   console.log('\n── Лента вызовов ──');
@@ -120,13 +123,15 @@ class FakeDB {
     { id: '3', name: 'search_files', step: 1, status: 'pending', ms: null, args: '{}', result: null },
   ];
 
+  // Панель выключена — лента живёт над полем ввода одной строкой счёта.
+  ui.panelDepth = 'off';
   ui._renderToolTrack('c1');
   const host = document.getElementById('tool-track-host');
-  ok('лента показана над полем ввода', host && host.hidden === false);
+  ok('при выключенной панели лента над полем ввода', host && host.hidden === false);
   // Счёт идёт по всему списку: выполняется второй из трёх — значит
   // «2 из 3», а не «1 из 3» (сделано из всего). Человеку нужен ответ на
   // вопрос «где мы сейчас», а не «сколько позади».
-  ok('в скрытом режиме — только общий счёт, без имён',
+  ok('и это только общий счёт, без имён',
      host.textContent.includes('2 из 3') && !host.textContent.includes('search_files'),
      host.textContent.trim());
   ok('счётчик показывает текущий вызов, а не число выполненных',
@@ -136,13 +141,13 @@ class FakeDB {
   // Ход работы должен быть в одном месте, а не в двух углах экрана:
   // там же, где план задачи. Плана ещё нет — панель показывает одну
   // ленту и открывается сама.
-  ui.toolVerbosity = 'compact';
+  ui.panelDepth = 'tools';
   ui._renderToolTrack('c1');
   await tick(6);
   ok('панель открылась сама, чтобы показать вызовы',
      document.getElementById('plan-panel').hidden === false);
   ok('и назвалась по содержимому',
-     document.querySelector('#plan-panel .plan-panel-title').textContent.includes('Вызовы'),
+     document.querySelector('#plan-panel .plan-panel-title').textContent.includes('Ход работы'),
      document.querySelector('#plan-panel .plan-panel-title').textContent);
   ok('над полем ввода ленты при этом нет',
      document.getElementById('tool-track-host').hidden === true);
@@ -163,7 +168,7 @@ class FakeDB {
      parseInt(cd.textContent, 10) <= 30 && parseInt(cd.textContent, 10) >= 24, cd.textContent);
   ok('в подсказке сказано, что будет по исчерпании', /прерв/.test(cd.title), cd.title);
 
-  ui.toolVerbosity = 'detailed';
+  ui.panelDepth = 'io';
   ui._renderToolTrack('c1');
   const details = document.querySelectorAll('#plan-panel details.tt-details');
   ok('в подробном режиме вызовы разворачиваются', details.length >= 1, String(details.length));
@@ -224,39 +229,87 @@ class FakeDB {
 
   // В скрытом режиме внутри плана ленте не место: там одна строка общего
   // счёта, и она разрывала бы список шагов служебной вставкой.
-  ui.toolVerbosity = 'hidden';
+  ui.panelDepth = 'off';
   ui._renderToolTrack('c1');
-  ok('в режиме «только общий ход» лента не лезет в план',
+  ok('при выключенной панели лента не лезет в план',
      slot.innerHTML === '', slot.innerHTML);
   ok('и возвращается к полю ввода',
      document.getElementById('tool-track-host').hidden === false);
-  ui.toolVerbosity = 'compact';
+  ui.panelDepth = 'tools';
   ui._renderToolTrack('c1');
-  ok('в кратком режиме возвращается в шаг плана',
+  ok('и возвращается в шаг плана',
      document.querySelector('#plan-panel .plan-track[data-step="2"]').textContent.includes('read_file'));
 
   // ══════════════════════════════════════════════
+  console.log('\n── Третий уровень: подзадача и её вызовы ──');
+  run.track.push({
+    id: 's1', name: 'run_subtask', step: 1, planStep: 2, status: 'running',
+    kind: 'subtask', goal: 'Разобрать 10 файлов', subSteps: 3, subMaxSteps: 10,
+    startedAt: Date.now(), ms: null, args: '{}', result: null,
+    children: [
+      { id: 'k1', name: 'read_file', status: 'done', ms: 900, args: '{}', result: '{}' },
+      { id: 'k2', name: 'read_file', status: 'running', startedAt: Date.now(), ms: null, args: '{}', result: null },
+    ],
+  });
+  ui._renderToolTrack('c1');
+  const step2 = document.querySelector('#plan-panel .plan-track[data-step="2"]');
+  ok('подзадача названа своей целью, а не именем инструмента',
+     step2.textContent.includes('Разобрать 10 файлов') && !step2.textContent.includes('run_subtask'),
+     step2.textContent.trim().slice(0, 120));
+  ok('виден её прогресс', step2.textContent.includes('шаг 3 из 10'), step2.textContent.trim().slice(0, 120));
+  ok('вызовы подзадачи показаны вложенно',
+     !!step2.querySelector('.tt-children .tt-row'), step2.innerHTML.slice(0, 200));
+  ok('у подзадачи есть кнопка прерывания', !!step2.querySelector('[data-stop-subtask]'));
+
+  ui.panelDepth = 'subtasks';
+  ui._renderToolTrack('c1');
+  const step2b = document.querySelector('#plan-panel .plan-track[data-step="2"]');
+  ok('на глубине «шаги и подзадачи» внутренности скрыты',
+     step2b.textContent.includes('Разобрать 10 файлов') && !step2b.querySelector('.tt-children'),
+     step2b.textContent.trim().slice(0, 120));
+  ui.panelDepth = 'tools';
+  ui._renderToolTrack('c1');
+
+  // ══════════════════════════════════════════════
   console.log('\n── Управление работой из панели плана ──');
-  ok('пока ход идёт — кнопка остановки', !!document.getElementById('plan-panel-stop'));
-  ok('кнопки «продолжить» при этом нет', !document.getElementById('plan-panel-resume'));
+  ok('пока ход идёт — кнопки паузы и остановки',
+     !!document.getElementById('run-pause') && !!document.getElementById('run-stop'));
+  ok('кнопки «продолжить» при этом нет', !document.getElementById('run-continue'));
   ok('прервать план можно всегда', !!document.getElementById('plan-panel-finish'));
 
   let stopped = false;
+  // Оригинал сохраняем: ниже проверяется НАСТОЯЩАЯ остановка — она должна
+  // снимать паузу, иначе приостановленный ход остался бы ждать вечно.
+  const realStopAgent = ui.stopAgent;
   ui.stopAgent = () => { stopped = true; };
-  document.getElementById('plan-panel-stop').click();
+  document.getElementById('run-stop').click();
   await tick();
   ok('кнопка останавливает ход', stopped === true);
+
+  // Пауза меняет набор кнопок и объясняет, что теперь можно делать.
+  ui._chatRuns.get('c1').paused = true;
+  await ui.renderPlanPanel();
+  ok('во время паузы предлагается продолжить', !!document.getElementById('run-resume'));
+  ok('и сказано, что можно менять настройки',
+     /ограничения/i.test(document.querySelector('#plan-panel .run-paused-text').textContent),
+     document.querySelector('#plan-panel .run-paused-text').textContent.trim().slice(0, 80));
+  ok('рядом — дорога к ним',
+     !!document.querySelector('#plan-panel [data-open-limits]') &&
+     !!document.querySelector('#plan-panel [data-open-tab="skills"]'));
+  ui._chatRuns.get('c1').paused = false;
+  ui.stopAgent = realStopAgent;
 
   // Ход завершился, но остался продолжаемым — журнал это помнит.
   ui._chatRuns.delete('c1');
   await db.put('runs', { chatId: 'c1', status: 'interrupted', stoppedBy: 'user' });
   await ui.renderPlanPanel();
-  ok('после остановки предлагается продолжить', !!document.getElementById('plan-panel-resume'));
-  ok('а кнопки остановки больше нет', !document.getElementById('plan-panel-stop'));
+  ok('после остановки предлагается продолжить', !!document.getElementById('run-continue'));
+  ok('а кнопок паузы и остановки больше нет',
+     !document.getElementById('run-pause') && !document.getElementById('run-stop'));
 
   let resumed = null;
   ui.resumeRun = async (id) => { resumed = id; };
-  document.getElementById('plan-panel-resume').click();
+  document.getElementById('run-continue').click();
   await tick();
   ok('она продолжает именно этот чат', resumed === 'c1', String(resumed));
 
@@ -265,6 +318,44 @@ class FakeDB {
   document.getElementById('plan-panel-finish').click();
   await tick(8);
   ok('план прерывается', (await agent.tasks.active('c1')) === null);
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Мягкая пауза ──');
+  const run2 = {
+    startedAt: Date.now() - 10000, stage: null, partialContent: '', streamEl: null,
+    turnToolCalls: 1, turnUserMsgId: null, stopRequested: false, abortCtl: null,
+    subtaskAbort: null, statusTimer: null, track: [], trackStep: 1,
+    paused: false, pausedAt: 0, pausedMs: 0, resumeWaiters: [],
+  };
+  ui._chatRuns.set('c1', run2);
+
+  const startedBefore = run2.startedAt;
+  ui.pauseRun('c1');
+  ok('ход помечен приостановленным', run2.paused === true);
+
+  // Ожидающий должен проснуться ровно на продолжении, не раньше.
+  let resumedFlag = false;
+  const waiting = ui._awaitIfPaused('c1').then(() => { resumedFlag = true; });
+  await tick(4);
+  ok('работа действительно ждёт', resumedFlag === false);
+
+  await new Promise(r => setTimeout(r, 30));
+  ui.resumeRunPause('c1');
+  await waiting;
+  ok('продолжение будит ожидающего', resumedFlag === true);
+  ok('пауза не съела бюджет времени хода', run2.startedAt > startedBefore,
+     String(run2.startedAt - startedBefore));
+  ok('и учтена отдельно', run2.pausedMs >= 20, String(run2.pausedMs));
+
+  // Остановка во время паузы не должна оставить ход висеть.
+  ui.pauseRun('c1');
+  let woke = false;
+  const waiting2 = ui._awaitIfPaused('c1').then(() => { woke = true; });
+  ui.stopAgent();
+  await waiting2;
+  ok('остановка во время паузы будит ожидающего', woke === true);
+  ok('и паузу снимает', run2.paused === false);
+  ui._chatRuns.delete('c1');
 
   // ══════════════════════════════════════════════
   console.log('\n── Время сообщений ──');

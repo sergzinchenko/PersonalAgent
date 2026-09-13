@@ -446,6 +446,15 @@ Object.assign(UI.prototype, {
       // закрыть и открыть посреди хода, а ход от этого не прерывается.
       track: [],
       trackStep: 0,
+      // ── Мягкая пауза ──
+      // paused — «замри перед следующим действием»; pausedAt и pausedMs
+      // нужны, чтобы время паузы не съедало бюджет хода: человек думает,
+      // а не агент работает. resumeWaiters держит тех, кто ждёт снятия
+      // паузы (цикл хода и цикл подзадачи).
+      paused: false,
+      pausedAt: 0,
+      pausedMs: 0,
+      resumeWaiters: [],
       stopRequested: false,
       abortCtl: null,
       // Контроллер запроса подзадачи, пока она выполняется: «⏹» должен
@@ -600,25 +609,18 @@ Object.assign(UI.prototype, {
     const host = document.getElementById('tool-track-host');
     if (!host) return;
 
-    // Куда рисовать: внутрь текущего шага плана (место готовит
-    // renderPlanPanel) или над полем ввода.
-    //
-    // В скрытом режиме в план не переезжаем. Там лента — это одна строка
-    // общего счёта, и внутри шага плана она выглядит служебной вставкой
-    // посреди списка дел: шаги перестают читаться подряд, а сама строка
-    // ничего не добавляет к тому, что уже видно в строке состояния.
-    // Мини-план вызовов внутри шага имеет смысл, когда вызовы названы, —
-    // то есть в кратком и подробном режимах.
-    //
-    // Место внутри шага ищем ВСЕГДА, даже когда рисовать собираемся не
-    // туда: иначе оставленное там содержимое живёт вечно. Так и было —
-    // переключение режима на «только общий ход» оставляло в шаге плана
-    // прежний список вызовов, который больше никто не обновлял.
+    // ── Куда рисовать ──
     // Мест в панели столько, сколько шагов: у каждого своё, с номером.
-    // Плюс одно без номера — под вызовы, сделанные вне шагов плана (или
-    // когда плана нет вовсе).
+    // Плюс одно без номера — под вызовы вне шагов плана (или когда плана
+    // нет вовсе). Место внутри шага ищем ВСЕГДА, даже когда рисовать
+    // собираемся не туда: иначе оставленное там содержимое живёт вечно.
+    //
+    // Глубина панели — своя настройка (panelDepth), не связанная с тем,
+    // что пишется в переписку: переписку держат чистой, а за работой при
+    // этом смотрят подробно. 'off' — панели хода нет, остаётся строка
+    // счёта над полем ввода.
     const slots = Array.from(document.querySelectorAll('#plan-panel:not([hidden]) .plan-track'));
-    const usePanel = (this.toolVerbosity || 'hidden') !== 'hidden';
+    const usePanel = (this.panelDepth || 'tools') !== 'off';
 
     // Панель могла быть ещё закрыта: первый вызов инструмента — это и
     // есть повод её открыть. Открывает её renderPlanPanel (он знает про
@@ -665,7 +667,9 @@ Object.assign(UI.prototype, {
   // отсчёт считаются по переданному набору, иначе у шага показывались бы
   // чужие числа.
   _toolTrackHtml(run, entries) {
-    const mode = this.toolVerbosity || 'hidden';
+    // 'off' — только строка общего счёта (она живёт над полем ввода);
+    // остальные глубины рисуют список.
+    const mode = (this.panelDepth || 'tools') === 'off' ? 'hidden' : 'rows';
     const list = entries || run.track;
     const total = list.length;
     const finished = list.filter(t => t.status === 'done' || t.status === 'error').length;
@@ -701,38 +705,67 @@ Object.assign(UI.prototype, {
     const MAX_ROWS = 12;
     const rows = list.slice(-MAX_ROWS);
     const hiddenCount = list.length - rows.length;
-
-    const mark = { pending: '·', running: '▶', done: '✔', error: '✖' };
-    const body = rows.map((t, i) => {
-      const time = t.status === 'running'
-        ? `<span class="tt-countdown" data-countdown></span>`
-        : (t.ms != null ? `<span class="tt-ms">${this._fmtDuration(t.ms)}</span>` : '');
-      const row =
-        `<div class="tt-row tt-${t.status}">` +
-          `<span class="tt-mark">${mark[t.status] || '·'}</span>` +
-          `<span class="tt-name">${this._escHtml(t.name)}</span>` +
-          time +
-        `</div>`;
-      // Подробный режим: аргументы и ответ рядом с вызовом, но свёрнуто —
-      // развёрнутый по умолчанию ответ инструмента занимает весь экран.
-      if (mode !== 'detailed' || t.status === 'pending') return row;
-      const idx = run.track.indexOf(t);
-      return `<details class="tt-details" data-tt="${idx}">` +
-        `<summary>${row}</summary>` +
-        `<div class="tt-io">` +
-          `<div class="tt-io-label">Аргументы</div><pre>${this._escHtml(t.args || '{}')}</pre>` +
-          (t.result != null
-            ? `<div class="tt-io-label">Ответ</div><pre>${this._escHtml(t.result)}</pre>` +
-              (t.artifactId ? `<button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(t.artifactId)}">📄 полностью</button>` : '') +
-              (t.subChatId ? `<button class="btn btn-secondary btn-sm" data-subchat="${this._escHtml(t.subChatId)}">💬 переписка подзадачи</button>` : '')
-            : '') +
-        `</div>` +
-      `</details>`;
-    }).join('');
+    const body = rows.map((t) => this._toolTrackRow(run, t, mode)).join('');
 
     return `<div class="tool-track tt-${mode}">${head}` +
       (hiddenCount > 0 ? `<div class="tt-more">…ещё ${hiddenCount} раньше</div>` : '') +
       `<div class="tt-rows">${body}</div></div>`;
+  },
+
+  // ── Одна строка ленты ──
+  // Обычный вызов — строка; подзадача — ветка: её собственные вызовы
+  // показываются вложенно, вместе с её прогрессом и кнопкой прерывания.
+  // Уровень вложенности здесь ровно один: вложенные подзадачи запрещены
+  // (см. run_subtask), поэтому рекурсия не нужна.
+  _toolTrackRow(run, t, mode) {
+    const MARK = { pending: '·', running: '▶', done: '✔', error: '✖' };
+    const depth = this.panelDepth || 'tools';
+    const time = t.status === 'running'
+      ? `<span class="tt-countdown" data-countdown></span>`
+      : (t.ms != null ? `<span class="tt-ms">${this._fmtDuration(t.ms)}</span>` : '');
+
+    if (t.kind === 'subtask') {
+      // Заголовок ветки — цель подзадачи, а не имя инструмента:
+      // «run_subtask» не говорит ничего, а «разобрать 10 файлов» —
+      // ровно то, что человек хотел узнать заранее.
+      const goal = t.goal || 'подзадача';
+      const progress = t.subMaxSteps
+        ? `<span class="tt-sub-progress">шаг ${t.subSteps || 0} из ${t.subMaxSteps}</span>` : '';
+      const canStop = t.status === 'running' && !t.subDone;
+      const head =
+        `<div class="tt-row tt-sub tt-${t.status}">` +
+          `<span class="tt-mark">${MARK[t.status] || '·'}</span>` +
+          `<span class="tt-name">🤖 ${this._escHtml(goal)}</span>` +
+          progress + time +
+          (canStop ? `<button class="tt-btn" data-stop-subtask="1" title="Прервать подзадачу — основная работа продолжится">✕</button>` : '') +
+        `</div>`;
+      // Глубина «шаги и подзадачи» — внутренности не показываем.
+      if (depth === 'steps' || depth === 'subtasks') return head;
+      const kids = (t.children || []).slice(-12).map((c) => this._toolTrackRow(run, c, mode)).join('');
+      return head + (kids ? `<div class="tt-children">${kids}</div>` : '');
+    }
+
+    const row =
+      `<div class="tt-row tt-${t.status}">` +
+        `<span class="tt-mark">${MARK[t.status] || '·'}</span>` +
+        `<span class="tt-name">${this._escHtml(t.name)}</span>` +
+        time +
+      `</div>`;
+
+    // Аргументы и ответ — только на самой подробной глубине и только у
+    // уже начатых вызовов: у «предстоит» показывать нечего.
+    if (depth !== 'io' || t.status === 'pending') return row;
+    return `<details class="tt-details">` +
+      `<summary>${row}</summary>` +
+      `<div class="tt-io">` +
+        `<div class="tt-io-label">Аргументы</div><pre>${this._escHtml(t.args || '{}')}</pre>` +
+        (t.result != null
+          ? `<div class="tt-io-label">Ответ</div><pre>${this._escHtml(t.result)}</pre>` +
+            (t.artifactId ? `<button class="btn btn-secondary btn-sm" data-artifact="${this._escHtml(t.artifactId)}">📄 полностью</button>` : '') +
+            (t.subChatId ? `<button class="btn btn-secondary btn-sm" data-subchat="${this._escHtml(t.subChatId)}">💬 переписка подзадачи</button>` : '')
+          : '') +
+      `</div>` +
+    `</details>`;
   },
 
   // Обратный отсчёт у текущего вызова. Считается от таймаута ОДНОГО
@@ -760,6 +793,13 @@ Object.assign(UI.prototype, {
   // обработчик #chat-messages (см. ui-core.js) до её кнопок не достаёт —
   // вешаем те же два действия здесь.
   _bindToolTrack(mount) {
+    // Прерывание подзадачи: кнопка живёт на её ветке, а действие одно на
+    // ход — подзадача в нём ровно одна (вложенные запрещены).
+    mount.querySelectorAll('[data-stop-subtask]').forEach(b => b.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.stopSubtask(this.currentChatId);
+    }));
     mount.querySelectorAll('[data-artifact]').forEach(b => b.addEventListener('click', (e) => {
       e.preventDefault();
       this.showArtifact(b.dataset.artifact);
@@ -768,6 +808,70 @@ Object.assign(UI.prototype, {
       e.preventDefault();
       this.openSubtaskChat(b.dataset.subchat);
     }));
+  },
+
+  // ── Ожидание снятия паузы ──
+  // Вызывается в местах, где работу можно остановить без потерь: перед
+  // запросом к модели и перед каждым вызовом инструмента. Уже начатый
+  // вызов доигрывает — прервать чужой код на полпути нельзя, и делать
+  // вид, что можно, значило бы врать кнопкой.
+  //
+  // Пауза — это именно ожидание, а не остановка хода: ход остаётся в
+  // памяти со всей историей, и продолжение не стоит нового запроса.
+  // Заодно отсюда применяются изменения, сделанные за паузу: модель и
+  // навыки читаются при следующем запросе, ограничения — при следующей
+  // проверке, поэтому ничего дополнительно применять не нужно.
+  async _awaitIfPaused(chatId) {
+    const run = this._chatRuns.get(chatId);
+    if (!run || !run.paused) return;
+    await new Promise((resolve) => { run.resumeWaiters.push(resolve); });
+  },
+
+  // Приостановить работу. Кнопка есть на всех уровнях панели хода, но
+  // действие одно: пауза принадлежит ХОДУ, а не шагу или подзадаче —
+  // внутри хода всё выполняется по очереди, и «приостановить только
+  // подзадачу» означало бы просто ничего не делать дальше.
+  pauseRun(chatId) {
+    const run = this._chatRuns.get(chatId || this.currentChatId);
+    if (!run || run.paused) return;
+    run.paused = true;
+    run.pausedAt = Date.now();
+    this._showStatus(chatId || this.currentChatId, '⏸ Приостановлено',
+      'текущий вызов доигрывает; продолжить — кнопкой в панели хода');
+    this.updateChatToolbar();
+  },
+
+  resumeRunPause(chatId) {
+    const id = chatId || this.currentChatId;
+    const run = this._chatRuns.get(id);
+    if (!run || !run.paused) return;
+    // Бюджет времени хода сдвигаем на длительность паузы: иначе
+    // остановка «подумать» съедала бы отведённое на работу время и
+    // ход обрывался бы сразу после продолжения.
+    const waited = Date.now() - (run.pausedAt || Date.now());
+    run.pausedMs += waited;
+    run.startedAt += waited;
+    run.paused = false;
+    run.pausedAt = 0;
+    const waiters = run.resumeWaiters.splice(0);
+    waiters.forEach((fn) => { try { fn(); } catch (_) {} });
+    this._showStatus(id, 'Продолжаю работу…', '');
+    this.updateChatToolbar();
+  },
+
+  // Прервать только текущую подзадачу: сам ход продолжится и получит
+  // частичный итог. Прерывание всего хода — отдельная кнопка (stopAgent).
+  stopSubtask(chatId) {
+    const id = chatId || this.currentChatId;
+    const run = this._chatRuns.get(id);
+    if (!run || !run.subtaskAbort) return;
+    run.subtaskStopRequested = true;
+    // Пауза и прерывание — разные вещи, но приостановленная подзадача
+    // ждёт разрешения продолжить и команду об остановке увидит только
+    // после снятия паузы.
+    if (run.paused) this.resumeRunPause(id);
+    try { run.subtaskAbort.abort(); } catch (_) {}
+    this._showStatus(id, 'Прерываю подзадачу…', 'основная работа продолжится');
   },
 
   // Номер шага плана, который сейчас в работе, или null. Нужен, чтобы
@@ -1380,6 +1484,12 @@ Object.assign(UI.prototype, {
     };
 
     try {
+      // Пауза перед запросом: всё, что пользователь изменил за неё —
+      // модель, навыки, инструменты, ограничения, — будет прочитано ниже
+      // и применится к этому же запросу.
+      await this._awaitIfPaused(chatId);
+      if (run.stopRequested) { if (depth === 0) this._endRun(chatId); return; }
+
       // Ссылка на модель ИМЕННО этого чата — нужна ниже для правильного
       // бюджета обрезки истории (_trimHistory), даже если к этому моменту
       // общий шлюз уже смотрит на модель другого, параллельно
@@ -1620,6 +1730,15 @@ Object.assign(UI.prototype, {
           // собирались отдельной кучей «вне шагов» — она и выглядела как
           // ещё один мини-план неизвестно чего.
           if (PLAN_TOOLS.has(tc.function.name)) continue;
+          // Подзадача — не просто вызов, а целая ветка: внутри неё свои
+          // шаги и свои вызовы инструментов. Отмечаем её отдельным видом
+          // узла, чтобы панель показала третий уровень, а не строчку
+          // «run_subtask», за которой не видно получаса работы.
+          const isSub = tc.function.name === 'run_subtask';
+          let goal = '';
+          if (isSub) {
+            try { goal = String(JSON.parse(tc.function.arguments || '{}').goal || ''); } catch (_) { goal = ''; }
+          }
           run.track.push({
             id: tc.id || uid(),
             name: tc.function.name,
@@ -1629,6 +1748,7 @@ Object.assign(UI.prototype, {
             ms: null,
             args: this._briefArgs(tc.function.arguments),
             result: null,
+            ...(isSub ? { kind: 'subtask', goal, children: [], subSteps: 0, subMaxSteps: 0 } : {}),
           });
         }
         this._renderToolTrack(chatId);
@@ -1644,7 +1764,13 @@ Object.assign(UI.prototype, {
           // идёт после, относится уже к новому шагу.
           if (trackItem) trackItem.planStep = await this._currentPlanStep(chatId);
 
-          // ── Прерывание пользователем ──
+          // ── Пауза и прерывание пользователем ──
+          // Пауза здесь, между вызовами: следующий не начнётся, пока
+          // человек не разрешит.
+          if (run.paused) {
+            clearTimeout(turnTimer);
+            await this._awaitIfPaused(chatId);
+          }
           if (run.stopRequested) {
             clearTimeout(turnTimer);
             if (depth === 0) this._endRun(chatId);
@@ -1691,6 +1817,10 @@ Object.assign(UI.prototype, {
           if (trackItem) {
             trackItem.status = 'running';
             trackItem.startedAt = Date.now();
+            // Подзадача исполняется внутри этого вызова и дописывает
+            // сюда свой ход (см. runSubtask): ветка одна на приложение,
+            // поэтому достаточно ссылки на текущий узел.
+            run.currentTrackItem = trackItem;
             this._renderToolTrack(chatId);
           }
           const toolResult = await this.agent.tools.executeTool(
@@ -1730,6 +1860,7 @@ Object.assign(UI.prototype, {
             }
           }
 
+          run.currentTrackItem = null;
           if (trackItem) {
             trackItem.status = isError ? 'error' : 'done';
             trackItem.ms = elapsedMs;
@@ -2114,6 +2245,10 @@ Object.assign(UI.prototype, {
     const run = chatId && this._chatRuns.get(chatId);
     if (!run) return;
     run.stopRequested = true;
+    // Приостановленный ход ждёт разрешения продолжить. Если его просто
+    // пометить остановленным, он так и останется ждать — снимаем паузу,
+    // чтобы ожидающие проснулись и увидели команду остановиться.
+    if (run.paused) this.resumeRunPause(chatId);
     try { run.abortCtl?.abort(); } catch (_) {}
     // Ход мог остановиться внутри подзадачи — её запрос к модели ведётся
     // своим контроллером, и без этого «⏹» не прервал бы саму подзадачу,

@@ -161,7 +161,24 @@ Object.assign(UI.prototype, {
     const abortCtl = new AbortController();
     if (parentRun) parentRun.subtaskAbort = abortCtl;
 
-    const stopped = () => !!(parentRun && parentRun.stopRequested);
+    // ── Ход подзадачи виден снаружи ──
+    // Раньше о происходящем внутри говорила одна строка состояния, и
+    // получасовая работа выглядела как пауза. Теперь подзадача дописывает
+    // свои шаги и вызовы в тот самый узел ленты, которым её и запустили:
+    // панель показывает их третьим уровнем, под своей подзадачей.
+    const node = parentRun ? parentRun.currentTrackItem : null;
+    if (node) {
+      node.goal = goal;
+      node.subMaxSteps = maxSteps;
+      node.subChatId = sub.id;
+      node.children = [];
+    }
+    const paint = () => { try { this._renderToolTrack(parentChatId); } catch (_) {} };
+
+    // Прерывание бывает двух видов, и путать их нельзя: остановлен весь
+    // ход (stopRequested) — или только эта подзадача. Во втором случае
+    // родитель продолжает работу, получив частичный итог.
+    const stopped = () => !!(parentRun && (parentRun.stopRequested || parentRun.subtaskStopRequested));
 
     // Бюджет времени хода принадлежит РОДИТЕЛЮ и на подзадачу тоже
     // распространяется: его таймер обрывает родительский запрос к
@@ -206,6 +223,13 @@ Object.assign(UI.prototype, {
         this._showStatus(parentChatId,
           `Подзадача: шаг ${steps} из ${maxSteps}`,
           goal.slice(0, 60) + (goal.length > 60 ? '…' : ''));
+        if (node) { node.subSteps = steps; paint(); }
+
+        // Пауза действует и внутри подзадачи: иначе «приостановить»
+        // работало бы только между её шагами в родителе, то есть почти
+        // никогда — самая долгая работа идёт как раз здесь.
+        if (parentRun && parentRun.paused) await this._awaitIfPaused(parentChatId);
+        if (stopped()) { stopReason = 'stopped'; break; }
 
         this._shrinkSubtaskMessages(messages, budgetChars);
 
@@ -248,6 +272,16 @@ Object.assign(UI.prototype, {
               `Подзадача: ${tc.function.name}`,
               `шаг ${steps}, вызовов: ${toolCalls}`);
 
+            if (parentRun && parentRun.paused) await this._awaitIfPaused(parentChatId);
+            if (stopped()) { stopReason = 'stopped'; break; }
+
+            const child = node
+              ? { id: tc.id || uid(), name: tc.function.name, status: 'running',
+                  startedAt: Date.now(), ms: null,
+                  args: this._briefArgs(tc.function.arguments), result: null }
+              : null;
+            if (child) { node.children.push(child); paint(); }
+
             const t0 = performance.now();
             const toolResult = await this.agent.tools.executeTool(
               tc.function.name, tc.function.arguments,
@@ -273,6 +307,14 @@ Object.assign(UI.prototype, {
               } catch (e) {
                 console.error('Артефакт подзадачи не сохранён', e);
               }
+            }
+
+            if (child) {
+              child.status = isError ? 'error' : 'done';
+              child.ms = elapsedMs;
+              child.artifactId = artifactId;
+              child.result = String(resultStr || '').slice(0, 600);
+              paint();
             }
 
             await this._recordToolCall(sub.id, tc.function.name, elapsedMs, isError);
@@ -309,7 +351,22 @@ Object.assign(UI.prototype, {
       }
       failure = e.message;
     } finally {
-      if (parentRun) parentRun.subtaskAbort = null;
+      if (parentRun) {
+        parentRun.subtaskAbort = null;
+        // Флаг снимаем здесь: он относился к ЭТОЙ подзадаче, и
+        // оставленный поднятым, оборвал бы следующую, ещё не начатую.
+        parentRun.subtaskStopRequested = false;
+      }
+      // Узел ленты закрывается вместе с подзадачей: прогресс «шаг 3 из
+      // 10» после её конца — неправда.
+      if (node) {
+        node.subSteps = steps;
+        node.subDone = true;
+        node.children.forEach((c) => {
+          if (c.status === 'running' || c.status === 'pending') c.status = 'error';
+        });
+        paint();
+      }
       // Возвращаем шлюзу модель родителя: следующий шаг родительского
       // хода не должен уехать на модель, выбранную для подзадачи.
       try { await this.applyChatModel(parentChatId); } catch (_) {}
@@ -319,6 +376,10 @@ Object.assign(UI.prototype, {
       sub.subtaskStatus = stopReason;
       await this.agent.db.put('chats', sub);
     }
+
+    // Прервали именно подзадачу (а не весь ход) — это разные сообщения
+    // для модели: в первом случае работа продолжается.
+    const byUserSubtask = stopReason === 'stopped' && parentRun && !parentRun.stopRequested;
 
     const out = {
       subtask_chat_id: sub.id,
@@ -339,7 +400,10 @@ Object.assign(UI.prototype, {
     out.ok = false;
     out.result = finalText || null;
     out.error = {
-      stopped: 'Подзадача прервана пользователем.',
+      stopped: byUserSubtask
+        ? 'Подзадача прервана пользователем. Основная работа продолжается: ' +
+          'учти это в плане — шаг, ради которого она запускалась, не выполнен.'
+        : 'Подзадача прервана пользователем.',
       step_limit: `Подзадача не уложилась в ${maxSteps} шагов и остановлена. ` +
         'Разбей её на части помельче или увеличь max_steps.',
       turn_timeout: `Исчерпан бюджет времени на ответ (${L.maxTurnSeconds} с) — подзадача остановлена.`,

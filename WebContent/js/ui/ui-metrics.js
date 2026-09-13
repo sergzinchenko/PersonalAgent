@@ -444,25 +444,37 @@ Object.assign(UI.prototype, {
         : null;
     } catch (_) { /* панель не должна ронять чат */ }
 
-    // Лента вызовов идёт в панель только тогда, когда вызовы названы:
-    // в режиме «только общий ход» это одна строка счёта, и её место —
+    // Лента вызовов идёт в панель, пока панель хода не выключена
+    // настройкой глубины: при 'off' остаётся только строка общего счёта
     // над полем ввода (см. _renderToolTrack).
     const run = this.currentChatId ? this._chatRuns.get(this.currentChatId) : null;
     const wantTrack = !!(run && run.track && run.track.length &&
-                         (this.toolVerbosity || 'hidden') !== 'hidden');
+                         (this.panelDepth || 'tools') !== 'off');
 
     const planDismissed = plan && this._planPanelDismissed === plan.id;
     const trackDismissed = this._planPanelDismissed === 'track';
+
+    const runNow0 = this._chatRuns.get(this.currentChatId);
+    const running = !!runNow0;
+    const paused = !!(runNow0 && runNow0.paused);
 
     // ── Панель только с вызовами ──
     // Плана нет (или он закрыт крестиком), а работа идёт: показываем
     // ленту одну. Для пользователя это та же «панель хода работы»,
     // просто без оглавления задачи.
     if ((!plan || planDismissed) && wantTrack && !trackDismissed) {
-      if (titleEl) titleEl.textContent = '🔧 Вызовы инструментов';
-      if (!body.querySelector('.plan-track')) body.innerHTML = '<div class="plan-track"></div>';
+      if (titleEl) titleEl.textContent = '🔧 Ход работы';
+      // Кнопки управления нужны и здесь: работа идёт, плана просто нет.
+      const controls = this._runControlsHtml({ running, paused, resumable: false, noPlan: true });
+      if (!body.querySelector('.plan-track')) {
+        body.innerHTML = '<div class="plan-track"></div>' + controls;
+      } else {
+        const box = body.querySelector('.run-controls');
+        if (box) box.outerHTML = controls;
+      }
       panel.hidden = false;
       app.classList.add('plan-open');
+      this._bindRunControls();
       this._renderToolTrack?.(this.currentChatId);
       return;
     }
@@ -484,7 +496,6 @@ Object.assign(UI.prototype, {
     // План отвечает на вопрос «что делается», и логично, что остановить
     // и продолжить работу можно там же, где на неё смотрят. Кнопка ⏹ у
     // поля ввода никуда не делась — это второй вход в то же действие.
-    const running = this._chatRuns.has(this.currentChatId);
     let resumable = false;
     if (!running) {
       try {
@@ -520,21 +531,13 @@ Object.assign(UI.prototype, {
           <div class="plan-facts-title">Выяснено по ходу работы</div>
           <ul>${plan.facts.map(f => `<li>${this._escHtml(f)}</li>`).join('')}</ul>
         </div>` : ''}
-      <div class="plan-panel-actions">
-        ${running
-          ? `<button class="btn btn-secondary btn-sm btn-block" id="plan-panel-stop">⏸ Остановить работу</button>`
-          : (resumable
-            ? `<button class="btn btn-primary btn-sm btn-block" id="plan-panel-resume">▶ Продолжить работу</button>`
-            : '')}
-        <button class="btn btn-secondary btn-sm btn-block" id="plan-panel-finish">✕ Прервать план</button>
-      </div>
+      ${this._runControlsHtml({ running, paused, resumable })}
       <div class="plan-panel-hint">
         План хранится отдельно от переписки: он переживает и подрезку истории,
         и перезагрузку страницы. Агент видит ровно то же, что показано здесь.
-        ${running
-          ? 'Остановка прерывает текущий ход — сделанное остаётся, работу можно продолжить.'
-          : (resumable ? 'Работа остановлена на полпути — кнопка выше продолжит её с этого же места.' : '')}
       </div>`;
+
+    this._bindRunControls();
 
     document.getElementById('plan-panel-finish')?.addEventListener('click', async () => {
       const yes = await this._confirm(
@@ -549,21 +552,75 @@ Object.assign(UI.prototype, {
       this.updateChatToolbar();
     });
 
-    document.getElementById('plan-panel-stop')?.addEventListener('click', () => {
-      this.stopAgent();
-      this.updateChatToolbar();
-    });
-
-    document.getElementById('plan-panel-resume')?.addEventListener('click', async () => {
-      await this.resumeRun?.(this.currentChatId);
-      this.updateChatToolbar();
-    });
 
     panel.hidden = false;
     app.classList.add('plan-open');
     // Лента вызовов рисуется после панели: её место — внутри текущего
     // шага, и до перерисовки панели этого места не существует.
     this._renderToolTrack?.(this.currentChatId);
+  },
+
+  // ── Управление ходом ──
+  // Пауза, продолжение и прерывание — в одном месте, рядом с тем, на что
+  // они действуют. Пауза принадлежит ходу целиком: внутри хода всё
+  // выполняется по очереди, и «приостановить только подзадачу» означало
+  // бы просто не делать ничего дальше. Прерывание бывает двух видов —
+  // подзадачи (кнопка на самой ветке, см. ленту) и всего хода.
+  _runControlsHtml({ running, paused, resumable, noPlan = false }) {
+    const buttons = [];
+    if (running && !paused) {
+      buttons.push('<button class="btn btn-secondary btn-sm" id="run-pause">⏸ Пауза</button>');
+      buttons.push('<button class="btn btn-secondary btn-sm" id="run-stop">⏹ Остановить</button>');
+    } else if (running && paused) {
+      buttons.push('<button class="btn btn-primary btn-sm" id="run-resume">▶ Продолжить</button>');
+      buttons.push('<button class="btn btn-secondary btn-sm" id="run-stop">⏹ Остановить</button>');
+    } else if (resumable) {
+      buttons.push('<button class="btn btn-primary btn-sm" id="run-continue">▶ Продолжить работу</button>');
+    }
+    if (!noPlan) {
+      buttons.push('<button class="btn btn-secondary btn-sm" id="plan-panel-finish">✕ Прервать план</button>');
+    }
+
+    // Во время паузы меняют настройки — и ради этого пауза и нужна.
+    // Даём дорогу прямо отсюда, чтобы не искать её по вкладкам.
+    const pausedBox = paused ? `
+      <div class="run-paused">
+        <div class="run-paused-title">⏸ Приостановлено</div>
+        <div class="run-paused-text">
+          Текущий вызов доигран, следующий не начнётся. Сейчас можно поменять ограничения,
+          модель, навыки и инструменты — изменения применятся на следующем же шаге.
+        </div>
+        <div class="run-paused-links">
+          <button class="btn btn-secondary btn-sm" data-open-limits="1">⚙ Ограничения</button>
+          <button class="btn btn-secondary btn-sm" data-open-tab="skills">🧩 Навыки</button>
+          <button class="btn btn-secondary btn-sm" data-open-tab="tools">🔧 Инструменты</button>
+        </div>
+      </div>` : '';
+
+    return `<div class="run-controls">${pausedBox}<div class="run-buttons">${buttons.join('')}</div></div>`;
+  },
+
+  _bindRunControls() {
+    document.getElementById('run-pause')?.addEventListener('click', () => {
+      this.pauseRun(this.currentChatId);
+    });
+    document.getElementById('run-resume')?.addEventListener('click', () => {
+      this.resumeRunPause(this.currentChatId);
+    });
+    document.getElementById('run-stop')?.addEventListener('click', () => {
+      this.stopAgent();
+      this.updateChatToolbar();
+    });
+    document.getElementById('run-continue')?.addEventListener('click', async () => {
+      await this.resumeRun?.(this.currentChatId);
+      this.updateChatToolbar();
+    });
+    document.querySelector('#plan-panel [data-open-limits]')?.addEventListener('click', () => {
+      this.showSettingsModal('limits');
+    });
+    document.querySelectorAll('#plan-panel [data-open-tab]').forEach((b) => {
+      b.addEventListener('click', () => this.switchTab(b.dataset.openTab));
+    });
   },
 
   // Крестик в шапке панели. План при этом не трогается — скрыт только

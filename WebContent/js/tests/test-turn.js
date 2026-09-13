@@ -103,6 +103,10 @@ class FakeDB {
   const ui = new X.UI(agent);
   ui.refreshSidebar = async () => {};
   ui.updateModelDisplay = () => {};
+  // Панель хода выключена: здесь проверяется лента над полем ввода —
+  // одна строка общего счёта. Сама панель со всем деревом проверяется
+  // в test-progress и test-plan-steps.
+  ui.panelDepth = "off";
 
   await db.put('chats', { id: 'c1', title: 'Чат', modelRef: 'c::a', modelRefs: ['c::a'], model: 'model-a', createdAt: 1, updatedAt: 1 });
   await ui.loadChat('c1');

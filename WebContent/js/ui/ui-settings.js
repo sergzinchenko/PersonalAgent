@@ -188,6 +188,23 @@ Object.assign(UI.prototype, {
           </div>
         </div>
         <div class="form-group">
+          <label>Глубина панели хода работы</label>
+          <select id="s_panel_depth">
+            <option value="off" ${this.panelDepth === 'off' ? 'selected' : ''}>Не показывать панель</option>
+            <option value="steps" ${this.panelDepth === 'steps' ? 'selected' : ''}>Шаги плана</option>
+            <option value="subtasks" ${this.panelDepth === 'subtasks' ? 'selected' : ''}>Шаги и подзадачи</option>
+            <option value="tools" ${this.panelDepth === 'tools' ? 'selected' : ''}>Шаги, подзадачи и вызовы (по умолчанию)</option>
+            <option value="io" ${this.panelDepth === 'io' ? 'selected' : ''}>Всё, включая аргументы и ответы</option>
+          </select>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5;">
+            Панель справа показывает, чем агент занят: план задачи, внутри шагов — подзадачи,
+            внутри подзадач — вызовы инструментов. Оттуда же работа приостанавливается,
+            продолжается и прерывается. Настройка независима от того, что пишется в переписку:
+            переписку можно держать чистой, а за работой следить подробно.
+          </div>
+        </div>
+
+        <div class="form-group">
           <label>Навыки в панели чата</label>
           <select id="s_skills_mode">
             <option value="active">Только включённые (компактно)</option>
@@ -503,6 +520,7 @@ Object.assign(UI.prototype, {
 
       // Отображение хода вызова инструментов.
       this.toolVerbosity = document.getElementById('s_tool_verbosity').value;
+      this.panelDepth = document.getElementById('s_panel_depth').value;
       this.filesContextMode = document.getElementById('s_files_ctx').value;
       this.skillsPanelMode = document.getElementById('s_skills_mode').value;
       // panelCompact сюда попадает, хотя формы для него нет: запись
@@ -511,6 +529,7 @@ Object.assign(UI.prototype, {
       await this.agent.db.put('settings', {
         key: 'display',
         toolVerbosity: this.toolVerbosity,
+        panelDepth: this.panelDepth,
         filesContextMode: this.filesContextMode,
         skillsPanelMode: this.skillsPanelMode,
         panelCompact: { ...this.panelCompact },

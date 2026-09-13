@@ -138,6 +138,7 @@ class AIAgent {
     const display = await this.db.get('settings', 'display');
     if (display) {
       if (display.toolVerbosity) this.ui.toolVerbosity = display.toolVerbosity;
+      if (display.panelDepth) this.ui.panelDepth = display.panelDepth;
       if (display.filesContextMode) this.ui.filesContextMode = display.filesContextMode;
       if (display.skillsPanelMode) this.ui.skillsPanelMode = display.skillsPanelMode;
       if (display.panelCompact) this.ui.panelCompact = { ...this.ui.panelCompact, ...display.panelCompact };
