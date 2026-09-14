@@ -425,25 +425,69 @@ class LLMRegistry {
     // обходится русский текст у этой модели.
     const probeText = 'Проверка связи. Ответь одним словом: готово.';
 
-    const ask = async (body) => {
+    // ── Журнал пробы ──
+    // Проба — диагностика, и её ответ нужен человеку целиком: именно в
+    // нём провайдер называет пределы, а разбор ниже вытаскивает оттуда
+    // не всё и не всегда. Пишем в консоль всегда (проба делается только
+    // по кнопке, фона от неё нет), но по тем же правилам, что и обычные
+    // запросы: ключ в заголовках маскируется, тело проходит через
+    // LogGuard — системные промпты и вызовы системных инструментов в
+    // консоль не попадают ни при каких настройках (см. core/log-guard.js).
+    const logProbe = (label, body, resp) => {
+      try {
+        const safeHeaders = {};
+        for (const k of Object.keys(headers)) {
+          const low = k.toLowerCase();
+          const v = String(headers[k] || '');
+          safeHeaders[k] = (low === 'authorization' || low.includes('key') ||
+                            low.includes('secret') || low.includes('token'))
+            ? (v.length > 12 ? v.slice(0, 8) + '***' + v.slice(-4) : '***')
+            : v;
+        }
+        console.group('%c🔬 ПРОБА МОДЕЛИ · ' + label, 'color:#0984e3;font-weight:bold;');
+        console.log('%cEndpoint:', 'color:#888;', endpoint);
+        console.log('%cHeaders:', 'color:#888;', safeHeaders);
+        if (typeof LogGuard !== 'undefined') LogGuard.notice();
+        console.log('%cBody:', 'color:#888;',
+          typeof LogGuard !== 'undefined' ? LogGuard.redactBody(body) : body);
+        if (resp && resp.networkError) {
+          console.log('%cСеть:', 'color:#e74c3c;', resp.networkError);
+        } else if (resp) {
+          console.log('%cStatus:', 'color:#888;', resp.status, resp.ok ? 'OK' : 'ОТКАЗ');
+          console.log('%cElapsed:', 'color:#888;', resp.ms + ' мс');
+          // Ответ печатаем целиком: в отказе провайдера и лежит то, ради
+          // чего проба затевалась. Системных данных в пробе нет — тело
+          // запроса составлено здесь же и состоит из одной фразы.
+          console.log('%cResponse:', 'color:#888;', resp.text);
+        }
+        console.groupEnd();
+      } catch (_) { /* журнал не должен ломать пробу */ }
+    };
+
+    const ask = async (label, body) => {
       const t0 = Date.now();
+      const full = { model, ...body };
       try {
         const resp = await fetch(endpoint, {
-          method: 'POST', headers, body: JSON.stringify({ model, ...body }),
+          method: 'POST', headers, body: JSON.stringify(full),
         });
         const text = await resp.text();
         let data = null;
         try { data = JSON.parse(text); } catch (_) { data = null; }
-        return { ok: resp.ok, status: resp.status, text, data, ms: Date.now() - t0 };
+        const out = { ok: resp.ok, status: resp.status, text, data, ms: Date.now() - t0 };
+        logProbe(label, full, out);
+        return out;
       } catch (e) {
-        return { networkError: e instanceof TypeError
+        const out = { networkError: e instanceof TypeError
           ? 'Не удалось связаться с ' + conn.apiUrl + '. Сервер недоступен либо не разрешает запросы с этой страницы (CORS).'
           : (e && e.message) || String(e) };
+        logProbe(label, full, out);
+        return out;
       }
     };
 
     // ── 1. Предел контекста ──
-    const probe = await ask({
+    const probe = await ask('предел контекста', {
       messages: [{ role: 'user', content: probeText }],
       max_tokens: 1000000000,
       temperature: 0,
@@ -479,7 +523,7 @@ class LLMRegistry {
       // заведомо невозможное число. Спрашиваем ещё раз, по-человечески,
       // чтобы узнать остальное: отвечает ли она и как себя называет.
       if (!out.failed) {
-        answer = await ask({
+        answer = await ask('обычный запрос', {
           messages: [{ role: 'user', content: probeText }],
           max_tokens: Math.min(64, ceiling || 64),
           temperature: 0,
@@ -525,16 +569,32 @@ class LLMRegistry {
       }
     }
 
+    // ── Справочник имён — по НАСТОЯЩЕМУ имени модели ──
+    // Таблица догадок по имени (guessContextWindow) знает «glm», «gpt-4o»
+    // и прочие семейства. Введённый человеком алиас в ней может не
+    // значиться, а полное имя от сервера — вполне: «z-ai/glm-5.2»
+    // говорит о семействе больше, чем «моя-модель».
+    if (!out.contextWindow && out.resolvedModel) {
+      const guessed = LLMRegistry.guessContextWindow(out.resolvedModel);
+      if (guessed) {
+        out.contextWindow = guessed;
+        out.contextSource = 'guess';
+        out.findings.push(`Окно контекста: ${guessed} токенов — по справочнику известных моделей, ` +
+          `для имени «${out.resolvedModel}», которым назвался сервер. Значение приблизительное, проверьте.`);
+      }
+    }
+
     if (!out.contextWindow && !out.failed) {
       out.findings.push('Предел контекста провайдер не назвал: запрос с заведомо завышенным пределом ответа он принял, ' +
-        'и в перечне моделей предела тоже нет. Задайте окно вручную — оно уточнится само по первому же рабочему запросу.');
+        'ни в перечне моделей, ни в справочнике имён его тоже нет. Задайте окно вручную — оно уточнится ' +
+        'само по первому же рабочему запросу.');
     }
 
     // ── 2. Поддержка инструментов ──
     // Спрашиваем только если модель вообще отвечает: у неотвечающей это
     // выяснять нечего.
     if (!out.failed) {
-      const withTools = await ask({
+      const withTools = await ask('поддержка инструментов', {
         messages: [{ role: 'user', content: 'ping' }],
         max_tokens: 16,
         temperature: 0,
@@ -572,12 +632,18 @@ class LLMRegistry {
   // первому же отказу с точной цифрой.
   static maxTokensFromError(text) {
     const t = String(text || '');
+    // ВАЖНО: ловим предел ПРОВАЙДЕРА, а не то число, что запросили мы.
+    // В отказах они стоят рядом («max_completion_tokens is too large:
+    // 1179628. This model supports at most 65536…»), и небрежный образец
+    // с радостью возьмёт первое — то есть наше собственное.
     const patterns = [
+      // «This model supports at most 65536 completion tokens»
+      /supports? at most[^\d]{0,20}(\d+)/i,
       // «the valid range of max_tokens is [1, 393216]»
-      /max_tokens[^[\]]{0,40}\[\s*\d+\s*,\s*(\d+)\s*\]/i,
-      /max_tokens must be (?:less than or equal to|at most|<=?)\s*(\d+)/i,
-      /max(?:imum)?[ _-]?(?:value|allowed)?[ _-]?(?:of |for )?max_tokens[^\d]{0,20}(\d+)/i,
-      /max_tokens[^\d]{0,20}(?:cannot|can't|must not) exceed[^\d]{0,10}(\d+)/i,
+      /max_(?:completion_)?tokens[^[\]]{0,40}\[\s*\d+\s*,\s*(\d+)\s*\]/i,
+      /max_(?:completion_)?tokens must be (?:less than or equal to|at most|<=?)\s*(\d+)/i,
+      /max(?:imum)?[ _-]?(?:value|allowed)?[ _-]?(?:of |for )?max_(?:completion_)?tokens[^\d]{0,20}(?!too large)(\d+)/i,
+      /max_(?:completion_)?tokens[^\d]{0,20}(?:cannot|can't|must not) exceed[^\d]{0,10}(\d+)/i,
     ];
     for (const re of patterns) {
       const m = t.match(re);

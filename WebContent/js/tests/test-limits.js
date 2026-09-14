@@ -206,6 +206,13 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
   // ══════════════════════════════════════════════
   console.log('\n── Проба модели живым запросом ──');
 
+  // Проба честно пишет каждый свой шаг в консоль — это её работа. Но в
+  // выводе набора этот журнал только шум: глушим его на время раздела
+  // и включаем там, где он сам предмет проверки.
+  const realConsole = sandbox.console;
+  const silent = { group() {}, groupEnd() {}, log() {}, dir() {}, error() {} };
+  sandbox.console = silent;
+
   // Мини-реестр с подменённым fetch: проба — это два запроса, и важно,
   // ЧТО именно она из них вытаскивает.
   const makeProbe = (responder) => {
@@ -315,11 +322,78 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
   ok('жалобы «задайте вручную» при этом нет',
      !probed.findings.some(f => /вручную/.test(f)), probed.findings.join(' | '));
 
+  // 3. Отказ шлюза, где предел провайдера стоит РЯДОМ с числом, которое
+  //    запросили мы. Небрежный разбор возьмёт наше — и окно окажется
+  //    вымышленным.
+  const realError3 = JSON.stringify({ status: 'error', error: { message: JSON.stringify({
+    errors: [{ message: 'AiError: AiError: ' + JSON.stringify({
+      object: 'error',
+      message: 'max_completion_tokens is too large: 1179628.This model supports at most 65536 completion tokens',
+    }) }],
+  }) } });
+  ok('в отказе берётся предел провайдера, а не запрошенное нами число',
+     LLMRegistry.maxTokensFromError(realError3) === 65536,
+     String(LLMRegistry.maxTokensFromError(realError3)));
+
+  const { reg: r7 } = makeProbe((body, n) => (n === 1
+    ? { ok: false, status: 400, body: realError3 }
+    : { body: { model: 'gpt-5-mini', choices: [{ message: { content: 'ok' } }] } }));
+  sandbox.fetch = (() => {
+    const base = sandbox.fetch;
+    return base;
+  })();
+  probed = await r7.probeModel('c1', 'мой-алиас');
+  ok('такой отказ тоже даёт нижнюю границу окна',
+     probed.contextWindow === 65536 && probed.contextSource === 'ceiling', JSON.stringify(probed.contextWindow));
+
+  // 4. Имя, которым назвался сервер, идёт и в справочник известных имён:
+  //    алиас в нём может не значиться, а полное имя — вполне.
+  const { reg: r8 } = makeProbe((body, n) => (n === 1
+    ? { body: { model: 'openai/gpt-4o', choices: [{ message: { content: 'ok' } }] } }
+    : { body: { choices: [{ message: { content: 'ok' } }] } }));
+  sandbox.fetch = (() => {
+    const inner = sandbox.fetch;
+    return async (url, init) => {
+      // Перечень моделей провайдер не отдаёт — остаётся справочник имён.
+      if (String(url).endsWith('/models')) return { ok: false, status: 404, text: async () => 'no' };
+      return inner(url, init);
+    };
+  })();
+  probed = await r8.probeModel('c1', 'моя-модель');
+  ok('окно взято из справочника по имени, которым ответил сервер',
+     probed.contextWindow === 128000 && probed.contextSource === 'guess', JSON.stringify(probed.contextWindow));
+  ok('и сказано, что значение приблизительное',
+     probed.findings.some(f => /приблизительное/.test(f)), probed.findings.join(' | '));
+
+  console.log('\n── Проба пишется в журнал ──');
+  // Диагностику видно в консоли целиком: именно в ответе провайдера
+  // лежит то, ради чего проба и делается. Но ключ туда попасть не должен.
+  const logged = [];
+  sandbox.console = {
+    group: (...a) => logged.push(a.join(' ')),
+    groupEnd: () => {},
+    log: (...a) => logged.push(a.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')),
+    dir: () => {}, error: () => {},
+  };
+  const { reg: r9 } = makeProbe(() => ({ body: { choices: [{ message: { content: 'ok' } }] } }));
+  r9.connections[0].apiKey = 'sk-ОЧЕНЬ-СЕКРЕТНЫЙ-КЛЮЧ-1234';
+  r9._headers = () => ({ 'Content-Type': 'application/json', Authorization: 'Bearer sk-ОЧЕНЬ-СЕКРЕТНЫЙ-КЛЮЧ-1234' });
+  await r9.probeModel('c1', 'модель');
+  sandbox.console = silent;
+  const journal = logged.join('\n');
+  ok('каждый шаг пробы записан', /ПРОБА МОДЕЛИ/.test(journal), journal.slice(0, 120));
+  ok('шаги названы', /предел контекста/.test(journal) && /поддержка инструментов/.test(journal));
+  ok('ответ провайдера виден целиком', /Response/.test(journal));
+  ok('ключ в журнал не попал', !/ОЧЕНЬ-СЕКРЕТНЫЙ/.test(journal), journal.slice(0, 200));
+  ok('но видно, что он был', /\*\*\*/.test(journal));
+
   // Сеть недоступна — проба обязана сказать это, а не молчать.
   const { reg: r4 } = makeProbe(() => { throw new TypeError('failed to fetch'); });
   sandbox.fetch = async () => { throw new TypeError('failed to fetch'); };
   probed = await r4.probeModel('c1', 'any');
   ok('недоступный сервер объяснён, а не проглочен', !!probed.error && /CORS|недоступ/.test(probed.error), JSON.stringify(probed));
+
+  sandbox.console = realConsole;
 
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
