@@ -390,14 +390,17 @@ Object.assign(UI.prototype, {
     // сообщил сам провайдер в /models, и лишь в последнюю очередь догадка
     // по имени. Порядок именно такой: догадка по имени врёт на локальных
     // сборках, где одно и то же имя запускают с разным пределом.
-    const fromProvider = (!m && this._modelMeta && this._modelMeta[name])
-      ? this._modelMeta[name].contextWindow : 0;
+    const fromProviderMeta = !m ? LLMRegistry.findMeta(this._modelMeta, name) : null;
+    const fromProvider = fromProviderMeta ? fromProviderMeta.contextWindow : 0;
     const ctx = m ? m.contextWindow : (fromProvider || LLMRegistry.guessContextWindow(name));
     const ctxSource = m ? (m.contextWindowSource || 'manual') : (fromProvider ? 'provider' : 'guess');
     const SOURCE_LABEL = {
       manual: 'задано вручную',
       provider: 'сообщил провайдер',
       error: 'исправлено по отказу провайдера',
+      // Нижняя граница: провайдер назвал потолок max_tokens, а окно не
+      // может быть меньше него. Подпись говорит именно это, а не «точно».
+      ceiling: 'не меньше этого — по пределу ответа у провайдера',
       observed: 'уточнено по факту работы',
       guess: 'подставлено по имени модели — проверьте',
     };
@@ -528,7 +531,8 @@ Object.assign(UI.prototype, {
       if (report) report.innerHTML = '';
 
       const list = await reg.fetchAvailable(connId);
-      const fromList = !list.error && list.meta && list.meta[nameNow] && list.meta[nameNow].contextWindow;
+      const listMeta = !list.error && LLMRegistry.findMeta(list.meta, nameNow);
+      const fromList = listMeta && listMeta.contextWindow;
       if (fromList) {
         setCtx(fromList);
         if (src) src.textContent = SOURCE_LABEL.provider;
@@ -545,7 +549,7 @@ Object.assign(UI.prototype, {
 
       if (probe.contextWindow) {
         setCtx(probe.contextWindow);
-        if (src) src.textContent = SOURCE_LABEL.error;
+        if (src) src.textContent = SOURCE_LABEL[probe.contextSource] || SOURCE_LABEL.error;
       } else if (!fromList && src) {
         src.textContent = 'предел не назван — задайте вручную';
       } else if (src) {

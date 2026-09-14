@@ -452,28 +452,53 @@ class LLMRegistry {
     if (probe.networkError) return { error: probe.networkError };
 
     out.latencyMs = probe.ms;
+    let answer = probe;
     if (!probe.ok) {
       const declared = LLMRegistry.contextFromError(probe.text);
+      const ceiling = LLMRegistry.maxTokensFromError(probe.text);
       if (declared) {
         out.contextWindow = declared;
         out.contextSource = 'error';
         out.findings.push(`Окно контекста: ${declared} токенов — назвал сам провайдер в ответе на запрос.`);
+      } else if (ceiling) {
+        // Провайдер отверг не запрос, а конкретно наш max_tokens, и назвал
+        // свой потолок. Больше окна он быть не может — значит, окно не
+        // меньше этого числа.
+        out.maxTokensCeiling = ceiling;
+        out.contextWindow = ceiling;
+        out.contextSource = 'ceiling';
+        out.findings.push(`Предел ответа (max_tokens) у этой модели — ${ceiling} токенов; провайдер назвал его сам. ` +
+          `Окно контекста не меньше этого: сгенерировать больше, чем в него помещается, нельзя.`);
       } else {
-        // Отказ есть, а предела в нём нет: это тоже сведения — например,
-        // что модели с таким именем у провайдера нет.
         out.findings.push(`Провайдер ответил ${probe.status}: ` +
           String(probe.text || '').replace(/\s+/g, ' ').slice(0, 200));
         out.failed = true;
       }
-    } else {
-      const usage = probe.data && probe.data.usage;
-      const answered = probe.data && probe.data.choices && probe.data.choices[0];
-      out.findings.push('Модель отвечает' + (probe.ms ? ` (${(probe.ms / 1000).toFixed(1).replace('.', ',')} с)` : '') + '.');
+
+      // Отказ по max_tokens — не отказ модели: она просто не приняла
+      // заведомо невозможное число. Спрашиваем ещё раз, по-человечески,
+      // чтобы узнать остальное: отвечает ли она и как себя называет.
+      if (!out.failed) {
+        answer = await ask({
+          messages: [{ role: 'user', content: probeText }],
+          max_tokens: Math.min(64, ceiling || 64),
+          temperature: 0,
+          stream: false,
+        });
+        if (answer.networkError) answer = { ok: false, text: answer.networkError };
+      }
+    }
+
+    if (answer.ok) {
+      const usage = answer.data && answer.data.usage;
+      const answered = answer.data && answer.data.choices && answer.data.choices[0];
+      out.findings.push('Модель отвечает' + (answer.ms ? ` (${(answer.ms / 1000).toFixed(1).replace('.', ',')} с)` : '') + '.');
       // Идентификатор из ответа ловит опечатки и подмены: «gpt-4o» у
-      // шлюза может оказаться совсем другой моделью.
-      if (probe.data && probe.data.model && probe.data.model !== model) {
-        out.resolvedModel = probe.data.model;
-        out.findings.push(`Сервер отвечает от имени «${probe.data.model}» — идентификатор отличается от указанного.`);
+      // шлюза может оказаться совсем другой моделью. Он же нужен, чтобы
+      // поискать модель в перечне провайдера под её настоящим именем.
+      if (answer.data && answer.data.model && answer.data.model !== model) {
+        out.resolvedModel = answer.data.model;
+        out.findings.push(`Сервер отвечает от имени «${answer.data.model}» — идентификатор отличается от указанного.`);
       }
       if (usage && usage.prompt_tokens) {
         out.tokensPerChar = usage.prompt_tokens / probeText.length;
@@ -483,8 +508,26 @@ class LLMRegistry {
       if (answered && answered.finish_reason === 'length') {
         out.findings.push('Ответ оборван по длине: провайдер молча урезал запрошенный предел ответа.');
       }
-      out.findings.push('Предел контекста провайдер не назвал: запрос с заведомо завышенным пределом ответа он принял. ' +
-        'Значит, окно придётся задать вручную — оно уточнится само по первому же рабочему запросу.');
+    }
+
+    // ── Перечень моделей под НАСТОЯЩИМ именем ──
+    // Если окно ещё не известно, а сервер назвал другое имя модели —
+    // стоит поискать в перечне по нему: у шлюзов там обычно всё есть,
+    // просто ключ другой («z-ai/glm-5.2» против введённого «glm-5.2»).
+    if (!out.contextWindow && out.resolvedModel) {
+      const list = await this.fetchAvailable(connId);
+      const meta = !list.error && LLMRegistry.findMeta(list.meta, out.resolvedModel);
+      if (meta && meta.contextWindow) {
+        out.contextWindow = meta.contextWindow;
+        out.contextSource = 'provider';
+        out.findings.push(`Окно контекста: ${meta.contextWindow} токенов — нашлось в перечне моделей ` +
+          `под именем «${out.resolvedModel}».`);
+      }
+    }
+
+    if (!out.contextWindow && !out.failed) {
+      out.findings.push('Предел контекста провайдер не назвал: запрос с заведомо завышенным пределом ответа он принял, ' +
+        'и в перечне моделей предела тоже нет. Задайте окно вручную — оно уточнится само по первому же рабочему запросу.');
     }
 
     // ── 2. Поддержка инструментов ──
@@ -516,6 +559,55 @@ class LLMRegistry {
     }
 
     return out;
+  }
+
+  // ── Предел max_tokens из отказа провайдера ──
+  // Отдельно от окна контекста, потому что это РАЗНЫЕ величины: max_tokens
+  // ограничивает ответ, окно — весь запрос вместе с ответом. Но связь
+  // между ними жёсткая и в нужную нам сторону: сгенерировать больше, чем
+  // помещается в окно, нельзя, поэтому потолок max_tokens — это гарантия
+  // «окно НЕ МЕНЬШЕ этого». Для настройки, где 0 означает «неизвестно»,
+  // такая нижняя граница несравнимо лучше пустоты: подрезка начинает
+  // работать, а ошибётся она в безопасную сторону — и сама исправится по
+  // первому же отказу с точной цифрой.
+  static maxTokensFromError(text) {
+    const t = String(text || '');
+    const patterns = [
+      // «the valid range of max_tokens is [1, 393216]»
+      /max_tokens[^[\]]{0,40}\[\s*\d+\s*,\s*(\d+)\s*\]/i,
+      /max_tokens must be (?:less than or equal to|at most|<=?)\s*(\d+)/i,
+      /max(?:imum)?[ _-]?(?:value|allowed)?[ _-]?(?:of |for )?max_tokens[^\d]{0,20}(\d+)/i,
+      /max_tokens[^\d]{0,20}(?:cannot|can't|must not) exceed[^\d]{0,10}(\d+)/i,
+    ];
+    for (const re of patterns) {
+      const m = t.match(re);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n >= 256) return n;
+      }
+    }
+    return 0;
+  }
+
+  // ── Поиск модели в перечне провайдера ──
+  // Имя, которое ввёл человек, и имя, которым модель зовётся у провайдера,
+  // совпадают не всегда: у шлюзов принято «z-ai/glm-5.2», а вводят
+  // «glm-5.2». Точное совпадение при этом не находит ничего, хотя данные
+  // в перечне есть. Поэтому ищем по убыванию строгости и никогда — по
+  // частичному вхождению: «gpt-4» не должен подхватить «gpt-4o-mini».
+  static findMeta(meta, name) {
+    if (!meta || !name) return null;
+    if (meta[name]) return meta[name];
+    const want = String(name).toLowerCase();
+    const keys = Object.keys(meta);
+    let k = keys.find(x => x.toLowerCase() === want);
+    if (k) return meta[k];
+    // «glm-5.2» ↔ «z-ai/glm-5.2»: сравниваем часть после последней косой.
+    const tail = (x) => x.toLowerCase().split('/').pop();
+    k = keys.find(x => tail(x) === want || x.toLowerCase() === tail(want));
+    if (k) return meta[k];
+    k = keys.find(x => tail(x) === tail(want));
+    return k ? meta[k] : null;
   }
 
   // ── Уточнение окна по факту работы ──

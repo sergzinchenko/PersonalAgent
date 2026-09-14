@@ -267,6 +267,54 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
      probed.findings.some(f => /НЕ ПОДДЕРЖИВАЮТСЯ/.test(f) && /разговаривать/.test(f)),
      probed.findings.join(' | '));
 
+  // ── Два случая из жизни, на которых проба спотыкалась ──
+
+  // 1. Провайдер отвергает не запрос, а конкретно max_tokens, и называет
+  //    свой потолок. Окно меньше него быть не может.
+  const realError1 = '{"error":{"message":"Invalid max_tokens value, the valid range of max_tokens is [1, 393216]",' +
+    '"type":"invalid_request_error","param":null,"code":"invalid_request_error"}}';
+  const { reg: r5, sent: sent5 } = makeProbe((body, n) => {
+    if (n === 1) return { ok: false, status: 400, body: realError1 };
+    return { body: { model: 'glm', choices: [{ message: { content: 'готово' } }] } };
+  });
+  probed = await r5.probeModel('c1', 'glm');
+  ok('потолок max_tokens разобран из отказа', probed.maxTokensCeiling === 393216, JSON.stringify(probed.maxTokensCeiling));
+  ok('и принят как нижняя граница окна', probed.contextWindow === 393216 && probed.contextSource === 'ceiling',
+     probed.contextSource);
+  ok('сказано, почему это именно «не меньше»',
+     probed.findings.some(f => /не меньше/.test(f)), probed.findings.join(' | '));
+  ok('отказ по max_tokens не считается отказом модели: её спросили ещё раз',
+     sent5.length >= 2 && sent5[1].max_tokens <= 64, JSON.stringify(sent5.map(x => x.max_tokens)));
+  ok('и поддержку инструментов всё равно проверили',
+     sent5.some(x => Array.isArray(x.tools)), JSON.stringify(sent5.length));
+
+  // 2. Сервер принимает любой max_tokens, но отвечает от имени другой
+  //    модели — а в перечне она есть именно под этим именем.
+  const { reg: r6 } = makeProbe((body, n) => {
+    if (n === 1) return { body: { model: 'z-ai/glm-5.2', usage: { prompt_tokens: 26 },
+                                  choices: [{ message: { content: 'готово' } }] } };
+    return { body: { choices: [{ message: { content: 'ok' } }] } };
+  });
+  // Перечень моделей отдаётся тем же поддельным fetch: подменяем его
+  // так, чтобы запрос к /models вернул карточку с окном.
+  const baseFetch = sandbox.fetch;
+  sandbox.fetch = async (url, init) => {
+    if (String(url).endsWith('/models')) {
+      // fetchAvailable читает перечень через json(), а не text().
+      const body = { data: [{ id: 'z-ai/glm-5.2', context_length: 200000 }] };
+      return { ok: true, status: 200,
+        json: async () => body, text: async () => JSON.stringify(body) };
+    }
+    return baseFetch(url, init);
+  };
+  probed = await r6.probeModel('c1', 'glm-5.2');
+  ok('окно нашлось в перечне под настоящим именем модели',
+     probed.contextWindow === 200000 && probed.contextSource === 'provider', JSON.stringify(probed.contextWindow));
+  ok('и сказано, под каким именно',
+     probed.findings.some(f => /z-ai\/glm-5\.2/.test(f)), probed.findings.join(' | '));
+  ok('жалобы «задайте вручную» при этом нет',
+     !probed.findings.some(f => /вручную/.test(f)), probed.findings.join(' | '));
+
   // Сеть недоступна — проба обязана сказать это, а не молчать.
   const { reg: r4 } = makeProbe(() => { throw new TypeError('failed to fetch'); });
   sandbox.fetch = async () => { throw new TypeError('failed to fetch'); };
