@@ -520,6 +520,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function apiImportDefs() {
   return [
     {
       id: 'builtin_api_import',
+      // Ждёт человека, а не код: открывает форму. Значит, таймаут
+      // вызова к нему неприменим (см. tools-executor.js), а время
+      // ожидания не считается работой агента.
+      interactive: true,
       name: 'api_import',
       description:
         'Собирает комплект «навык + набор инструментов» из описания чужого API. Инструменты создаются ' +
@@ -579,6 +583,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function apiImportDefs() {
     },
     {
       id: 'builtin_api_bundle_configure',
+      // Ждёт человека, а не код: открывает форму. Значит, таймаут
+      // вызова к нему неприменим (см. tools-executor.js), а время
+      // ожидания не считается работой агента.
+      interactive: true,
       name: 'api_bundle_configure',
       description:
         'Открывает пользователю форму доступа к сервису импортированного набора: базовый адрес, ' +

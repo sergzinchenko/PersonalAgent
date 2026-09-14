@@ -292,6 +292,32 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
     engine.ui = savedUi;
   }
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Ожидание человека не обрывается таймаутом ──');
+  // Инструмент, открывающий форму, ждёт не код, а человека. Общий таймаут
+  // вызова означал здесь «отвечай за тридцать секунд»: пользователь
+  // печатал, гонка заканчивалась ошибкой, а введённый ответ уходил в
+  // никуда — окно уже никто не слушал.
+  const askTool = (await engine.loadTools()).find(t => t.name === 'ask_user');
+  ok('ask_user помечен как ждущий человека', askTool && askTool.interactive === true,
+     JSON.stringify(askTool && askTool.interactive));
+
+  let waited = 0;
+  engine.ui = {
+    noteHumanWait: (ms) => { waited += ms; },
+    askUser: () => new Promise((resolve) => setTimeout(() => resolve({ answered: true, answer: 'через паузу' }), 120)),
+  };
+  const slow = await engine.executeTool('ask_user', { question: 'Как дела?' }, { timeoutMs: 40 });
+  ok('ответ дождались, хотя таймаут вызова давно вышел',
+     slow.answered === true && slow.answer === 'через паузу', JSON.stringify(slow));
+  ok('и время ожидания отдано наружу', waited >= 100, String(waited));
+
+  // Обычный инструмент таймаут по-прежнему ограничивает: там ждут код.
+  engine.registerHandler('builtin_calc', () => new Promise(r => setTimeout(() => r({ ok: true }), 200)));
+  const timedOut = await engine.executeTool('calculator', { expression: '1+1' }, { timeoutMs: 30 });
+  ok('обычный инструмент таймаут обрывает', !!timedOut.error && /Timeout/.test(timedOut.error),
+     JSON.stringify(timedOut));
+
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('='.repeat(46));

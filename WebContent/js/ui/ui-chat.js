@@ -10,6 +10,15 @@
 // и не знает, чего именно.
 const PLAN_NUDGE_DEPTH = 2;
 
+// Инструменты, которые открывают форму и ждут ответа человека. Список
+// нужен интерфейсу для строки состояния; решение «не применять таймаут»
+// принимается не здесь, а по пометке interactive в описании инструмента
+// (см. tools-executor.js) — чтобы у правила был один источник.
+const INTERACTIVE_TOOLS = new Set([
+  'ask_user', 'confluence_configure', 'xwiki_configure',
+  'api_import', 'api_bundle_configure', 'backup',
+]);
+
 // Инструменты чтения артефактов: их собственный результат в артефакт НЕ
 // выносится, даже если он большой. Иначе чтение куска артефакта плодило
 // бы новый артефакт, и модель ходила бы по матрёшке вместо данных.
@@ -826,6 +835,21 @@ Object.assign(UI.prototype, {
     const run = this._chatRuns.get(chatId);
     if (!run || !run.paused) return;
     await new Promise((resolve) => { run.resumeWaiters.push(resolve); });
+  },
+
+  // ── Ожидание человека не тратит бюджет хода ──
+  // Вызывается исполнителем, когда в вызове ждали не код, а человека:
+  // окно подтверждения политики или форму инструмента. Сдвигаем начало
+  // хода ровно на это время — иначе минута раздумья над вопросом агента
+  // съедала бы минуту отведённого на работу времени, и ход обрывался бы
+  // сразу после ответа. Та же арифметика, что и у паузы.
+  noteHumanWait(ms) {
+    const waited = Number(ms) || 0;
+    if (waited <= 0) return;
+    for (const run of this._chatRuns.values()) {
+      run.startedAt += waited;
+      run.humanWaitMs = (run.humanWaitMs || 0) + waited;
+    }
   },
 
   // Приостановить работу. Кнопка есть на всех уровнях панели хода, но
@@ -1834,6 +1858,13 @@ Object.assign(UI.prototype, {
           );
 
           const startedAt = performance.now();
+          // Инструменты с формой ждут человека: строка состояния должна
+          // говорить об этом, иначе открытое где-то окно выглядит как
+          // зависший агент.
+          if (INTERACTIVE_TOOLS.has(tc.function.name)) {
+            this._showStatus(chatId, 'Жду вашего ответа…',
+              'агент остановился на вопросе — ответьте в открывшемся окне');
+          }
           if (trackItem) {
             trackItem.status = 'running';
             trackItem.startedAt = Date.now();

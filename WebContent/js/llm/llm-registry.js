@@ -387,6 +387,137 @@ class LLMRegistry {
     return 0;
   }
 
+  // ── Проба модели живым запросом ──
+  //
+  // ЗАЧЕМ. Перечень моделей отдаёт пределы далеко не у всех провайдеров, а
+  // таблица догадок по имени врёт там, где одно и то же имя запускают с
+  // разным окном (локальные сборки). Между тем сама модель отвечает на
+  // эти вопросы точно — надо только спросить.
+  //
+  // КАК. Два крошечных запроса, оба по явному нажатию пользователя:
+  //
+  //   1. Запрос с заведомо невозможным max_tokens. OpenAI-совместимые
+  //      серверы отвечают отказом, в котором САМИ называют предел:
+  //      «This model's maximum context length is 8192 tokens…». Это
+  //      самый точный источник из существующих. Если сервер предел
+  //      молча урезает и отвечает нормально — узнаём другое: модель
+  //      отзывается, какой идентификатор она сообщает о себе и сколько
+  //      токенов вышло из нашей пробной строки (грубая оценка
+  //      токенизатора для кириллицы).
+  //   2. Запрос с одним пустым инструментом — поддерживает ли модель
+  //      вызов инструментов вообще. Для этого приложения вопрос не
+  //      праздный: без инструментов агент здесь почти бесполезен, а
+  //      выясняется это обычно в середине первой же задачи.
+  //
+  // ЦЕНА. Несколько токенов и пара секунд. Поэтому проба не делается
+  // сама — только по кнопке.
+  async probeModel(connId, modelName) {
+    const conn = this.connections.find(c => c.id === connId);
+    if (!conn) return { error: 'Провайдер не найден' };
+    if (!conn.apiUrl) return { error: 'Не задан адрес API' };
+    const model = String(modelName || '').trim();
+    if (!model) return { error: 'Не указан идентификатор модели' };
+
+    const out = { model, findings: [] };
+    const endpoint = conn.apiUrl + '/chat/completions';
+    const headers = this._headers(conn);
+    // Строка с кириллицей: по её usage видно, во сколько токенов
+    // обходится русский текст у этой модели.
+    const probeText = 'Проверка связи. Ответь одним словом: готово.';
+
+    const ask = async (body) => {
+      const t0 = Date.now();
+      try {
+        const resp = await fetch(endpoint, {
+          method: 'POST', headers, body: JSON.stringify({ model, ...body }),
+        });
+        const text = await resp.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch (_) { data = null; }
+        return { ok: resp.ok, status: resp.status, text, data, ms: Date.now() - t0 };
+      } catch (e) {
+        return { networkError: e instanceof TypeError
+          ? 'Не удалось связаться с ' + conn.apiUrl + '. Сервер недоступен либо не разрешает запросы с этой страницы (CORS).'
+          : (e && e.message) || String(e) };
+      }
+    };
+
+    // ── 1. Предел контекста ──
+    const probe = await ask({
+      messages: [{ role: 'user', content: probeText }],
+      max_tokens: 1000000000,
+      temperature: 0,
+      stream: false,
+    });
+    if (probe.networkError) return { error: probe.networkError };
+
+    out.latencyMs = probe.ms;
+    if (!probe.ok) {
+      const declared = LLMRegistry.contextFromError(probe.text);
+      if (declared) {
+        out.contextWindow = declared;
+        out.contextSource = 'error';
+        out.findings.push(`Окно контекста: ${declared} токенов — назвал сам провайдер в ответе на запрос.`);
+      } else {
+        // Отказ есть, а предела в нём нет: это тоже сведения — например,
+        // что модели с таким именем у провайдера нет.
+        out.findings.push(`Провайдер ответил ${probe.status}: ` +
+          String(probe.text || '').replace(/\s+/g, ' ').slice(0, 200));
+        out.failed = true;
+      }
+    } else {
+      const usage = probe.data && probe.data.usage;
+      const answered = probe.data && probe.data.choices && probe.data.choices[0];
+      out.findings.push('Модель отвечает' + (probe.ms ? ` (${(probe.ms / 1000).toFixed(1).replace('.', ',')} с)` : '') + '.');
+      // Идентификатор из ответа ловит опечатки и подмены: «gpt-4o» у
+      // шлюза может оказаться совсем другой моделью.
+      if (probe.data && probe.data.model && probe.data.model !== model) {
+        out.resolvedModel = probe.data.model;
+        out.findings.push(`Сервер отвечает от имени «${probe.data.model}» — идентификатор отличается от указанного.`);
+      }
+      if (usage && usage.prompt_tokens) {
+        out.tokensPerChar = usage.prompt_tokens / probeText.length;
+        out.findings.push(`Пробная строка из ${probeText.length} символов кириллицы заняла ` +
+          `${usage.prompt_tokens} токенов (≈${(probeText.length / usage.prompt_tokens).toFixed(1).replace('.', ',')} символа на токен).`);
+      }
+      if (answered && answered.finish_reason === 'length') {
+        out.findings.push('Ответ оборван по длине: провайдер молча урезал запрошенный предел ответа.');
+      }
+      out.findings.push('Предел контекста провайдер не назвал: запрос с заведомо завышенным пределом ответа он принял. ' +
+        'Значит, окно придётся задать вручную — оно уточнится само по первому же рабочему запросу.');
+    }
+
+    // ── 2. Поддержка инструментов ──
+    // Спрашиваем только если модель вообще отвечает: у неотвечающей это
+    // выяснять нечего.
+    if (!out.failed) {
+      const withTools = await ask({
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 16,
+        temperature: 0,
+        stream: false,
+        tools: [{
+          type: 'function',
+          function: { name: 'ping', description: 'проверка', parameters: { type: 'object', properties: {} } },
+        }],
+        tool_choice: 'auto',
+      });
+      if (withTools.networkError) {
+        out.tools = null;
+      } else if (withTools.ok) {
+        out.tools = true;
+        out.findings.push('Вызов инструментов поддерживается.');
+      } else {
+        out.tools = false;
+        out.findings.push('ИНСТРУМЕНТЫ НЕ ПОДДЕРЖИВАЮТСЯ: ' +
+          String(withTools.text || '').replace(/\s+/g, ' ').slice(0, 160) +
+          ' Без них агент сможет только разговаривать.');
+      }
+    }
+
+    return out;
+  }
+
   // ── Уточнение окна по факту работы ──
   // source:
   //   'provider' — сказал сам провайдер в /models;

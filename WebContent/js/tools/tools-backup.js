@@ -76,6 +76,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function backupDefs() {
   return [
     {
       id: 'builtin_backup',
+      // Ждёт человека, а не код: открывает форму. Значит, таймаут
+      // вызова к нему неприменим (см. tools-executor.js), а время
+      // ожидания не считается работой агента.
+      interactive: true,
       name: 'backup',
       description:
         'Резервная копия агента целиком: имя, настройки, подключения к моделям, инструменты, ' +

@@ -203,6 +203,76 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
   ok('мусорные значения игнорируются',
      (await reg.learnContextWindow('c1:m1', 12, 'observed')).changed === false);
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Проба модели живым запросом ──');
+
+  // Мини-реестр с подменённым fetch: проба — это два запроса, и важно,
+  // ЧТО именно она из них вытаскивает.
+  const makeProbe = (responder) => {
+    const reg = Object.create(LLMRegistry.prototype);
+    reg.connections = [{ id: 'c1', name: 'P', apiUrl: 'http://x/v1', apiKey: 'k' }];
+    reg._headers = () => ({ 'Content-Type': 'application/json' });
+    const sent = [];
+    sandbox.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      const r = responder(body, sent.length);
+      return {
+        ok: r.ok !== false,
+        status: r.status || 200,
+        text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {})),
+      };
+    };
+    return { reg, sent };
+  };
+
+  // Провайдер отказывает и сам называет предел — самый точный источник.
+  const { reg: r1, sent: sent1 } = makeProbe((body, n) => n === 1
+    ? { ok: false, status: 400, body: '{"error":{"message":"This model maximum context length is 8192 tokens"}}' }
+    : { body: { choices: [{ message: { content: 'ok' } }] } });
+  let probed = await r1.probeModel('c1', 'local-model');
+  ok('предел контекста берётся из отказа провайдера', probed.contextWindow === 8192, JSON.stringify(probed));
+  ok('и помечен как названный им самим', probed.contextSource === 'error');
+  ok('первый запрос — с заведомо невозможным пределом ответа',
+     sent1[0].max_tokens >= 1000000, String(sent1[0].max_tokens));
+  ok('запрос крошечный: одно сообщение', sent1[0].messages.length === 1);
+
+  // Провайдер предел молча урезает: узнаём другое — что модель отвечает.
+  const { reg: r2, sent: sent2 } = makeProbe((body, n) => n === 1
+    ? { body: { model: 'local-model-q4', usage: { prompt_tokens: 12 },
+                choices: [{ message: { content: 'готово' }, finish_reason: 'stop' }] } }
+    : { body: { choices: [{ message: { content: 'ok' } }] } });
+  probed = await r2.probeModel('c1', 'local-model');
+  ok('без отказа окно не выдумывается', !probed.contextWindow, JSON.stringify(probed.contextWindow));
+  ok('но сказано, что модель отвечает', probed.findings.some(f => /отвеча/.test(f)), probed.findings.join(' | '));
+  ok('замечено расхождение идентификатора',
+     probed.resolvedModel === 'local-model-q4' &&
+     probed.findings.some(f => f.includes('local-model-q4')), probed.findings.join(' | '));
+  ok('оценка токенизатора посчитана', !!probed.tokensPerChar);
+  ok('и честно сказано, что окно придётся задать вручную',
+     probed.findings.some(f => /вручную/.test(f)), probed.findings.join(' | '));
+
+  // Второй запрос — про инструменты, и он с ними.
+  ok('вторым запросом проверяются инструменты',
+     Array.isArray(sent2[1].tools) && sent2[1].tools.length === 1, JSON.stringify(sent2[1].tools));
+
+  // Модель без поддержки инструментов: для этого приложения это важнее
+  // всего остального.
+  const { reg: r3 } = makeProbe((body, n) => n === 1
+    ? { body: { choices: [{ message: { content: 'ok' } }] } }
+    : { ok: false, status: 400, body: '{"error":{"message":"tools are not supported by this model"}}' });
+  probed = await r3.probeModel('c1', 'plain-model');
+  ok('отсутствие поддержки инструментов замечено', probed.tools === false);
+  ok('и названо прямо, с последствием',
+     probed.findings.some(f => /НЕ ПОДДЕРЖИВАЮТСЯ/.test(f) && /разговаривать/.test(f)),
+     probed.findings.join(' | '));
+
+  // Сеть недоступна — проба обязана сказать это, а не молчать.
+  const { reg: r4 } = makeProbe(() => { throw new TypeError('failed to fetch'); });
+  sandbox.fetch = async () => { throw new TypeError('failed to fetch'); };
+  probed = await r4.probeModel('c1', 'any');
+  ok('недоступный сервер объяснён, а не проглочен', !!probed.error && /CORS|недоступ/.test(probed.error), JSON.stringify(probed));
+
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('='.repeat(46));

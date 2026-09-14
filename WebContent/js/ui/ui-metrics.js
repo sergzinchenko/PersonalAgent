@@ -289,6 +289,17 @@ Object.assign(UI.prototype, {
       }
     } catch (_) { /* панель не должна падать из-за плана */ }
 
+    // ── Постоянная память ──
+    // Единственное, что агент проносит между чатами. При этом она была
+    // невидима: сколько там записей и что именно запомнено, можно было
+    // узнать только спросив агента — то есть потратив запрос к модели на
+    // содержимое собственного браузера. Чип отвечает на это сразу, а по
+    // нажатию показывает записи целиком, с возможностью удалить лишнее.
+    const mem = this._memoryStats();
+    const memChip = mem.count
+      ? `<span class="chip stat-chip" id="memory-chip" title="Что агент помнит между чатами. Нажмите, чтобы посмотреть и почистить">🧠 память: ${mem.count} ${this._plural(mem.count, 'запись', 'записи', 'записей')} · ${this._fmtBytes(mem.bytes)}</span>`
+      : `<span class="chip stat-chip muted" id="memory-chip" title="Агент пока ничего не запомнил между чатами. Нажмите, чтобы узнать, как это работает">🧠 память пуста</span>`;
+
     const toolsChip = stats && stats.toolCalls
       ? `<span class="chip stat-chip" id="tool-stats-chip" title="Нажмите для подробной статистики">🔧 ${fmt(stats.toolCalls)} вызовов${stats.toolErrors ? ` · ${fmt(stats.toolErrors)} ошибок` : ''}</span>`
       : `<span class="chip stat-chip muted">🔧 нет вызовов</span>`;
@@ -338,6 +349,7 @@ Object.assign(UI.prototype, {
         ${tokensChip}
         ${contextChip}
         ${toolsChip}
+        ${memChip}
         ${planChip}
       </div>
     `;
@@ -399,6 +411,7 @@ Object.assign(UI.prototype, {
     document.getElementById('model-add-btn')?.addEventListener('click', () => this.showChatModelPicker());
 
     document.getElementById('tool-stats-chip')?.addEventListener('click', () => this.showChatStatsModal());
+    document.getElementById('memory-chip')?.addEventListener('click', () => this.showMemoryModal());
     // Клик по чипу возвращает панель, если её закрыли крестиком, и
     // открывает окно плана, когда панель и так видна (на узком экране
     // панели нет вовсе — там окно остаётся единственным способом
@@ -691,6 +704,103 @@ Object.assign(UI.prototype, {
     if (save) save.textContent = 'Прекратить план';
   },
 
+
+  // ── Состояние постоянной памяти ──
+  // Память агента живёт в localStorage под общим префиксом (см.
+  // persistent_memory в tools-builtin.js). Читаем её здесь напрямую, а не
+  // через инструмент: показать пользователю его же данные — не работа
+  // модели, и тратить на это запрос незачем.
+  _memoryStats() {
+    const out = { count: 0, bytes: 0, keys: [] };
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k || !k.startsWith(MEMORY_PREFIX)) continue;
+        const raw = localStorage.getItem(k) || '';
+        out.count++;
+        // Байты, а не символы: кириллица в UTF-8 занимает вдвое больше,
+        // и «12 КБ» по символам ввело бы в заблуждение вдвое.
+        out.bytes += new Blob([k + raw]).size;
+        out.keys.push({ key: k.slice(MEMORY_PREFIX.length), raw });
+      }
+    } catch (_) { /* приватный режим браузера может закрыть хранилище */ }
+    out.keys.sort((a, b) => a.key.localeCompare(b.key, 'ru'));
+    return out;
+  },
+
+  _plural(n, one, few, many) {
+    const a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b > 1 && b < 5) return few;
+    if (b === 1) return one;
+    return many;
+  },
+
+  _fmtBytes(n) {
+    if (n < 1024) return n + ' Б';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1).replace('.', ',') + ' КБ';
+    return (n / 1024 / 1024).toFixed(1).replace('.', ',') + ' МБ';
+  },
+
+  // ── Что агент помнит ──
+  // Содержимое памяти — это то, что уходит модели при чтении и влияет на
+  // её ответы в каждом следующем чате. Пользователь должен видеть это
+  // целиком и уметь убрать лишнее, не прося агента «забудь про…».
+  async showMemoryModal() {
+    const mem = this._memoryStats();
+
+    const rows = mem.keys.map(({ key, raw }) => {
+      let preview = raw;
+      try { preview = JSON.stringify(JSON.parse(raw), null, 2); } catch (_) {}
+      const size = new Blob([raw]).size;
+      return `
+        <details class="mem-item">
+          <summary>
+            <span class="mem-key">${this._escHtml(key)}</span>
+            <span class="mem-size">${this._fmtBytes(size)}</span>
+            <button class="btn btn-danger btn-sm" data-mem-del="${this._escHtml(key)}">Удалить</button>
+          </summary>
+          <pre class="tool-pre">${this._escHtml(preview.slice(0, 4000))}${preview.length > 4000 ? '\n…' : ''}</pre>
+        </details>`;
+    }).join('');
+
+    this._showModal('🧠 Постоянная память агента', `
+      <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+        Это единственное, что агент проносит между чатами: переписка у каждого чата своя,
+        а записи отсюда он читает и пополняет сам, когда решает, что знание переживёт разговор.
+        Хранится всё в вашем браузере и никуда не уходит, пока агент сам их не прочитает.
+      </div>
+      ${mem.count ? `
+        <div class="form-group">
+          <label>Записей: ${mem.count} · всего ${this._fmtBytes(mem.bytes)}</label>
+          <div class="mem-list">${rows}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
+          Удаление необратимо и происходит сразу. Агент об этом не узнает: он просто
+          не найдёт запись, когда в следующий раз туда заглянет.
+        </div>`
+      : `<p style="color:var(--text-secondary);font-size:13px;">
+           Пока пусто. Агент запишет сюда то, что сочтёт нужным помнить дальше — например,
+           ваши устойчивые предпочтения или решения по работе. Секреты и пароли он туда
+           не кладёт: это прямо запрещено его системным навыком.
+         </p>`}
+    `, null, null, { wide: true });
+
+    document.querySelectorAll('[data-mem-del]').forEach((b) => {
+      b.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const key = b.dataset.memDel;
+        const yes = await this._confirm(
+          `Удалить запись «${key}»? Агент перестанет её помнить.`,
+          { title: 'Удаление из памяти', danger: true });
+        if (!yes) return;
+        try { localStorage.removeItem(MEMORY_PREFIX + key); } catch (_) {}
+        this.updateChatToolbar();
+        this.showMemoryModal();
+      });
+    });
+  },
 
   // 128000 → «128k», 1000000 → «1M» — иначе чип занимает пол-панели.
   _fmtLimit(n) {

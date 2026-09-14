@@ -603,6 +603,34 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 }
 .agent-status .status-timer.near-limit { color: var(--warning); }
 
+/* Отчёт пробы модели в карточке: несколько коротких строк, каждая —
+   отдельная находка. Плохие новости выделены, но не криком. */
+.probe-report { margin: 0 0 12px; }
+.probe-line {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 3px 0 3px 10px;
+  border-left: 2px solid var(--border);
+}
+.probe-line.probe-bad { color: var(--warning); border-left-color: var(--warning); }
+
+/* Постоянная память: список записей в окне сводки. */
+.mem-list { max-height: 50vh; overflow-y: auto; }
+.mem-item { border-bottom: 1px solid var(--border); padding: 6px 0; }
+.mem-item > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.mem-item > summary::-webkit-details-marker { display: none; }
+.mem-item > summary::before { content: '▸'; color: var(--text-muted); }
+.mem-item[open] > summary::before { content: '▾'; }
+.mem-key { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.mem-size { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
 /* ── Проверка ограничений (вкладка «Ограничения») ──
    Замечание должно читаться как разбор, а не как ошибка формы: сначала
    что не так, потом почему, и рядом — готовое значение. */

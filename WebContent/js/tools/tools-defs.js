@@ -32,11 +32,13 @@ Object.assign(ToolsEngine.prototype, {
 	      {
 	        id: 'builtin_memory',
 	        name: 'persistent_memory',
-	        description: 'Читает/записывает данные в персистентную память агента. Actions: read, write, list',
+	        description: 'Читает, записывает и удаляет данные в постоянной памяти агента — единственном, ' +
+	          'что переживает конец чата. Действия: read (по ключу), write (ключ и значение), ' +
+	          'list (перечень ключей), forget (удалить запись — по просьбе пользователя забыть что-то).',
 	        parameters: {
 	          type: 'object',
 	          properties: {
-	            action: { type: 'string', enum: ['read', 'write', 'list'] },
+	            action: { type: 'string', enum: ['read', 'write', 'list', 'forget'] },
 	            key: { type: 'string', description: 'ключ для чтения/записи' },
 	            value: { description: 'значение для записи (любой тип)' },
 	          },
@@ -429,6 +431,10 @@ Object.assign(ToolsEngine.prototype, {
 	      },
 	      {
 	        id: 'builtin_ask_user',
+	        // Ждёт человека, а не код: открывает форму. Значит, таймаут
+	        // вызова к нему неприменим (см. tools-executor.js), а время
+	        // ожидания не считается работой агента.
+	        interactive: true,
 	        name: 'ask_user',
 	        description: 'Задаёт вопрос пользователю и возвращает его ответ. Используй, когда нужна информация, которой нет в диалоге',
 	        parameters: {

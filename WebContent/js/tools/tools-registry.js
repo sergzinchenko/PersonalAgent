@@ -176,11 +176,15 @@ Object.assign(ToolsEngine.prototype, {
 	      if (!def) continue;
 	      const drift = t.name !== def.name || t.description !== def.description ||
 	        JSON.stringify(t.parameters || null) !== JSON.stringify(def.parameters || null) ||
+	        !!t.interactive !== !!def.interactive ||
 	        t.handlerCode !== undefined || t.mcpServer !== undefined;
 	      if (!drift) continue;
 	      t.name = def.name;
 	      t.description = def.description;
 	      t.parameters = def.parameters;
+	      // Пометка «ждёт человека» — часть определения, а не выбор
+	      // пользователя: от неё зависит, применять ли таймаут вызова.
+	      if (def.interactive) t.interactive = true; else delete t.interactive;
 	      t.builtin = true;
 	      delete t.handlerCode;
 	      delete t.mcpServer;

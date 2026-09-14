@@ -7,6 +7,14 @@
 // Описания лежат отдельно, в tools-defs.js: описание нужно при каждом
 // запросе к модели, а обработчик — только в момент вызова.
 
+// ── Префикс ключей постоянной памяти ──
+// Память агента живёт не в базе, а в localStorage: она должна переживать
+// и очистку базы, и любую пересборку хранилищ. Префикс объявлен здесь,
+// рядом с самим инструментом persistent_memory, потому что читают память
+// двое — он и сводка в панели чата, — и разъехавшийся префикс означал бы,
+// что панель показывает пустоту при непустой памяти.
+const MEMORY_PREFIX = 'agent_memory_';
+
 Object.assign(ToolsEngine.prototype, {
 
   // Разбор отказов доступа к файлу. Разрешение браузер выдаёт только по
@@ -52,18 +60,25 @@ Object.assign(ToolsEngine.prototype, {
     // Built-in: local_storage read/write
     this.registerHandler('builtin_memory', async (params) => {
       if (params.action === 'read') {
-        const val = localStorage.getItem('agent_memory_' + params.key);
+        const val = localStorage.getItem(MEMORY_PREFIX + params.key);
         return { key: params.key, value: val ? JSON.parse(val) : null };
       } else if (params.action === 'write') {
-        localStorage.setItem('agent_memory_' + params.key, JSON.stringify(params.value));
+        localStorage.setItem(MEMORY_PREFIX + params.key, JSON.stringify(params.value));
         return { success: true, key: params.key };
       } else if (params.action === 'list') {
         const keys = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          if (k.startsWith('agent_memory_')) keys.push(k.replace('agent_memory_', ''));
+          if (k.startsWith(MEMORY_PREFIX)) keys.push(k.slice(MEMORY_PREFIX.length));
         }
         return { keys };
+      } else if (params.action === 'forget') {
+        // Удаление по просьбе пользователя: раньше забыть что-то можно
+        // было только через интерфейс, и на просьбу «забудь про X» агенту
+        // оставалось записать поверх пустоту — запись при этом оставалась.
+        const existed = localStorage.getItem(MEMORY_PREFIX + params.key) !== null;
+        localStorage.removeItem(MEMORY_PREFIX + params.key);
+        return { success: true, key: params.key, existed };
       }
       return { error: 'Unknown action' };
     });

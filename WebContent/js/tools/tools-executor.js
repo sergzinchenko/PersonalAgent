@@ -22,6 +22,18 @@ Object.assign(ToolsEngine.prototype, {
   // отпускает ожидание и возвращает ошибку, но сам handler, если он завис
   // в синхронном цикле, продолжит занимать поток. Это ограничение среды;
   // полноценное прерывание требует исполнения в Worker с terminate().
+  //
+  // ── ОЖИДАНИЕ ЧЕЛОВЕКА ТАЙМАУТОМ НЕ ОГРАНИЧИВАЕТСЯ ──
+  // Инструмент, открывающий форму (ask_user, любой *_configure, импорт
+  // API с подтверждением имён), ждёт не код, а ЧЕЛОВЕКА. Общий таймаут
+  // вызова означал здесь буквально «отвечай за тридцать секунд»: пока
+  // пользователь печатал, гонка заканчивалась ошибкой «Timeout», агент
+  // шёл дальше без ответа, а сам ответ, введённый через минуту, уходил
+  // в никуда — окно-то уже никто не слушал. Такие инструменты помечены
+  // в описании как interactive, и таймаут их не касается.
+  //
+  // Время такого ожидания возвращается наружу (humanWaitMs) и
+  // вычитается из бюджета хода: раздумье человека — не работа агента.
   async executeTool(toolName, args, { timeoutMs = 0, bypassSecurity = false } = {}) {
 	    var parsedArgs;
 	    try {
@@ -42,13 +54,21 @@ Object.assign(ToolsEngine.prototype, {
 	      toolRec = (await this.loadTools()).find(t => t.name === toolName) || null;
 	    } catch (_) { /* загрузка списка не должна ронять вызов */ }
 
+	    // Сколько в этом вызове ждали ЧЕЛОВЕКА, а не машину.
+	    let humanWaitMs = 0;
+
 	    if (this.security && !bypassSecurity) {
 	      let verdict;
+	      const checkStarted = Date.now();
 	      try {
 	        verdict = await this.security.check(toolName, parsedArgs, toolRec);
 	      } catch (e) {
 	        verdict = { allow: true }; // сбой политики не должен ломать работу
 	      }
+	      // Проверка без вопроса занимает миллисекунды; всё, что дольше
+	      // секунды, — открытое окно подтверждения, то есть человек.
+	      const checkMs = Date.now() - checkStarted;
+	      if (checkMs > 1000) humanWaitMs += checkMs;
 
 	      if (verdict && verdict.allow === false) {
 	        this.security.audit({ tool: toolName, decision: 'blocked', reason: verdict.reason });
@@ -114,8 +134,11 @@ Object.assign(ToolsEngine.prototype, {
 	    var result;
 
 	    // Обёртка гонки с таймаутом (см. комментарий к сигнатуре метода).
+	    // interactive снимает таймаут: там ждут человека, а не код.
+	    const interactive = !!(toolRec && toolRec.interactive);
+	    const runStarted = Date.now();
 	    const withTimeout = (promise) => {
-	      if (!timeoutMs || timeoutMs <= 0) return promise;
+	      if (interactive || !timeoutMs || timeoutMs <= 0) return promise;
 	      return Promise.race([
 	        promise,
 	        new Promise((resolve) => setTimeout(
@@ -203,6 +226,15 @@ Object.assign(ToolsEngine.prototype, {
 	      console.log('%cElapsed:', 'color:#888;', elapsed + 'ms');
 	      console.groupEnd();
 	      }
+	    }
+
+	    // У инструмента-формы всё его время — это ожидание человека:
+	    // сама работа там в несколько миллисекунд. Считать точнее нечего,
+	    // да и незачем: бюджет хода существует, чтобы останавливать
+	    // зациклившегося агента, а не считать секунды человека.
+	    if (interactive) humanWaitMs += Date.now() - runStarted;
+	    if (humanWaitMs > 0) {
+	      try { this.ui?.noteHumanWait?.(humanWaitMs); } catch (_) {}
 	    }
 
 	    return result;

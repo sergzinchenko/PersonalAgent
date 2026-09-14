@@ -1233,6 +1233,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function wikiDefs() {
     // ── Confluence ──
     {
       id: 'builtin_confluence_configure',
+      // Ждёт человека, а не код: открывает форму. Значит, таймаут
+      // вызова к нему неприменим (см. tools-executor.js), а время
+      // ожидания не считается работой агента.
+      interactive: true,
       name: 'confluence_configure',
       description: 'Открывает пользователю форму подключения к Confluence On-Premise: адрес сервера и ' +
         'персональный токен доступа (PAT). Значения сохраняются надолго (токен — в зашифрованном виде) ' +
@@ -1450,6 +1454,10 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function wikiDefs() {
     // ── xWiki ──
     {
       id: 'builtin_xwiki_configure',
+      // Ждёт человека, а не код: открывает форму. Значит, таймаут
+      // вызова к нему неприменим (см. tools-executor.js), а время
+      // ожидания не считается работой агента.
+      interactive: true,
       name: 'xwiki_configure',
       description: 'Открывает пользователю форму подключения к xWiki On-Premise: адрес, имя вики ' +
         '(на одной установке их бывает несколько), имя учётной записи и пароль (Basic-авторизация). ' +

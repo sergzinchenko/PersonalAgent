@@ -343,6 +343,57 @@ class FakeDB {
   ok('план прерывается', (await agent.tasks.active('c1')) === null);
 
   // ══════════════════════════════════════════════
+  console.log('\n── Сводка постоянной памяти ──');
+  // Память — единственное, что агент проносит между чатами, и до сих пор
+  // она была невидима: узнать, что там лежит, можно было только спросив
+  // агента, то есть потратив запрос к модели на содержимое своего же
+  // браузера.
+  try { window.localStorage.clear(); } catch (_) {}
+  await ui.updateChatToolbar();
+  const emptyChip = document.getElementById('memory-chip');
+  ok('чип памяти есть и при пустой памяти', !!emptyChip);
+  ok('и говорит, что она пуста', /пуста/.test(emptyChip.textContent), emptyChip.textContent.trim());
+
+  window.localStorage.setItem('agent_memory_предпочтения', JSON.stringify({ стиль: 'кратко' }));
+  window.localStorage.setItem('agent_memory_проект', JSON.stringify('внутренняя вики'));
+  window.localStorage.setItem('посторонний_ключ', 'не память');
+  await ui.updateChatToolbar();
+  const chip = document.getElementById('memory-chip');
+  ok('в чипе видно число записей', /2 записи/.test(chip.textContent), chip.textContent.trim());
+  ok('и занимаемый объём', /Б|КБ/.test(chip.textContent), chip.textContent.trim());
+  ok('чужие ключи в хранилище не считаются памятью агента',
+     !/3 запис/.test(chip.textContent), chip.textContent.trim());
+
+  const stats = ui._memoryStats();
+  ok('размер считается в байтах, а не в символах',
+     stats.bytes > JSON.stringify({ стиль: 'кратко' }).length, String(stats.bytes));
+  ok('склонение числительного верное',
+     ui._plural(1, 'запись', 'записи', 'записей') === 'запись' &&
+     ui._plural(3, 'запись', 'записи', 'записей') === 'записи' &&
+     ui._plural(5, 'запись', 'записи', 'записей') === 'записей' &&
+     ui._plural(11, 'запись', 'записи', 'записей') === 'записей');
+
+  await ui.showMemoryModal();
+  await tick(4);
+  const items = document.querySelectorAll('#modals .mem-item');
+  ok('окно показывает все записи', items.length === 2, String(items.length));
+  ok('ключи отсортированы по алфавиту',
+     items[0].textContent.includes('предпочтения'), items[0].textContent.trim().slice(0, 40));
+  ok('содержимое записи доступно целиком',
+     items[0].textContent.includes('кратко'), items[0].textContent.trim().slice(0, 80));
+  ok('у каждой записи есть удаление', document.querySelectorAll('#modals [data-mem-del]').length === 2);
+
+  // Удаление — по подтверждению и сразу, без участия агента.
+  ui._confirm = async () => true;
+  document.querySelector('#modals [data-mem-del]').click();
+  await tick(8);
+  ok('запись удалена из хранилища',
+     window.localStorage.getItem('agent_memory_предпочтения') === null);
+  ok('а посторонний ключ не тронут',
+     window.localStorage.getItem('посторонний_ключ') === 'не память');
+  ui._closeModal?.();
+  try { window.localStorage.clear(); } catch (_) {}
+
   console.log('\n── Ширина панели ──');
   const savedLayout = [];
   const realSave = ui._saveLayout;

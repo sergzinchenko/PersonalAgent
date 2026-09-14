@@ -433,7 +433,8 @@ Object.assign(UI.prototype, {
           <input type="number" id="me_ctx" min="0" value="${ctx}" placeholder="0 — неизвестно">
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;display:flex;gap:6px;align-items:center;">
             <span id="me_ctx_src">${this._escHtml(SOURCE_LABEL[ctxSource] || '')}</span>
-            <button type="button" class="btn btn-secondary btn-sm" id="me_ctx_detect">Определить</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="me_ctx_detect"
+                    title="Спросить перечень моделей провайдера, а затем саму модель — двумя крошечными запросами">Определить</button>
           </div>
         </div>
         <div class="form-group" style="flex:1;">
@@ -445,6 +446,8 @@ Object.assign(UI.prototype, {
           <input type="number" id="me_temp" step="0.1" min="0" max="2" value="${m ? m.temperature : 0.7}">
         </div>
       </div>
+      <div id="me_probe" class="probe-report"></div>
+
       <div class="form-group">
         <label>Заметка</label>
         <input id="me_notes" value="${this._escHtml(m ? m.notes : '')}" placeholder="например: дорогая, беречь — или: только для черновиков">
@@ -459,7 +462,10 @@ Object.assign(UI.prototype, {
         Разумно держать max_tokens в пределах четверти окна: ровно столько же места
         приложение вычитает из бюджета истории, резервируя его под ответ.
         Окно определяется автоматически — из списка моделей провайдера, из текста его отказа
-        и по фактически прошедшим запросам; кнопка «Определить» спрашивает провайдера заново.
+        и по фактически прошедшим запросам. Кнопка «Определить» спрашивает и провайдера, и саму
+        модель: двумя крошечными запросами она выясняет предел контекста, отзывается ли модель
+        вообще, под каким именем она себя называет и поддерживает ли вызов инструментов —
+        без них агент здесь сможет только разговаривать.
       </div>
     `, async () => {
       const nm = document.getElementById('me_name').value.trim();
@@ -500,27 +506,60 @@ Object.assign(UI.prototype, {
       // окну, не оставляет места ни под запрос, ни под историю.
       if (tokensInput) tokensInput.value = v ? Math.max(1024, Math.min(8192, Math.floor(v / 4))) : 4096;
     });
-    // Ручное определение: спрашиваем у провайдера список моделей и берём
-    // предел из карточки нужной. Работает там, где провайдер его отдаёт
-    // (локальные сборки, шлюзы); у остальных честно говорим, что нечего.
+    // ── «Определить» ──
+    // Два источника, по возрастанию цены: сначала перечень моделей
+    // провайдера (бесплатно, но отдают его не все), потом проба живым
+    // запросом к самой модели — она отвечает точно, но стоит нескольких
+    // токенов, поэтому делается только по этой кнопке.
     document.getElementById('me_ctx_detect')?.addEventListener('click', async () => {
       const src = document.getElementById('me_ctx_src');
+      const report = document.getElementById('me_probe');
       const nameNow = document.getElementById('me_name')?.value.trim();
       if (!nameNow) { if (src) src.textContent = 'сначала укажите идентификатор модели'; return; }
-      if (src) src.textContent = 'спрашиваю провайдера…';
-      const res = await reg.fetchAvailable(connId);
-      if (res.error) { if (src) src.textContent = 'не вышло: ' + res.error; return; }
-      const found = res.meta && res.meta[nameNow] && res.meta[nameNow].contextWindow;
-      if (found) {
+
+      const setCtx = (v) => {
         const ctxInput = document.getElementById('me_ctx');
-        if (ctxInput) {
-          ctxInput.value = found;
-          ctxInput.dispatchEvent(new Event('input'));
-        }
+        if (!ctxInput) return;
+        ctxInput.value = v;
+        ctxInput.dispatchEvent(new Event('input'));
+      };
+
+      if (src) src.textContent = 'спрашиваю перечень моделей…';
+      if (report) report.innerHTML = '';
+
+      const list = await reg.fetchAvailable(connId);
+      const fromList = !list.error && list.meta && list.meta[nameNow] && list.meta[nameNow].contextWindow;
+      if (fromList) {
+        setCtx(fromList);
         if (src) src.textContent = SOURCE_LABEL.provider;
+      }
+
+      if (src) src.textContent = (fromList ? SOURCE_LABEL.provider + ' · ' : '') + 'пробую модель…';
+      const probe = await reg.probeModel(connId, nameNow);
+
+      if (probe.error) {
+        if (src) src.textContent = fromList ? SOURCE_LABEL.provider : 'не вышло';
+        if (report) report.innerHTML = `<div class="probe-line probe-bad">${this._escHtml(probe.error)}</div>`;
+        return;
+      }
+
+      if (probe.contextWindow) {
+        setCtx(probe.contextWindow);
+        if (src) src.textContent = SOURCE_LABEL.error;
+      } else if (!fromList && src) {
+        src.textContent = 'предел не назван — задайте вручную';
       } else if (src) {
-        src.textContent = 'провайдер предел не сообщает — задайте вручную ' +
-          '(он уточнится сам по первому же удачному запросу)';
+        src.textContent = SOURCE_LABEL.provider;
+      }
+
+      // Отчёт показываем целиком: половина находок к окну контекста
+      // отношения не имеет, но отвечает на вопросы, которые иначе
+      // выясняются в середине первой же задачи.
+      if (report) {
+        report.innerHTML = probe.findings.map((f) => {
+          const bad = /НЕ ПОДДЕРЖИВАЮТСЯ|ответил \d|оборван/.test(f);
+          return `<div class="probe-line${bad ? ' probe-bad' : ''}">${this._escHtml(f)}</div>`;
+        }).join('');
       }
     });
   },
