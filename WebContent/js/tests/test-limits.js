@@ -392,6 +392,64 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
   ok('и сказано, что значение приблизительное',
      probed.findings.some(f => /приблизительное/.test(f)), probed.findings.join(' | '));
 
+  // 5. Настоящий ответ шлюза: окна контекста в нём нет вовсе, зато есть
+  //    то, что иначе узнаётся только опытом и счётом в конце месяца —
+  //    кто на самом деле обслужил запрос, сколько он стоил и сколько
+  //    токенов ушло на невидимые рассуждения.
+  const realTools = {
+    id: 'gen-1789584261-MhTe1zjF49uGvl7hSdAv', object: 'chat.completion',
+    model: 'z-ai/glm-5.2', provider: 'Mistral',
+    choices: [{ index: 0, finish_reason: 'tool_calls', message: {
+      role: 'assistant', content: null,
+      reasoning: 'The user wants me to call the ping function.',
+      tool_calls: [{ type: 'function', index: 0, id: 'chatcmpl-tool-bba7',
+                     function: { name: 'ping', arguments: '{}' } }],
+    } }],
+    usage: { prompt_tokens: 136, completion_tokens: 15, total_tokens: 151,
+      cost: 0.0002564, is_byok: false,
+      cost_details: { upstream_inference_cost: 0.0002564,
+        upstream_inference_prompt_cost: 0.0001904,
+        upstream_inference_completions_cost: 0.000066 },
+      completion_tokens_details: { reasoning_tokens: 11 } },
+  };
+  const { reg: r10 } = makeProbe((body, n) => (n === 1
+    ? { body: { model: 'z-ai/glm-5.2', usage: { prompt_tokens: 14 },
+                choices: [{ message: { content: 'готово' }, finish_reason: 'stop' }] } }
+    : { body: realTools }));
+  sandbox.fetch = (() => {
+    const inner = sandbox.fetch;
+    return async (url, init) => {
+      if (String(url).endsWith('/models')) return { ok: false, status: 404, text: async () => 'no' };
+      return inner(url, init);
+    };
+  })();
+  probed = await r10.probeModel('c1', 'z-ai/glm-5.2');
+  ok('поддержка инструментов подтверждена настоящим вызовом',
+     probed.tools === true && probed.findings.some(f => /настоящим вызовом/.test(f)),
+     probed.findings.join(' | '));
+  ok('цена запроса извлечена', probed.costPerRequest === 0.0002564, String(probed.costPerRequest));
+  ok('и пересчитана в цену за миллион токенов',
+     probed.pricePerMTokens.input.toFixed(2) === '1.40' &&
+     probed.pricePerMTokens.output.toFixed(2) === '4.40',
+     JSON.stringify(probed.pricePerMTokens));
+  ok('видно, кто на самом деле обслужил запрос',
+     probed.servedBy === 'Mistral' && probed.findings.some(f => /Mistral/.test(f)),
+     probed.findings.join(' | '));
+  ok('рассуждающая модель распознана', probed.reasoning === true);
+  ok('и сказано, чем это грозит пределу ответа',
+     probed.findings.some(f => /max_tokens/.test(f) && /рассужд/.test(f)), probed.findings.join(' | '));
+
+  // Молчание этих полей — норма: выдумывать находки из пустоты нельзя.
+  const { reg: r11 } = makeProbe(() => ({ body: { choices: [{ message: { content: 'ok' } }] } }));
+  probed = await r11.probeModel('c1', 'простая');
+  ok('без этих полей лишних находок не появляется',
+     !probed.costPerRequest && !probed.servedBy && !probed.reasoning &&
+     !probed.findings.some(f => /стоил|обслуживал|рассуждающая/.test(f)),
+     probed.findings.join(' | '));
+  ok('а поддержка инструментов без настоящего вызова названа осторожно',
+     probed.tools === true && probed.findings.some(f => /подтвердить её удастся только в работе/.test(f)),
+     probed.findings.join(' | '));
+
   console.log('\n── Проба пишется в журнал ──');
   // Диагностику видно в консоли целиком: именно в ответе провайдера
   // лежит то, ради чего проба и делается. Но ключ туда попасть не должен.

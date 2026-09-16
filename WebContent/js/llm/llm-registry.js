@@ -486,6 +486,66 @@ class LLMRegistry {
       }
     };
 
+    // ── Что ещё видно в ответе ──
+    // Провайдер кладёт в ответ больше, чем у него спрашивали: кто на
+    // самом деле обслужил запрос, сколько он стоил и сколько токенов
+    // ушло на рассуждения. Иначе всё это выясняется опытом и счётом в
+    // конце месяца, а проба и так уже сделана — грех не прочитать.
+    //
+    // Поля необязательные и у разных провайдеров разные, поэтому каждое
+    // берётся отдельно и только если есть: молчание здесь — норма, а не
+    // повод для находки.
+    const money = (v) => {
+      const n = Number(v);
+      if (!isFinite(n) || n <= 0) return '';
+      const digits = n >= 1 ? 2 : (n >= 0.01 ? 4 : 6);
+      return n.toFixed(digits).replace('.', ',');
+    };
+    const noteExtras = (data) => {
+      if (!data || typeof data !== 'object') return;
+
+      // У шлюза за одним именем модели стоит несколько поставщиков, и от
+      // того, кто ответил, зависят и скорость, и цена, и даже пределы.
+      if (!out.servedBy && data.provider && String(data.provider) !== String(data.model || '')) {
+        out.servedBy = String(data.provider);
+        out.findings.push(`Запрос обслуживал «${out.servedBy}»: у шлюза за одним именем модели ` +
+          `может стоять несколько поставщиков, и пределы у них разные.`);
+      }
+
+      const u = data.usage || {};
+      if (!out.costPerRequest && Number(u.cost) > 0) {
+        out.costPerRequest = Number(u.cost);
+        const cd = u.cost_details || {};
+        const inTok = parseInt(u.prompt_tokens, 10) || 0;
+        const outTok = parseInt(u.completion_tokens, 10) || 0;
+        const inCost = Number(cd.upstream_inference_prompt_cost) || 0;
+        const outCost = Number(cd.upstream_inference_completions_cost) || 0;
+        let rates = '';
+        if (inTok && outTok && inCost > 0 && outCost > 0) {
+          out.pricePerMTokens = { input: inCost / inTok * 1e6, output: outCost / outTok * 1e6 };
+          rates = ` Это ≈$${money(out.pricePerMTokens.input)} за миллион входных токенов ` +
+                  `и ≈$${money(out.pricePerMTokens.output)} за миллион в ответе.`;
+        }
+        out.findings.push(`Пробный запрос стоил $${money(u.cost)} ` +
+          `(${inTok} токенов запроса и ${outTok} ответа).` + rates);
+      }
+
+      // Рассуждения оплачиваются и съедают предел ответа, хотя в самом
+      // ответе их не видно. Предел, поставленный впритык к нужной длине,
+      // у такой модели обрывает ответ на середине — и причина неочевидна.
+      const ctd = u.completion_tokens_details || {};
+      const rt = parseInt(ctd.reasoning_tokens, 10) || 0;
+      const msg = data.choices && data.choices[0] && data.choices[0].message;
+      if (!out.reasoning && (rt > 0 || (msg && msg.reasoning))) {
+        out.reasoning = true;
+        const share = (rt && u.completion_tokens)
+          ? `: из ${u.completion_tokens} токенов ответа ${rt} ушло на рассуждения`
+          : '';
+        out.findings.push(`Модель рассуждающая${share}. Рассуждения оплачиваются и расходуют ` +
+          `предел ответа, поэтому ставить max_tokens впритык к нужной длине нельзя.`);
+      }
+    };
+
     // ── 1. Предел контекста ──
     const probe = await ask('предел контекста', {
       messages: [{ role: 'user', content: probeText }],
@@ -552,6 +612,7 @@ class LLMRegistry {
       if (answered && answered.finish_reason === 'length') {
         out.findings.push('Ответ оборван по длине: провайдер молча урезал запрошенный предел ответа.');
       }
+      noteExtras(answer.data);
     }
 
     // ── Перечень моделей под НАСТОЯЩИМ именем ──
@@ -608,8 +669,18 @@ class LLMRegistry {
       if (withTools.networkError) {
         out.tools = null;
       } else if (withTools.ok) {
+        // Код 200 сам по себе ничего не доказывает: модель без поддержки
+        // инструментов их описание просто игнорирует и отвечает текстом.
+        // Доказательство — настоящий вызов в ответе.
+        const called = !!(withTools.data && withTools.data.choices && withTools.data.choices[0] &&
+          withTools.data.choices[0].message &&
+          (withTools.data.choices[0].message.tool_calls || []).length);
         out.tools = true;
-        out.findings.push('Вызов инструментов поддерживается.');
+        out.findings.push(called
+          ? 'Вызов инструментов поддерживается: модель ответила настоящим вызовом.'
+          : 'Описание инструментов принято, но вызывать модель ничего не стала. ' +
+            'Скорее всего поддержка есть, но подтвердить её удастся только в работе.');
+        noteExtras(withTools.data);
       } else {
         out.tools = false;
         out.findings.push('ИНСТРУМЕНТЫ НЕ ПОДДЕРЖИВАЮТСЯ: ' +
