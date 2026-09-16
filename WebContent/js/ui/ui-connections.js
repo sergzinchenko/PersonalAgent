@@ -410,6 +410,34 @@ Object.assign(UI.prototype, {
     // Правило одно на приложение — см. LLMRegistry.suggestMaxTokens.
     const defTokens = LLMRegistry.suggestMaxTokens(ctx);
 
+    // ── Пояснения к числовым полям ──
+    // Раньше они лежали простынёй под формой: читают её один раз, а
+    // место она занимает всегда — и ровно там, где полезнее показывать
+    // то, что выяснила проба. Теперь это подсказки при наведении, и
+    // текст у поля и у его подписи один, чтобы не разошёлся.
+    const HINTS = {
+      ctx: this._escHtml(
+        'Сколько токенов модель принимает ВСЕГО — запрос вместе с ответом. По нему приложение ' +
+        'подрезает историю, сворачивает переписку и рисует заполнение; провайдеру это значение ' +
+        'не отправляется. Определяется само: из перечня моделей провайдера, из текста его отказа ' +
+        'и по фактически прошедшим запросам. 0 означает «неизвестно».'),
+      tokens: this._escHtml(
+        'Потолок длины ОТВЕТА; уходит в каждый запрос. Упёршись в него, модель обрывает ответ ' +
+        'на полуслове. Разумно держать в пределах четверти окна контекста: ровно столько места ' +
+        'приложение вычитает из бюджета истории, резервируя его под ответ. При определении окна ' +
+        '— и здесь, и потом, по ходу работы — подтягивается сам, если перестал помещаться. ' +
+        'У рассуждающих моделей рассуждения тоже расходуют этот предел, хотя в ответе их не видно.'),
+      temp: this._escHtml(
+        'Разброс ответов. 0 — почти всегда одно и то же, выше 1 — заметно вольнее. Для работы ' +
+        'с инструментами и точных задач берут 0–0,3; для текста и идей — 0,7–1. Выше 1,2 модель ' +
+        'начинает путать формат вызовов инструментов, и агент спотыкается на ровном месте.'),
+      detect: this._escHtml(
+        'Спрашивает перечень моделей провайдера, а затем саму модель — тремя крошечными запросами. ' +
+        'Выясняет предел контекста, отзывается ли модель, под каким именем себя называет, ' +
+        'поддерживает ли вызов инструментов (без них агент сможет только разговаривать), ' +
+        'во что обходится запрос и сколько токенов уходит на рассуждения.'),
+    };
+
     const tierOptions = Object.entries(LLMRegistry.TIERS).map(([k, t]) =>
       `<option value="${k}" ${tier === k ? 'selected' : ''}>${t.icon} ${this._escHtml(t.label)} — ${this._escHtml(t.hint)}</option>`
     ).join('');
@@ -431,46 +459,38 @@ Object.assign(UI.prototype, {
           «qwen2.5-72b-instruct» непонятно, за чем к этой модели идти.
         </div>
       </div>
-      <div style="display:flex;gap:8px;">
-        <div class="form-group" style="flex:1;">
-          <label>Окно контекста</label>
-          <input type="number" id="me_ctx" min="0" value="${ctx}" placeholder="0 — неизвестно">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <div class="form-group" style="flex:1;min-width:190px;">
+          <label class="lbl-hint" title="${HINTS.ctx}">Окно контекста<span>?</span></label>
+          <input type="number" id="me_ctx" min="0" value="${ctx}" placeholder="0 — неизвестно"
+                 title="${HINTS.ctx}">
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;display:flex;gap:6px;align-items:center;">
             <span id="me_ctx_src">${this._escHtml(SOURCE_LABEL[ctxSource] || '')}</span>
             <button type="button" class="btn btn-secondary btn-sm" id="me_ctx_detect"
-                    title="Спросить перечень моделей провайдера, а затем саму модель — двумя крошечными запросами">Определить</button>
+                    title="${HINTS.detect}">Определить</button>
           </div>
         </div>
-        <div class="form-group" style="flex:1;">
-          <label>max_tokens</label>
-          <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : defTokens}">
+        <div class="form-group" style="flex:1;min-width:190px;">
+          <label class="lbl-hint" title="${HINTS.tokens}">max_tokens<span>?</span></label>
+          <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : defTokens}"
+                 title="${HINTS.tokens}">
         </div>
-        <div class="form-group" style="flex:1;">
-          <label>Температура</label>
-          <input type="number" id="me_temp" step="0.1" min="0" max="2" value="${m ? m.temperature : 0.7}">
+        <div class="form-group" style="flex:1;min-width:190px;">
+          <label class="lbl-hint" title="${HINTS.temp}">Температура<span>?</span></label>
+          <input type="number" id="me_temp" step="0.1" min="0" max="2" value="${m ? m.temperature : 0.7}"
+                 title="${HINTS.temp}">
         </div>
       </div>
-      <div id="me_probe" class="probe-report"></div>
 
       <div class="form-group">
         <label>Заметка</label>
         <input id="me_notes" value="${this._escHtml(m ? m.notes : '')}" placeholder="например: дорогая, беречь — или: только для черновиков">
       </div>
-      <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
-        <b>Окно контекста</b> — сколько токенов модель принимает ВСЕГО: запрос вместе с ответом.
-        По нему приложение подрезает историю, сворачивает переписку и рисует индикатор
-        заполнения; провайдеру оно не отправляется.
-        <b>max_tokens</b> — потолок длины ОТВЕТА, он уходит в каждый запрос: упёршись в него,
-        модель обрывает ответ на полуслове.
-        Разумно держать max_tokens в пределах четверти окна: ровно столько же места
-        приложение вычитает из бюджета истории, резервируя его под ответ. При определении
-        окна — и здесь, и потом, по ходу работы — предел ответа подтягивается сам,
-        если перестал в него помещаться.
-        Окно определяется автоматически — из списка моделей провайдера, из текста его отказа
-        и по фактически прошедшим запросам. Кнопка «Определить» спрашивает и провайдера, и саму
-        модель: двумя крошечными запросами она выясняет предел контекста, отзывается ли модель
-        вообще, под каким именем она себя называет и поддерживает ли вызов инструментов —
-        без них агент здесь сможет только разговаривать.
+      <div id="me_probe" class="probe-report">
+        <div class="probe-empty">Здесь появится всё, что удалось выяснить о модели:
+          предел контекста, отзывается ли она, под каким именем себя называет, поддерживает ли
+          вызов инструментов, во что обходится запрос и сколько токенов уходит на рассуждения.
+          Нажмите «Определить» у поля «Окно контекста».</div>
       </div>
     `, async () => {
       const nm = document.getElementById('me_name').value.trim();
@@ -496,7 +516,9 @@ Object.assign(UI.prototype, {
       this.updateModelDisplay?.();
       this.updateChatToolbar?.();
       await this._backToProviders();
-    }, () => this._backToProviders());
+      // Своя раскладка: карточка модели шире прочих окон и растягивается,
+      // а нынешний размер для неё — наименьший (см. .modal-model).
+    }, () => this._backToProviders(), { cls: 'modal-model' });
 
     // max_tokens следует за окном контекста, пока пользователь не тронул
     // его вручную, — иначе выставленное здесь-же значение по умолчанию
@@ -579,10 +601,13 @@ Object.assign(UI.prototype, {
       // отношения не имеет, но отвечает на вопросы, которые иначе
       // выясняются в середине первой же задачи.
       if (report) {
-        report.innerHTML = probe.findings.map((f) => {
+        // Заголовок нужен с тех пор, как отчёт переехал под «Заметку»:
+        // без него список строк непонятно к чему относится.
+        report.innerHTML = '<div class="probe-head">Что выяснила проба</div>' +
+          probe.findings.map((f) => {
           const bad = /НЕ ПОДДЕРЖИВАЮТСЯ|ответил \d|оборван/.test(f);
           return `<div class="probe-line${bad ? ' probe-bad' : ''}">${this._escHtml(f)}</div>`;
-        }).join('');
+          }).join('');
       }
     });
   },

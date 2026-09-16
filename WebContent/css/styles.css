@@ -605,7 +605,7 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
 
 /* Отчёт пробы модели в карточке: несколько коротких строк, каждая —
    отдельная находка. Плохие новости выделены, но не криком. */
-.probe-report { margin: 0 0 12px; }
+.probe-report { margin: 4px 0 0; }
 .probe-line {
   font-size: 11px;
   color: var(--text-secondary);
@@ -2192,3 +2192,55 @@ iframe.sandbox-dialog-view {
 /* Фон не прокручивается: кадр закреплён на месте, и уезжающая под ним
    страница выглядела бы поломкой. */
 .sandbox-dialog-open, .sandbox-dialog-open body { overflow: hidden; }
+
+/* ===== КАРТОЧКА МОДЕЛИ =====
+   Шире обычного окна: в ней три числовых поля в ряд и отчёт пробы, а в
+   520px всё это слипалось. Растягивается мышью за угол, но только в
+   большую сторону — нынешний размер задан как наименьший, потому что
+   меньше содержимое уже не помещается. */
+.modal.modal-model {
+  width: min(880px, 96vw);
+  min-width: min(880px, 96vw);
+  max-width: 96vw;
+  min-height: 520px;
+  max-height: 92vh;
+  resize: both;
+  overflow: auto;
+}
+
+/* Подпись с подсказкой при наведении. Знак вопроса нужен, чтобы о
+   подсказке вообще узнали: невидимый title читают только те, кто и так
+   знает, что он там есть. */
+.lbl-hint { cursor: help; }
+.lbl-hint > span {
+  display: inline-block;
+  margin-left: 4px;
+  width: 13px;
+  height: 13px;
+  line-height: 13px;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.lbl-hint:hover > span { background: var(--accent); color: #fff; }
+
+/* Место под «Заметкой» до пробы не пустует: там сказано, что в нём
+   появится и как это получить. */
+.probe-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.probe-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}

@@ -42,6 +42,7 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     'js/core/tool-sandbox.js',
     'js/core/binary-formats.js',
     'js/engines/folders-engine.js',
+    'js/llm/llm-registry.js',
     'js/ui/ui-core.js',
     'js/ui/ui-navigation.js',
     'js/ui/ui-chat.js',
@@ -408,6 +409,51 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ok('без кадра окно не открывается молча', (() => {
       try { ui.showSandboxDialog({ title: 'Ничего' }); return false; } catch (_) { return true; }
     })());
+  }
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Карточка модели ──');
+  {
+    // Три числовых поля в ряд и отчёт пробы в 520 пикселей не помещались,
+    // а простыня пояснений занимала как раз то место, где полезнее
+    // показывать выясненное о модели.
+    ui.agent.models = {
+      connections: [{ id: 'c1', name: 'Провайдер', models: [] }],
+      allModels: () => [], describe: () => null,
+    };
+    await ui.showModelEditor('c1', null, 'gpt-4o-mini');
+    await tick();
+
+    const modal = document.querySelector('#modals .modal');
+    ok('карточка модели открылась', !!modal && /Модель/.test(modal.textContent));
+    ok('у неё своя раскладка — шире прочих окон', modal.classList.contains('modal-model'));
+
+    const labels = Array.from(modal.querySelectorAll('.lbl-hint'));
+    const hintOf = (text) => labels.find(l => l.textContent.includes(text));
+    ok('пояснения стали подсказками при наведении',
+       ['Окно контекста', 'max_tokens', 'Температура'].every(t => {
+         const l = hintOf(t);
+         return l && (l.getAttribute('title') || '').length > 40;
+       }), labels.map(l => l.textContent).join('/'));
+    ok('о подсказке видно, что она есть', labels.every(l => !!l.querySelector('span')));
+    ok('та же подсказка и на самом поле',
+       (document.getElementById('me_ctx').getAttribute('title') || '').length > 40);
+
+    // Простыни под формой больше нет — место занял отчёт пробы.
+    ok('длинных пояснений в форме не осталось',
+       !/приложение подрезает историю, сворачивает переписку/.test(modal.textContent),
+       modal.textContent.slice(-200));
+
+    const report = document.getElementById('me_probe');
+    const notes = document.getElementById('me_notes');
+    ok('отчёт пробы стоит ниже «Заметки»',
+       !!report && !!notes &&
+       (notes.compareDocumentPosition(report) & window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    ok('до пробы там сказано, что в этом месте появится',
+       /Определить/.test(report.textContent) && /рассужден/.test(report.textContent),
+       report.textContent.slice(0, 80));
+
+    document.querySelector('#modals .btn-secondary')?.click();
   }
 
   console.log('\n' + '='.repeat(46));

@@ -533,14 +533,16 @@ class UI {
   //  (равносильна «Отмене» — окно всегда должно закрываться с клавиатуры).
   //
   //  options.wide (bool) — широкая раскладка окна.
+  //  options.cls (string) — свой класс окна: раскладка, которую незачем
+  //  делать общей (см. .modal-model в css/styles.css).
   // ══════════════════════════════════════════════
   _showModal(title, bodyHtml, onSave, onCancel, options = {}) {
-    const { wide = false } = options;
+    const { wide = false, cls = '' } = options;
     const id = 'modal_' + uid();
     const modals = document.getElementById('modals');
     modals.innerHTML = `
       <div class="modal-overlay" id="${id}">
-        <div class="modal${wide ? ' modal-wide' : ''}">
+        <div class="modal${wide ? ' modal-wide' : ''}${cls ? ' ' + cls : ''}">
           <h2>${title}</h2>
           ${bodyHtml}
           <div class="modal-actions">
