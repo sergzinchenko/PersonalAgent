@@ -1727,7 +1727,10 @@ Object.assign(UI.prototype, {
         try {
           const upd = await this.agent.models.learnContextWindow(chatRef, seen, 'observed');
           if (upd.changed) {
-            this._toast(`Окно контекста модели уточнено по факту работы: ${upd.from || '—'} → ${upd.to} токенов.`);
+            this._toast(`Окно контекста модели уточнено по факту работы: ${upd.from || '—'} → ${upd.to} токенов.` +
+              (upd.maxTokensChanged
+                ? ` Предел ответа приведён к нему: ${upd.maxTokensChanged.from} → ${upd.maxTokensChanged.to}.`
+                : ''));
           }
         } catch (_) { /* уточнение не должно мешать ответу */ }
       }

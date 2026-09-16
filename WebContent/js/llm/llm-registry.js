@@ -621,6 +621,26 @@ class LLMRegistry {
     return out;
   }
 
+  // ── Каким должен быть max_tokens при известном окне ──
+  // Правило объявлено здесь, в одном месте: его применяют трое —
+  // карточка модели при вводе окна, проба и автоматическое уточнение
+  // окна по ходу работы. Разойдясь, они дали бы разные значения для
+  // одной и той же модели.
+  //
+  // Четверть окна: ровно столько приложение резервирует под ответ,
+  // подрезая историю (см. _trimHistory). Нижняя граница — чтобы у
+  // маленьких моделей ответ не оказался в пару абзацев; верхняя — чтобы
+  // у стотысячных окон под ответ не отводилась четверть, которая всё
+  // равно никогда не понадобится. Потолок провайдера, если он известен,
+  // главнее любых наших расчётов: больше него всё равно не примут.
+  static suggestMaxTokens(contextWindow, ceiling = 0) {
+    const ctx = parseInt(contextWindow, 10) || 0;
+    const cap = parseInt(ceiling, 10) || 0;
+    let want = ctx ? Math.max(1024, Math.min(8192, Math.floor(ctx / 4))) : 4096;
+    if (cap) want = Math.min(want, cap);
+    return Math.max(1, want);
+  }
+
   // ── Предел max_tokens из отказа провайдера ──
   // Отдельно от окна контекста, потому что это РАЗНЫЕ величины: max_tokens
   // ограничивает ответ, окно — весь запрос вместе с ответом. Но связь
@@ -711,15 +731,31 @@ class LLMRegistry {
 
     if (!next || next === cur) return { changed: false, contextWindow: cur };
 
+    // ── Предел ответа подтягивается за окном ──
+    // Окно уточнилось — а max_tokens остался от прежнего значения, и
+    // сочетание может оказаться невозможным: предел ответа больше всего
+    // окна. Такой запрос провайдер отвергает целиком, то есть уточнение
+    // окна ломало бы чат вместо того, чтобы его чинить. Трогаем только
+    // когда старое значение перестало помещаться: заниженный вручную
+    // предел — осознанный выбор, и поднимать его без спроса незачем.
+    const curMax = parseInt(r.model.maxTokens, 10) || 0;
+    let nextMax = curMax;
+    if (curMax >= next) nextMax = LLMRegistry.suggestMaxTokens(next);
+
     await this.saveModel(r.conn.id, {
       ...r.model,
       contextWindow: next,
       contextWindowSource: source,
+      maxTokens: nextMax,
     });
     // Шлюз держит копию параметров применённой модели — обновляем, иначе
     // изменение подхватится только после переключения модели.
     if ((this.currentRef || this.defaultRef) === r.ref) this.applyRef(r.ref);
-    return { changed: true, from: cur, to: next, source };
+    return {
+      changed: true, from: cur, to: next, source,
+      maxTokens: nextMax,
+      maxTokensChanged: nextMax !== curMax ? { from: curMax, to: nextMax } : null,
+    };
   }
 
   // Подсказка окна контекста по имени модели. Многие провайдеры этот

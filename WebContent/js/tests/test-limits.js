@@ -161,10 +161,23 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
   ok('посторонняя ошибка не даёт ложного срабатывания',
      LLMRegistry.contextFromError('API Error 500: internal error, request id 4096') === 0);
 
+  console.log('\n── Предел ответа следует за окном ──');
+  ok('четверть окна, но не меньше 1024',
+     LLMRegistry.suggestMaxTokens(128000) === 8192 &&
+     LLMRegistry.suggestMaxTokens(4096) === 1024,
+     String(LLMRegistry.suggestMaxTokens(4096)));
+  ok('и не больше 8192: у стотысячных окон четверть под ответ не нужна',
+     LLMRegistry.suggestMaxTokens(1000000) === 8192);
+  ok('потолок провайдера главнее наших расчётов',
+     LLMRegistry.suggestMaxTokens(32768, 4096) === 4096);
+  ok('неизвестное окно оставляет разумное значение',
+     LLMRegistry.suggestMaxTokens(0) === 4096);
+
   console.log('\n── Окно контекста: уточнение по работе ──');
 
   // Мини-реестр: нужны только resolve/saveModel/applyRef.
   const makeReg = (model) => {
+    model = { maxTokens: 4096, ...model };
     const reg = Object.create(LLMRegistry.prototype);
     reg.connections = [{ id: 'c1', name: 'p', apiUrl: 'http://x', models: [model] }];
     reg.currentRef = 'c1:m1';
@@ -198,6 +211,20 @@ const has = (findings, part) => findings.some(f => f.title.includes(part));
   reg = makeReg({ id: 'm1', name: 'local', contextWindow: 0 });
   res = await reg.learnContextWindow('c1:m1', 32768, 'provider');
   ok('пустое окно заполняется любым источником', res.changed === true && res.to === 32768);
+
+  // ── Уточнение окна подтягивает предел ответа ──
+  // Иначе уточнение ломало бы чат вместо того, чтобы его чинить: запрос,
+  // где max_tokens больше всего окна, провайдер отвергает целиком.
+  reg = makeReg({ id: 'm1', name: 'local', contextWindow: 128000, maxTokens: 32000 });
+  res = await reg.learnContextWindow('c1:m1', 8192, 'error');
+  ok('невозможный предел ответа исправлен вместе с окном',
+     res.maxTokensChanged && res.maxTokensChanged.to === 2048, JSON.stringify(res.maxTokensChanged));
+  ok('и записан в модель', reg.saved[0].maxTokens === 2048, String(reg.saved[0].maxTokens));
+
+  reg = makeReg({ id: 'm1', name: 'local', contextWindow: 8192, maxTokens: 1024 });
+  res = await reg.learnContextWindow('c1:m1', 32768, 'observed');
+  ok('заниженный вручную предел без нужды не трогаем',
+     !res.maxTokensChanged && reg.saved[0].maxTokens === 1024, String(reg.saved[0].maxTokens));
 
   reg = makeReg({ id: 'm1', name: 'local', contextWindow: 8000 });
   ok('мусорные значения игнорируются',

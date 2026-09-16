@@ -407,7 +407,8 @@ Object.assign(UI.prototype, {
     // max_tokens — это ПОТОЛОК ОТВЕТА, а не размер окна. Раньше он по
     // умолчанию равнялся окну, и получалось невозможное: под ответ
     // отведено всё окно целиком, а на историю не остаётся ничего.
-    const defTokens = ctx ? Math.max(1024, Math.min(8192, Math.floor(ctx / 4))) : 4096;
+    // Правило одно на приложение — см. LLMRegistry.suggestMaxTokens.
+    const defTokens = LLMRegistry.suggestMaxTokens(ctx);
 
     const tierOptions = Object.entries(LLMRegistry.TIERS).map(([k, t]) =>
       `<option value="${k}" ${tier === k ? 'selected' : ''}>${t.icon} ${this._escHtml(t.label)} — ${this._escHtml(t.hint)}</option>`
@@ -456,14 +457,15 @@ Object.assign(UI.prototype, {
         <input id="me_notes" value="${this._escHtml(m ? m.notes : '')}" placeholder="например: дорогая, беречь — или: только для черновиков">
       </div>
       <div style="font-size:11px;color:var(--text-muted);line-height:1.5;">
-        <b>Это два разных предела, и нужны оба.</b>
         <b>Окно контекста</b> — сколько токенов модель принимает ВСЕГО: запрос вместе с ответом.
         По нему приложение подрезает историю, сворачивает переписку и рисует индикатор
         заполнения; провайдеру оно не отправляется.
         <b>max_tokens</b> — потолок длины ОТВЕТА, он уходит в каждый запрос: упёршись в него,
         модель обрывает ответ на полуслове.
         Разумно держать max_tokens в пределах четверти окна: ровно столько же места
-        приложение вычитает из бюджета истории, резервируя его под ответ.
+        приложение вычитает из бюджета истории, резервируя его под ответ. При определении
+        окна — и здесь, и потом, по ходу работы — предел ответа подтягивается сам,
+        если перестал в него помещаться.
         Окно определяется автоматически — из списка моделей провайдера, из текста его отказа
         и по фактически прошедшим запросам. Кнопка «Определить» спрашивает и провайдера, и саму
         модель: двумя крошечными запросами она выясняет предел контекста, отзывается ли модель
@@ -499,16 +501,26 @@ Object.assign(UI.prototype, {
     // max_tokens следует за окном контекста, пока пользователь не тронул
     // его вручную, — иначе выставленное здесь-же значение по умолчанию
     // застыло бы, даже когда пользователь исправляет угаданное окно.
+    // ── Предел ответа следует за окном ──
+    // Пока пользователь не тронул его сам — просто следует (четвертью, а
+    // не целиком: max_tokens, равный окну, не оставляет места ни под
+    // запрос, ни под историю). Если тронул — уважаем выбор, но
+    // невозможное сочетание всё равно поправляем: предел ответа больше
+    // окна провайдер отвергает целиком, и польза от «уважения» была бы
+    // в том, что чат перестаёт работать.
     let tokensTouched = false;
-    document.getElementById('me_tokens')?.addEventListener('input', () => { tokensTouched = true; });
-    document.getElementById('me_ctx')?.addEventListener('input', (e) => {
-      if (tokensTouched) return;
+    let providerCeiling = 0;
+    const syncTokens = (ctxValue, { force = false } = {}) => {
       const tokensInput = document.getElementById('me_tokens');
-      const v = parseInt(e.target.value, 10) || 0;
-      // Следуем за окном, но четвертью, а не целиком: max_tokens, равный
-      // окну, не оставляет места ни под запрос, ни под историю.
-      if (tokensInput) tokensInput.value = v ? Math.max(1024, Math.min(8192, Math.floor(v / 4))) : 4096;
-    });
+      if (!tokensInput) return;
+      const v = parseInt(ctxValue, 10) || 0;
+      const cur = parseInt(tokensInput.value, 10) || 0;
+      if (!tokensTouched || force || (v && cur >= v)) {
+        tokensInput.value = LLMRegistry.suggestMaxTokens(v, providerCeiling);
+      }
+    };
+    document.getElementById('me_tokens')?.addEventListener('input', () => { tokensTouched = true; });
+    document.getElementById('me_ctx')?.addEventListener('input', (e) => syncTokens(e.target.value));
     // ── «Определить» ──
     // Два источника, по возрастанию цены: сначала перечень моделей
     // провайдера (бесплатно, но отдают его не все), потом проба живым
@@ -547,8 +559,15 @@ Object.assign(UI.prototype, {
         return;
       }
 
+      // Потолок, названный провайдером, — самый точный предел ответа из
+      // возможных: больше него он всё равно не примет.
+      if (probe.maxTokensCeiling) providerCeiling = probe.maxTokensCeiling;
+
       if (probe.contextWindow) {
         setCtx(probe.contextWindow);
+        // Определили окно — приводим и предел ответа: ради того, чтобы
+        // сочетание осталось рабочим, а не только правдивым.
+        syncTokens(probe.contextWindow, { force: !tokensTouched });
         if (src) src.textContent = SOURCE_LABEL[probe.contextSource] || SOURCE_LABEL.error;
       } else if (!fromList && src) {
         src.textContent = 'предел не назван — задайте вручную';
