@@ -137,14 +137,36 @@ Object.assign(ToolsEngine.prototype, {
 	    // interactive снимает таймаут: там ждут человека, а не код.
 	    const interactive = !!(toolRec && toolRec.interactive);
 	    const runStarted = Date.now();
+
+	    // ── Срок вызова подвижен ──
+	    // Инструмент со своим кодом может открыть форму (agent_form), и
+	    // заранее об этом неизвестно: пометку interactive ставят только
+	    // встроенным. Поэтому срок хранится в объекте, а мост формы
+	    // отодвигает его на время, которое человек провёл в окне.
+	    const budget = { deadline: timeoutMs > 0 ? Date.now() + timeoutMs : 0 };
+	    this._activeBudget = budget;
 	    const withTimeout = (promise) => {
 	      if (interactive || !timeoutMs || timeoutMs <= 0) return promise;
 	      return Promise.race([
 	        promise,
-	        new Promise((resolve) => setTimeout(
-	          () => resolve({ error: 'Timeout: инструмент не ответил за ' + timeoutMs + ' мс' }),
-	          timeoutMs
-	        )),
+	        new Promise((resolve) => {
+	          // Ждём ровно до срока и проверяем его заново: срок подвижен —
+	          // открытая форма отодвигает его на время, которое человек
+	          // провёл в окне. Перевзвод вместо опроса по таймеру: лишних
+	          // пробуждений нет, а точность та же.
+	          let timer = null;
+	          const stop = () => clearTimeout(timer);
+	          const arm = () => {
+	            const left = budget.deadline - Date.now();
+	            if (left <= 0) {
+	              resolve({ error: 'Timeout: инструмент не ответил за ' + timeoutMs + ' мс' });
+	              return;
+	            }
+	            timer = setTimeout(arm, left);
+	          };
+	          arm();
+	          promise.then(stop, stop);
+	        }),
 	      ]);
 	    };
 
@@ -252,7 +274,95 @@ Object.assign(ToolsEngine.prototype, {
   // файл отдаёт приложение — оно же и записывает это в журнал.
   async _sandboxHost({ kind, payload }) {
     if (kind === 'download') return this._sandboxDownload(payload || {});
+    if (kind === 'form') return this._sandboxForm(payload || {});
     return { error: 'Песочница попросила о неизвестном действии: ' + kind };
+  },
+
+  // ── Форма по описанию из песочницы ──
+  //
+  // Описание приходит из кода, написанного моделью, поэтому проверяется
+  // здесь, а не на стороне отрисовки: полей не больше тридцати, подписи
+  // обрезаются, тип поля — только из известного списка. Разметки в
+  // описании нет вовсе (см. agent_form в core/tool-sandbox.js), и всё,
+  // что попадает на экран, экранируется при отрисовке.
+  //
+  // Время, которое человек провёл в форме, не считается работой
+  // инструмента: таймаут вызова продлевается, а бюджет хода сдвигается —
+  // как и при любом другом ожидании человека (см. humanWaitMs).
+  async _sandboxForm(spec) {
+    const ui = this.ui;
+    if (!ui || typeof ui.showToolFormModal !== 'function') {
+      return { error: 'Формы недоступны: интерфейс не подключён', submitted: false };
+    }
+
+    const FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'checkbox',
+      'radio', 'password', 'date', 'info']);
+    const str = (v, max) => String(v === undefined || v === null ? '' : v).slice(0, max);
+
+    const fields = (Array.isArray(spec.fields) ? spec.fields : [])
+      .slice(0, 30)
+      .map((f, i) => {
+        const raw = (f && typeof f === 'object') ? f : {};
+        const type = FIELD_TYPES.has(raw.type) ? raw.type : 'text';
+        const out = {
+          type,
+          name: str(raw.name || raw.id || ('field_' + (i + 1)), 64),
+          label: str(raw.label || raw.title || raw.name || '', 200),
+          hint: str(raw.hint || raw.description || '', 300),
+          placeholder: str(raw.placeholder, 120),
+          required: !!raw.required,
+        };
+        if (type === 'info') { out.text = str(raw.text || raw.label || '', 1000); return out; }
+        if (type === 'checkbox') { out.value = !!raw.value; return out; }
+        if (type === 'number') {
+          out.value = raw.value === undefined || raw.value === null ? '' : Number(raw.value);
+          if (raw.min !== undefined) out.min = Number(raw.min);
+          if (raw.max !== undefined) out.max = Number(raw.max);
+          if (raw.step !== undefined) out.step = Number(raw.step);
+          return out;
+        }
+        if (type === 'select' || type === 'radio') {
+          out.options = (Array.isArray(raw.options) ? raw.options : []).slice(0, 100).map((o) => (
+            (o && typeof o === 'object')
+              ? { value: str(o.value ?? o.label, 200), label: str(o.label ?? o.value, 200) }
+              : { value: str(o, 200), label: str(o, 200) }
+          ));
+          out.value = str(raw.value, 200);
+          return out;
+        }
+        out.value = str(raw.value, type === 'textarea' ? 20000 : 2000);
+        if (type === 'textarea') out.rows = Math.min(20, Math.max(2, parseInt(raw.rows, 10) || 4));
+        return out;
+      });
+
+    if (!fields.some(f => f.type !== 'info')) {
+      return { error: 'В форме нет ни одного поля для ввода', submitted: false };
+    }
+
+    const startedAt = Date.now();
+    let res;
+    try {
+      res = await ui.showToolFormModal({
+        title: str(spec.title, 120) || 'Данные для инструмента',
+        description: str(spec.description, 1000),
+        submitLabel: str(spec.submitLabel, 40),
+        fields,
+      });
+    } catch (e) {
+      return { error: 'Форму показать не удалось: ' + ((e && e.message) || e), submitted: false };
+    }
+
+    const waited = Date.now() - startedAt;
+    // Форма открыта — значит, ждали человека. Таймаут вызова отодвигаем,
+    // бюджет хода тоже: иначе инструмент с формой обрывался бы ровно на
+    // том месте, ради которого он написан.
+    try { this.sandbox?.extendTimeout?.(waited); } catch (_) {}
+    if (this._activeBudget && this._activeBudget.deadline) this._activeBudget.deadline += waited;
+    try { this.ui?.noteHumanWait?.(waited); } catch (_) {}
+
+    return res && res.submitted
+      ? { submitted: true, values: res.values || {} }
+      : { submitted: false, values: {} };
   },
 
   async _sandboxDownload({ name, content, mime, base64 }) {

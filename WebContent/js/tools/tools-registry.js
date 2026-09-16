@@ -207,6 +207,9 @@ Object.assign(ToolsEngine.prototype, {
 	        // перед тем, как передать в handler, который держит его в памяти
 	        // в замыкании как обычную строку (нужен для заголовка Authorization).
 	        const plainToken = await SecretsVault.decrypt(this.db, t.mcpToken);
+	        // Маршрут (напрямую или через прокси) лежит в самой записи
+	        // инструмента — поэтому он переживает перезагрузку, хотя сами
+	        // обработчики её не переживают (см. connectMcpServer).
 	        this._registerMcpHandler({ ...t, mcpToken: plainToken });
 	      }
 	    }

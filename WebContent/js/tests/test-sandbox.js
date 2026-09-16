@@ -678,6 +678,76 @@ class FakeDB {
     X.ToolSandbox.READY_TIMEOUT_MS = was;
   }
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Экранная форма из песочницы ──');
+  {
+    // Описание формы пишет модель, поэтому доверять ему нельзя ни в
+    // длинах, ни в типах, ни в числе полей. Проверяется разбор на стороне
+    // приложения — сама отрисовка проверяется в test-progress.
+    const eng = new X.ToolsEngine(new FakeDB());
+    let shown = null;
+    eng.ui = {
+      showToolFormModal: async (spec) => { shown = spec; return { submitted: true, values: { a: 1 } }; },
+      noteHumanWait: () => {},
+    };
+
+    const res = await eng._sandboxForm({
+      title: 'Заявка',
+      fields: [
+        { name: 'city', label: 'Город', type: 'text', value: 'Москва' },
+        { name: 'qty', label: 'Сколько', type: 'number', value: 3, min: 1, max: 10 },
+        { name: 'kind', label: 'Тип', type: 'select', options: ['a', { value: 'b', label: 'Б' }] },
+        { name: 'hack', label: 'Чужое', type: '<script>' },
+        { type: 'info', text: 'пояснение' },
+      ],
+    });
+    ok('форма показана', !!shown && shown.title === 'Заявка');
+    ok('значения вернулись инструменту', res.submitted === true && res.values.a === 1, JSON.stringify(res));
+    ok('неизвестный тип поля превращается в обычный текст',
+       shown.fields.find(f => f.name === 'hack').type === 'text');
+    ok('варианты выбора приведены к паре «значение — подпись»',
+       shown.fields.find(f => f.name === 'kind').options[1].label === 'Б');
+    ok('пояснение осталось пояснением', shown.fields.some(f => f.type === 'info'));
+
+    const many = { fields: [] };
+    for (let i = 0; i < 100; i++) many.fields.push({ name: 'f' + i, label: 'Поле', type: 'text' });
+    await eng._sandboxForm(many);
+    ok('число полей ограничено', shown.fields.length === 30, String(shown.fields.length));
+
+    await eng._sandboxForm({
+      title: 'т'.repeat(500),
+      fields: [{ name: 'x', label: 'п'.repeat(500), type: 'text', value: 'з'.repeat(5000) }],
+    });
+    ok('подписи и значения обрезаются',
+       shown.title.length <= 120 && shown.fields[0].label.length <= 200 &&
+       shown.fields[0].value.length <= 2000,
+       [shown.title.length, shown.fields[0].label.length, shown.fields[0].value.length].join('/'));
+
+    const empty = await eng._sandboxForm({ fields: [{ type: 'info', text: 'только текст' }] });
+    ok('форма без полей ввода отклоняется', !!empty.error && empty.submitted === false, JSON.stringify(empty));
+
+    eng.ui.showToolFormModal = async () => ({ submitted: false });
+    const cancelled = await eng._sandboxForm({ fields: [{ name: 'x', type: 'text', label: 'X' }] });
+    ok('закрытое окно возвращает отказ, а не пустые значения',
+       cancelled.submitted === false && !cancelled.error, JSON.stringify(cancelled));
+
+    // Время в форме — ожидание человека, а не работа инструмента.
+    let waited = 0, extended = 0;
+    eng.ui.noteHumanWait = (ms) => { waited = ms; };
+    eng.sandbox = { extendTimeout: (ms) => { extended = ms; } };
+    eng._activeBudget = { deadline: Date.now() + 1000 };
+    const before = eng._activeBudget.deadline;
+    eng.ui.showToolFormModal = () => new Promise(r => setTimeout(() => r({ submitted: true, values: {} }), 120));
+    await eng._sandboxForm({ fields: [{ name: 'x', type: 'text', label: 'X' }] });
+    ok('ожидание человека отдано наружу', waited >= 100, String(waited));
+    ok('таймаут песочницы отодвинут', extended >= 100, String(extended));
+    ok('и срок вызова тоже', eng._activeBudget.deadline > before);
+
+    eng.ui = null;
+    const noUi = await eng._sandboxForm({ fields: [{ name: 'x', type: 'text', label: 'X' }] });
+    ok('без интерфейса форма отвечает объяснимой ошибкой', !!noUi.error, JSON.stringify(noUi));
+  }
+
   console.log('\n==============================================');
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('==============================================');

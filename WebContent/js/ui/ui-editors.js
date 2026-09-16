@@ -85,15 +85,28 @@ Object.assign(UI.prototype, {
         <label>Auth Token (опционально)</label>
         <input id="mcp_token" type="password" placeholder="Bearer token">
       </div>
+      <div class="form-group">
+        <label class="check-row">
+          <input type="checkbox" id="mcp_proxy"> Ходить через локальный прокси
+        </label>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;line-height:1.5;">
+          Нужно для серверов во внутренней сети: браузер отправит запрос, но ответ читать не даст
+          (CORS), и это неотличимо от «сервер не отвечает». Адрес прокси общий — ⚙ Настройки →
+          Безопасность; сам прокси должен быть запущен. Настройка своя у каждого подключения:
+          один сервер доступен напрямую, другой — только через прокси.
+        </div>
+      </div>
     `, async () => {
       const name = document.getElementById('mcp_name').value.trim();
       const url = document.getElementById('mcp_url').value.trim();
       const token = document.getElementById('mcp_token').value.trim();
+      const transport = document.getElementById('mcp_proxy')?.checked ? 'proxy' : 'direct';
       if (!url) return;
 
-      const res = await this.agent.tools.connectMcpServer({ name, url, token });
+      const res = await this.agent.tools.connectMcpServer({ name, url, token, transport });
       if (res.error) {
-        await this._confirm(res.error, { title: 'Не удалось подключить сервер' });
+        await this._confirm(res.error + (res.hint ? '\n\n' + res.hint : ''),
+          { title: 'Не удалось подключить сервер' });
         return this.showAddMCPServerModal();
       }
 
@@ -122,10 +135,22 @@ Object.assign(UI.prototype, {
         <label>Auth Token</label>
         <input id="mcps_token" type="password" placeholder="Оставьте пустым, чтобы не менять">
       </div>
+      <div class="form-group">
+        <label class="check-row">
+          <input type="checkbox" id="mcps_proxy" ${server.transport === 'proxy' ? 'checked' : ''}>
+          Ходить через локальный прокси
+        </label>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+          Маршрут менять можно и после подключения: прокси могли поднять позже, а сервер —
+          наоборот, выставить наружу. Переподключаться для этого не нужно, привязки
+          инструментов к навыкам сохранятся.
+        </div>
+      </div>
     `, async () => {
       const name = document.getElementById('mcps_name').value.trim();
       const token = document.getElementById('mcps_token').value.trim();
-      await this.agent.tools.updateMcpServer(serverId, { name, token });
+      const transport = document.getElementById('mcps_proxy')?.checked ? 'proxy' : 'direct';
+      await this.agent.tools.updateMcpServer(serverId, { name, token, transport });
       await this.refreshSidebar();
       this.renderTools();
     });
@@ -190,6 +215,119 @@ Object.assign(UI.prototype, {
         });
       });
     }, 50);
+  },
+
+
+  // ── Форма, заказанная инструментом ──
+  //
+  // Описание приходит из кода инструмента (agent_form в песочнице) и уже
+  // проверено исполнителем: типы полей известны, длины обрезаны, разметки
+  // в описании нет по построению. Здесь всё равно экранируется каждая
+  // подпись и каждое значение: описание пришло из кода, написанного
+  // моделью, и «оно уже проверено» — плохая причина не экранировать.
+  //
+  // Окно обычное, приложения: та же модальность, та же клавиатура, тот же
+  // вид, что у всех остальных. Инструмент описывает, ЧТО спросить, а как
+  // это выглядит — забота приложения, и единообразие здесь важнее свободы
+  // оформления.
+  //
+  // Возвращает { submitted: true, values } либо { submitted: false }.
+  showToolFormModal(spec) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const fields = Array.isArray(spec.fields) ? spec.fields : [];
+      const idOf = (i) => 'tf_' + i;
+
+      const rows = fields.map((f, i) => {
+        const id = idOf(i);
+        const label = this._escHtml(f.label || f.name || '');
+        const hint = f.hint
+          ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${this._escHtml(f.hint)}</div>`
+          : '';
+        const req = f.required ? ' <span style="color:var(--danger);">*</span>' : '';
+
+        if (f.type === 'info') {
+          return `<div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:10px;">
+                    ${this._escHtml(f.text || '')}</div>`;
+        }
+        if (f.type === 'checkbox') {
+          return `<div class="form-group">
+                    <label class="check-row">
+                      <input type="checkbox" id="${id}" ${f.value ? 'checked' : ''}> ${label}
+                    </label>${hint}
+                  </div>`;
+        }
+        if (f.type === 'select') {
+          const opts = (f.options || []).map(o =>
+            `<option value="${this._escHtml(o.value)}" ${o.value === f.value ? 'selected' : ''}>${this._escHtml(o.label)}</option>`).join('');
+          return `<div class="form-group"><label>${label}${req}</label>
+                    <select id="${id}">${opts}</select>${hint}</div>`;
+        }
+        if (f.type === 'radio') {
+          const opts = (f.options || []).map((o, k) =>
+            `<label class="check-row">
+               <input type="radio" name="${id}" value="${this._escHtml(o.value)}" ${o.value === f.value ? 'checked' : ''}>
+               ${this._escHtml(o.label)}
+             </label>`).join('');
+          return `<div class="form-group" id="${id}"><label>${label}${req}</label>${opts}${hint}</div>`;
+        }
+        if (f.type === 'textarea') {
+          return `<div class="form-group"><label>${label}${req}</label>
+                    <textarea id="${id}" rows="${f.rows || 4}"
+                      placeholder="${this._escHtml(f.placeholder || '')}">${this._escHtml(f.value || '')}</textarea>${hint}</div>`;
+        }
+        const type = f.type === 'number' ? 'number' : (f.type === 'password' ? 'password' : (f.type === 'date' ? 'date' : 'text'));
+        const minmax = f.type === 'number'
+          ? `${f.min !== undefined ? ` min="${f.min}"` : ''}${f.max !== undefined ? ` max="${f.max}"` : ''}${f.step !== undefined ? ` step="${f.step}"` : ''}`
+          : '';
+        return `<div class="form-group"><label>${label}${req}</label>
+                  <input type="${type}" id="${id}"${minmax} value="${this._escHtml(f.value === undefined ? '' : f.value)}"
+                    placeholder="${this._escHtml(f.placeholder || '')}">${hint}</div>`;
+      }).join('');
+
+      const head = spec.description
+        ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px;">
+             ${this._escHtml(spec.description)}</div>`
+        : '';
+
+      // Откуда взялось окно, должно быть видно: форму показывает не
+      // приложение, а инструмент, и человек вправе это знать.
+      const foot = `<div style="font-size:11px;color:var(--text-muted);margin-top:10px;">
+          Форму запросил инструмент агента. Введённое уйдёт в него, а не в переписку.
+        </div>`;
+
+      this._showModal('📝 ' + this._escHtml(spec.title || 'Данные для инструмента'),
+        head + rows + foot,
+        async () => {
+          settled = true;
+          const values = {};
+          fields.forEach((f, i) => {
+            if (f.type === 'info') return;
+            const id = idOf(i);
+            if (f.type === 'checkbox') {
+              values[f.name] = !!document.getElementById(id)?.checked;
+              return;
+            }
+            if (f.type === 'radio') {
+              const picked = document.querySelector(`#${id} input[name="${id}"]:checked`);
+              values[f.name] = picked ? picked.value : '';
+              return;
+            }
+            const el = document.getElementById(id);
+            const raw = el ? el.value : '';
+            // Число возвращаем числом: инструмент иначе получит строку и
+            // сложит её как текст — ошибка тихая и обнаруживается поздно.
+            values[f.name] = f.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
+          });
+          resolve({ submitted: true, values });
+        },
+        () => { if (!settled) resolve({ submitted: false }); });
+
+      setTimeout(() => {
+        const first = document.getElementById(idOf(fields.findIndex(f => f.type !== 'info')));
+        first?.focus();
+      }, 50);
+    });
   },
 
 

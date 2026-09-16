@@ -274,6 +274,74 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ok('sh с шебангом и без CRLF', sh.startsWith('#!/bin/sh') && !sh.includes('\r\n'));
   }
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Форма, заказанная инструментом ──');
+  {
+    const spec = {
+      title: 'Заявка <b>важная</b>',
+      description: 'Заполните поля',
+      fields: [
+        { type: 'info', text: 'пояснение' },
+        { name: 'city', label: 'Город', type: 'text', value: 'Москва' },
+        { name: 'qty', label: 'Сколько', type: 'number', value: 3, min: 1, max: 10 },
+        { name: 'kind', label: 'Тип', type: 'select', value: 'b',
+          options: [{ value: 'a', label: 'А' }, { value: 'b', label: '<i>Б</i>' }] },
+        { name: 'urgent', label: 'Срочно', type: 'checkbox', value: true },
+        { name: 'note', label: 'Заметка', type: 'textarea', rows: 3, value: 'текст' },
+        { name: 'way', label: 'Способ', type: 'radio', value: 'two',
+          options: [{ value: 'one', label: 'Первый' }, { value: 'two', label: 'Второй' }] },
+      ],
+    };
+
+    const promise = ui.showToolFormModal(spec);
+    await tick();
+
+    const modal = document.querySelector('#modals');
+    ok('окно формы открылось', /Заявка/.test(modal.textContent));
+    // Разметка из описания не должна становиться разметкой на экране:
+    // описание пишет модель, и это её код просил показать форму.
+    ok('разметка в заголовке не исполняется',
+       !modal.querySelector('b') && /<b>важная<\/b>/.test(modal.textContent), modal.textContent.slice(0, 80));
+    ok('и в подписях вариантов тоже',
+       !modal.querySelector('select i') && /<i>Б<\/i>/.test(modal.querySelector('select').textContent));
+    ok('сказано, что форму заказал инструмент', /инструмент/.test(modal.textContent));
+
+    ok('поля отрисованы по типам',
+       !!modal.querySelector('input[type="text"]') && !!modal.querySelector('input[type="number"]') &&
+       !!modal.querySelector('select') && !!modal.querySelector('input[type="checkbox"]') &&
+       !!modal.querySelector('textarea') && !!modal.querySelector('input[type="radio"]'));
+    ok('значения по умолчанию расставлены',
+       modal.querySelector('input[type="text"]').value === 'Москва' &&
+       modal.querySelector('select').value === 'b' &&
+       modal.querySelector('input[type="checkbox"]').checked === true &&
+       modal.querySelector('textarea').value === 'текст');
+    ok('границы числового поля переданы',
+       modal.querySelector('input[type="number"]').getAttribute('min') === '1' &&
+       modal.querySelector('input[type="number"]').getAttribute('max') === '10');
+
+    // Правим и отправляем.
+    modal.querySelector('input[type="text"]').value = 'Тверь';
+    modal.querySelector('input[type="number"]').value = '7';
+    modal.querySelector('input[type="checkbox"]').checked = false;
+    document.querySelector('#modals .btn-primary').click();
+    const res = await promise;
+
+    ok('форма вернула введённое', res.submitted === true && res.values.city === 'Тверь', JSON.stringify(res));
+    // Число должно вернуться числом: иначе инструмент сложит его как
+    // строку, и ошибка обнаружится далеко от места, где сделана.
+    ok('число возвращается числом', res.values.qty === 7 && typeof res.values.qty === 'number',
+       typeof res.values.qty);
+    ok('галочка — логическим значением', res.values.urgent === false);
+    ok('выбранный вариант переключателя вернулся', res.values.way === 'two', String(res.values.way));
+
+    // Закрытие без отправки — отказ.
+    const p2 = ui.showToolFormModal({ title: 'Ещё', fields: [{ name: 'x', label: 'X', type: 'text' }] });
+    await tick();
+    document.querySelector('#modals .btn-secondary')?.click();
+    const res2 = await p2;
+    ok('закрытие окна — отказ, а не пустые значения', res2.submitted === false, JSON.stringify(res2));
+  }
+
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('='.repeat(46));

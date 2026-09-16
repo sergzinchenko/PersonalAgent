@@ -231,6 +231,35 @@ class ToolSandbox {
       });
     };
 
+    // ── Экранная форма ──
+    //
+    // ЗАЧЕМ. Инструмент часто не может работать без данных, которых нет
+    // ни в разговоре, ни в настройках: выбрать одно из пятидесяти
+    // значений, ввести параметры расчёта, подтвердить список перед
+    // отправкой. Спрашивать это перепиской — долго и ненадёжно, а
+    // ask_user умеет ровно один вопрос с одним ответом.
+    //
+    // ПОЧЕМУ ОПИСАНИЕ, А НЕ HTML. Кадр отделён от приложения именно
+    // потому, что его код пишет модель: у него нет доступа ни к базе, ни
+    // к ключам, ни к странице. Разрешить ему вставлять свой HTML в окно
+    // приложения — значит отдать всё это обратно, причём молча: разметка
+    // исполняется уже в origin приложения. Поэтому кадр ОПИСЫВАЕТ форму
+    // (поля, их типы и подписи), а рисует её приложение — с экранированием
+    // и своими стилями. Набор полей закрывает обычные задачи; произвольная
+    // вёрстка внутри диалога — не задача инструмента.
+    //
+    // Возвращает { submitted: true, values: {...} } либо
+    // { submitted: false } — если человек закрыл окно.
+    g.agent_form = function (spec) {
+      const o = (spec && typeof spec === 'object') ? spec : {};
+      return hostCall('form', {
+        title: String(o.title || 'Данные для инструмента'),
+        description: o.description ? String(o.description) : '',
+        submitLabel: o.submitLabel ? String(o.submitLabel) : '',
+        fields: Array.isArray(o.fields) ? o.fields : [],
+      });
+    };
+
     // ── Старый способ «скачать файл» тоже должен работать ──
     //
     // ЧТО БЫЛО. Модель пишет привычное: new Blob → URL.createObjectURL →
@@ -536,6 +565,10 @@ class ToolSandbox {
         resolve(value);
       };
 
+      // Ожидание человека продлевает таймаут: форма открыта, и пока она
+      // открыта, «инструмент не ответил» — неправда. Продление приходит
+      // от родителя (см. ToolSandbox.extendTimeout).
+      const entryRef = { timer: null };
       const timer = timeoutMs > 0 ? setTimeout(() => {
         // Сначала ответ вызывающей стороне, потом снос: destroy() закрывает
         // все ожидания разом, и если сделать его первым, наружу уйдёт
@@ -546,9 +579,28 @@ class ToolSandbox {
         this.destroy('остановлена по таймауту');
       }, timeoutMs) : null;
 
-      this.pending.set(id, { done, timer });
+      entryRef.timer = timer;
+      this.pending.set(id, { done, timer, timeoutMs, rearm: (extraMs) => {
+        const cur = this.pending.get(id);
+        if (!cur || !cur.timer || !(extraMs > 0)) return;
+        clearTimeout(cur.timer);
+        cur.timer = setTimeout(() => {
+          cur.done({ error: 'Timeout: инструмент не ответил за ' + timeoutMs + ' мс' });
+          this.destroy('остановлена по таймауту');
+        }, timeoutMs);
+      } });
       this._send({ __ts: 1, type: 'run', id, code: String(code || ''), params: params ?? {} });
     });
+  }
+
+  // Продлить таймаут всех идущих вызовов на время, которое ждали
+  // человека. Вызывается мостом, когда закрылась форма: секунды,
+  // потраченные на ввод, к работе инструмента отношения не имеют.
+  extendTimeout(waitedMs) {
+    if (!(waitedMs > 0)) return;
+    for (const entry of this.pending.values()) {
+      try { entry.rearm?.(waitedMs); } catch (_) {}
+    }
   }
 
   _send(msg) {

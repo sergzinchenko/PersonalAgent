@@ -196,17 +196,29 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
   console.log('\n── Жизненный цикл именованного MCP-сервера ──');
   {
     const origFetch = sandbox.fetch;
-    sandbox.fetch = async () => ({
-      ok: true,
-      json: async () => ({ result: { tools: [
-        { name: 'srv_tool_a', description: 'A', inputSchema: { type: 'object', properties: {} } },
-        { name: 'srv_tool_b', description: 'B', inputSchema: { type: 'object', properties: {} } },
-      ] } }),
-    });
+    // Заглушка ведёт себя как настоящий Response: у него есть и json(),
+    // и text(). Приложение читает ответ MCP текстом — ради предела
+    // размера и внятного сообщения, когда сервер вернул не JSON.
+    const mcpBody = { result: { tools: [
+      { name: 'srv_tool_a', description: 'A', inputSchema: { type: 'object', properties: {} } },
+      { name: 'srv_tool_b', description: 'B', inputSchema: { type: 'object', properties: {} } },
+    ] } };
+    const mcpCalls = [];
+    sandbox.fetch = async (url, init) => {
+      mcpCalls.push({ url, init: init || {} });
+      return {
+        ok: true, status: 200,
+        json: async () => mcpBody,
+        text: async () => JSON.stringify(mcpBody),
+      };
+    };
 
     const conn = await engine.connectMcpServer({ name: 'Мой сервер', url: 'https://srv3.test/rpc', token: 'tok-1' });
     ok('сервер подключился и импортировал tools', conn.importedCount === 2, JSON.stringify(conn));
     ok('папка-контейнер создана в корне', conn.folder && conn.folder.parentId === null);
+    ok('по умолчанию сервер опрашивается напрямую',
+       mcpCalls[0].url === 'https://srv3.test/rpc' && conn.server.transport === 'direct',
+       mcpCalls[0].url);
 
     const named = (await engine.listMcpServers()).find(s => s.id === conn.server.id);
     ok('именованный сервер виден в списке под своим именем', named && named.name === 'Мой сервер');
@@ -293,6 +305,74 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
   }
 
   // ══════════════════════════════════════════════
+  console.log('\n── MCP через локальный прокси ──');
+  {
+    const origFetch = sandbox.fetch;
+    const calls = [];
+    const body = { result: { tools: [{ name: 'inner_tool', description: 'x', inputSchema: { type: 'object', properties: {} } }] } };
+    sandbox.fetch = async (url, init) => {
+      calls.push({ url, init: init || {} });
+      return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+
+    // Прокси не настроен — подключение через него должно отказать
+    // осмысленно, а не молча уйти в никуда.
+    await db.delete('settings', 'proxy');
+    const noProxy = await engine.connectMcpServer({
+      name: 'Внутренний', url: 'https://mcp.corp.local/rpc', token: 't', transport: 'proxy' });
+    ok('без адреса прокси подключение отказывает понятно',
+       !!noProxy.error && /прокси/i.test(noProxy.error), JSON.stringify(noProxy));
+    ok('и говорит, что делать', /Настройки/.test(noProxy.hint || ''), noProxy.hint);
+
+    await db.put('settings', { key: 'proxy', baseUrl: 'http://localhost:3000' });
+    calls.length = 0;
+    const viaProxy = await engine.connectMcpServer({
+      name: 'Внутренний', url: 'https://mcp.corp.local/rpc', token: 't', transport: 'proxy' });
+    ok('через прокси сервер подключается', viaProxy.importedCount === 1, JSON.stringify(viaProxy));
+    ok('запрос ушёл на прокси, а не на сервер',
+       calls[0].url.startsWith('http://localhost:3000/?url='), calls[0].url);
+    ok('целевой адрес закодирован целиком',
+       decodeURIComponent(calls[0].url.split('?url=')[1]) === 'https://mcp.corp.local/rpc');
+    ok('маршрут запомнен у подключения', viaProxy.server.transport === 'proxy');
+
+    // Маршрут должен пережить перезагрузку: обработчики восстанавливаются
+    // из записей инструментов, а не из записи сервера.
+    const savedTool = (await db.getAll('tools')).find(t => t.mcpServerId === viaProxy.server.id);
+    ok('и продублирован в записи инструмента', savedTool.mcpTransport === 'proxy');
+
+    calls.length = 0;
+    await engine.executeTool('inner_tool', {}, { bypassSecurity: true });
+    ok('вызов инструмента тоже идёт через прокси',
+       calls[0].url.startsWith('http://localhost:3000/?url='), calls[0].url);
+
+    // Маршрут меняется без переподключения — и вместе с ним меняется
+    // правило адреса: внутренняя сеть доступна ТОЛЬКО через прокси,
+    // потому что его выбрал человек. Снятая галочка возвращает общий
+    // запрет, и вызов отказывает, не уходя никуда.
+    await engine.updateMcpServer(viaProxy.server.id, { transport: 'direct' });
+    const afterSwitch = (await db.getAll('tools')).find(t => t.mcpServerId === viaProxy.server.id);
+    ok('смена маршрута записана в инструменты сервера', afterSwitch.mcpTransport === 'direct');
+    const srvAfter = await db.get('mcp_servers', viaProxy.server.id);
+    ok('токен при смене маршрута не потерян', !!srvAfter.token);
+
+    calls.length = 0;
+    const direct = await engine.executeTool('inner_tool', {}, { bypassSecurity: true });
+    ok('напрямую внутренний адрес снова запрещён',
+       !!direct.error && /локальной или служебной сети/.test(direct.error), JSON.stringify(direct));
+    ok('и запрос никуда не ушёл', calls.length === 0, String(calls.length));
+
+    // Вернули прокси — вернулась и работа.
+    await engine.updateMcpServer(viaProxy.server.id, { transport: 'proxy' });
+    calls.length = 0;
+    await engine.executeTool('inner_tool', {}, { bypassSecurity: true });
+    ok('с возвращённым прокси вызов снова проходит',
+       calls.length === 1 && calls[0].url.startsWith('http://localhost:3000/?url='),
+       JSON.stringify(calls.map(c => c.url)));
+
+    await engine.removeMcpServer(viaProxy.server.id);
+    sandbox.fetch = origFetch;
+  }
+
   console.log('\n── Ожидание человека не обрывается таймаутом ──');
   // Инструмент, открывающий форму, ждёт не код, а человека. Общий таймаут
   // вызова означал здесь «отвечай за тридцать секунд»: пользователь
