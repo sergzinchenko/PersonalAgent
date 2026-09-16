@@ -139,11 +139,12 @@ Object.assign(ToolsEngine.prototype, {
 	    const runStarted = Date.now();
 
 	    // ── Срок вызова подвижен ──
-	    // Инструмент со своим кодом может открыть форму (agent_form), и
-	    // заранее об этом неизвестно: пометку interactive ставят только
-	    // встроенным. Поэтому срок хранится в объекте, а мост формы
-	    // отодвигает его на время, которое человек провёл в окне.
-	    const budget = { deadline: timeoutMs > 0 ? Date.now() + timeoutMs : 0 };
+	    // Инструмент со своим кодом может открыть форму или собственное
+	    // окно (agent_form, agent_dialog), и заранее об этом неизвестно:
+	    // пометку interactive ставят только встроенным. Поэтому срок
+	    // хранится в объекте: пока окно открыто, holds останавливает
+	    // отсчёт, а при закрытии срок сдвигается на время ожидания.
+	    const budget = { deadline: timeoutMs > 0 ? Date.now() + timeoutMs : 0, holds: 0 };
 	    this._activeBudget = budget;
 	    const withTimeout = (promise) => {
 	      if (interactive || !timeoutMs || timeoutMs <= 0) return promise;
@@ -157,6 +158,9 @@ Object.assign(ToolsEngine.prototype, {
 	          let timer = null;
 	          const stop = () => clearTimeout(timer);
 	          const arm = () => {
+	            // Удержание: пока открыто окно инструмента, срок не идёт.
+	            // Проверять его в это время бессмысленно — ждут человека.
+	            if (budget.holds > 0) { timer = setTimeout(arm, 500); return; }
 	            const left = budget.deadline - Date.now();
 	            if (left <= 0) {
 	              resolve({ error: 'Timeout: инструмент не ответил за ' + timeoutMs + ' мс' });
@@ -227,6 +231,11 @@ Object.assign(ToolsEngine.prototype, {
 	      // системного инструмента может нести его данные.
 	      console.error('🔧 TOOL ENGINE ERROR:', toolName, silent ? e.message : e);
 	    } finally {
+	      // Окно инструмента переживать свой вызов не должно: код
+	      // писала модель, и закрыть его она могла забыть — а висящее
+	      // поверх всего окно от закончившегося вызова не закрыть ничем.
+	      this._finishDialog();
+
 	      // ── Отметка о внешних данных ──
 	      // Успешный вызов, принёсший в ход содержимое извне (страница,
 	      // файл, вики, MCP-сервер), переводит ход в карантин: дальнейшая
@@ -275,7 +284,94 @@ Object.assign(ToolsEngine.prototype, {
   async _sandboxHost({ kind, payload }) {
     if (kind === 'download') return this._sandboxDownload(payload || {});
     if (kind === 'form') return this._sandboxForm(payload || {});
+    if (kind === 'dialog') return this._sandboxDialog(payload || {});
     return { error: 'Песочница попросила о неизвестном действии: ' + kind };
+  },
+
+  // ── Ожидание человека: сроки стоят, бюджет хода не тратится ──
+  // Одно место на форму и на окно инструмента: правило у них общее, а
+  // два его исполнения разошлись бы на первой же правке.
+  _holdBudget() {
+    if (this._activeBudget) this._activeBudget.holds = (this._activeBudget.holds || 0) + 1;
+    try { this.sandbox?.holdTimeout?.(); } catch (_) {}
+  },
+
+  _releaseBudget(waitedMs) {
+    const waited = Math.max(0, Number(waitedMs) || 0);
+    if (this._activeBudget) {
+      this._activeBudget.holds = Math.max(0, (this._activeBudget.holds || 0) - 1);
+      // Срок сдвигаем на время ожидания: инструменту причиталось столько
+      // же работы, сколько до того, как открылось окно.
+      if (this._activeBudget.deadline) this._activeBudget.deadline += waited;
+    }
+    try { this.sandbox?.releaseTimeout?.(waited); } catch (_) {}
+    // Бюджет всего хода — там же: раздумье человека не работа агента.
+    try { this.ui?.noteHumanWait?.(waited); } catch (_) {}
+  },
+
+  // ── Окно инструмента с его собственной вёрсткой ──
+  //
+  // Приложение здесь ничего не рисует: оно показывает КАДР песочницы как
+  // модальное окно. Разметку внутри делает сам инструмент, в своём
+  // документе и своём origin, — то есть ровно там, где ей и место:
+  // дотянуться оттуда до данных приложения по-прежнему нельзя.
+  //
+  // Окно модальное: остальной интерфейс закрыт затемнением, а ход агента
+  // всё это время стоит — и по таймауту вызова, и по бюджету хода.
+  async _sandboxDialog(payload) {
+    const ui = this.ui;
+    const action = String(payload.action || '');
+
+    if (action === 'close') { this._finishDialog(); return { closed: true }; }
+
+    if (!ui || typeof ui.showSandboxDialog !== 'function') {
+      return { error: 'Окна инструментов недоступны: интерфейс не подключён' };
+    }
+    if (!this.sandbox || !this.sandbox.frame) {
+      return { error: 'Кадр песочницы недоступен' };
+    }
+
+    this._dialogStartedAt = Date.now();
+    this._holdBudget();
+    try {
+      // Крестик и Esc не отменяют вызов: кадр узнаёт о закрытии и сам
+      // решает, что вернуть инструменту — обычно { closed: true }.
+      ui.showSandboxDialog({
+        frame: this.sandbox.frame,
+        title: String(payload.title || 'Окно инструмента'),
+        width: parseInt(payload.width, 10) || 720,
+        height: parseInt(payload.height, 10) || 480,
+        onClose: () => {
+          try { this.sandbox.notifyDialogClosed(); } catch (_) {}
+          // Инструмент мог и не послушаться: код писала модель, и ответа
+          // на закрытие в нём может просто не оказаться. Тогда окно висело
+          // бы поверх приложения вечно, а ход стоял бы вместе с ним —
+          // поэтому у закрытия есть предел терпения.
+          clearTimeout(this._dialogCloseTimer);
+          this._dialogCloseTimer = setTimeout(() => this._finishDialog(),
+            ToolsEngine.DIALOG_CLOSE_GRACE_MS);
+        },
+      });
+    } catch (e) {
+      this._dialogStartedAt = 0;
+      this._releaseBudget(0);
+      return { error: 'Окно не открылось: ' + ((e && e.message) || e) };
+    }
+    return { opened: true };
+  },
+
+  // Закрыть окно и вернуть время. Вызывается с трёх сторон — сам
+  // инструмент закончил, человек закрыл и инструмент не отозвался, вызов
+  // завершился с открытым окном, — поэтому повторный вызов безвреден.
+  _finishDialog() {
+    clearTimeout(this._dialogCloseTimer);
+    this._dialogCloseTimer = null;
+    if (!this._dialogStartedAt) return false;
+    const waited = Date.now() - this._dialogStartedAt;
+    this._dialogStartedAt = 0;
+    try { this.ui?.closeSandboxDialog?.(); } catch (_) {}
+    this._releaseBudget(waited);
+    return true;
   },
 
   // ── Форма по описанию из песочницы ──
@@ -340,6 +436,9 @@ Object.assign(ToolsEngine.prototype, {
     }
 
     const startedAt = Date.now();
+    // Пока окно открыто, сроки стоят: продление задним числом не
+    // спасает — старый срок успевает истечь прямо под открытым окном.
+    this._holdBudget();
     let res;
     try {
       res = await ui.showToolFormModal({
@@ -353,12 +452,7 @@ Object.assign(ToolsEngine.prototype, {
     }
 
     const waited = Date.now() - startedAt;
-    // Форма открыта — значит, ждали человека. Таймаут вызова отодвигаем,
-    // бюджет хода тоже: иначе инструмент с формой обрывался бы ровно на
-    // том месте, ради которого он написан.
-    try { this.sandbox?.extendTimeout?.(waited); } catch (_) {}
-    if (this._activeBudget && this._activeBudget.deadline) this._activeBudget.deadline += waited;
-    try { this.ui?.noteHumanWait?.(waited); } catch (_) {}
+    this._releaseBudget(waited);
 
     return res && res.submitted
       ? { submitted: true, values: res.values || {} }

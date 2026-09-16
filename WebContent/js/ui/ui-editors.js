@@ -331,6 +331,97 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ══════════════════════════════════════════════
+  //  Окно инструмента: кадр песочницы как модальное окно
+  //
+  //  Приложение здесь НИЧЕГО НЕ РИСУЕТ внутри окна — и в этом вся суть.
+  //  Разметку пишет инструмент, то есть в конечном счёте модель, и
+  //  вставлять её в документ приложения нельзя ни при каком экранировании:
+  //  она исполнилась бы в его origin, рядом с ключами провайдеров и
+  //  IndexedDB. Зато у кадра песочницы уже есть собственный документ в
+  //  уникальном origin — остаётся показать НА ЭКРАНЕ ЕГО САМОГО.
+  //
+  //  КАДР НЕ ПЕРЕНОСИТСЯ ПО ДЕРЕВУ. Перемещение <iframe> в другого
+  //  родителя перезагружает его документ — то есть убивает исполняемый
+  //  прямо сейчас инструмент вместе с его состоянием. Поэтому кадр
+  //  остаётся там, где создан, и меняется только его оформление, а рамка
+  //  с заголовком подкладывается под него отдельным слоем.
+  // ══════════════════════════════════════════════
+  showSandboxDialog({ frame, title, width, height, onClose } = {}) {
+    if (!frame) throw new Error('нет кадра песочницы');
+    // Предыдущее окно закрываем молча: два разом невозможны — вызов
+    // инструмента в песочнице один за раз.
+    this.closeSandboxDialog();
+
+    const view = document.documentElement;
+    const HEAD = UI.SANDBOX_DIALOG_HEAD;
+    const w = Math.max(320, Math.min(parseInt(width, 10) || 720, (window.innerWidth || 1024) - 32));
+    const h = Math.max(200, Math.min(parseInt(height, 10) || 480,
+      (window.innerHeight || 768) - 32 - HEAD));
+
+    const shell = document.createElement('div');
+    shell.className = 'sandbox-dialog';
+    shell.innerHTML = `
+      <div class="sandbox-dialog-veil"></div>
+      <div class="sandbox-dialog-frame" style="width:${w}px;height:${h + HEAD}px;">
+        <div class="sandbox-dialog-head">
+          <span class="sandbox-dialog-title"></span>
+          <span class="sandbox-dialog-mark">окно инструмента</span>
+          <button class="sandbox-dialog-close" title="Закрыть (Esc)">✕</button>
+        </div>
+      </div>`;
+    // Заголовок приходит из инструмента — только текстом, никогда разметкой.
+    shell.querySelector('.sandbox-dialog-title').textContent = String(title || 'Окно инструмента');
+    document.body.appendChild(shell);
+
+    // Кадр кладём поверх рамки, ровно в её нижнюю часть: рамка отцентрована,
+    // значит кадр смещён вниз на половину высоты заголовка.
+    this._sandboxFrameStyle = frame.style.cssText;
+    frame.classList.add('sandbox-dialog-view');
+    frame.style.cssText = 'position:fixed;left:50%;top:50%;border:0;' +
+      `transform:translate(-50%,-50%) translateY(${HEAD / 2}px);` +
+      `width:${w}px;height:${h}px;`;
+    frame.removeAttribute('aria-hidden');
+    frame.removeAttribute('tabindex');
+
+    // Закрытие — это ПРОСЬБА, а не отмена вызова: кадру уходит сообщение,
+    // и что вернуть инструменту, решает он сам. Окно снимет тот же, кто
+    // его открыл (см. _finishDialog в tools/tools-executor.js).
+    const ask = () => { try { onClose?.(); } catch (_) {} };
+    shell.querySelector('.sandbox-dialog-close').addEventListener('click', ask);
+    this._sandboxDialogKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); ask(); } };
+    document.addEventListener('keydown', this._sandboxDialogKey);
+
+    this._sandboxDialogShell = shell;
+    this._sandboxDialogFrame = frame;
+    // Пока окно открыто, страница за ним не прокручивается: кадр
+    // закреплён на месте, и уехавший из-под него фон выглядел бы поломкой.
+    view.classList.add('sandbox-dialog-open');
+    return shell;
+  },
+
+  closeSandboxDialog() {
+    if (this._sandboxDialogKey) {
+      document.removeEventListener('keydown', this._sandboxDialogKey);
+      this._sandboxDialogKey = null;
+    }
+    const frame = this._sandboxDialogFrame;
+    if (frame) {
+      // Возвращаем кадр в прежнее невидимое состояние — но не трогаем его
+      // положение в дереве: он продолжает обслуживать следующие вызовы.
+      frame.classList.remove('sandbox-dialog-view');
+      frame.style.cssText = this._sandboxFrameStyle
+        || 'position:absolute;width:0;height:0;border:0;left:-9999px;';
+      frame.setAttribute('aria-hidden', 'true');
+      frame.setAttribute('tabindex', '-1');
+      this._sandboxDialogFrame = null;
+    }
+    this._sandboxDialogShell?.remove();
+    this._sandboxDialogShell = null;
+    document.documentElement.classList.remove('sandbox-dialog-open');
+  },
+
+
   // ── Подключение к вики (Confluence / xWiki) ──
   // Форму открывает инструмент *_configure, но заполняет её пользователь, и
   // секрет уходит отсюда прямо в шифрованное хранилище. Через модель он не

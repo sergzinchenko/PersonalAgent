@@ -260,6 +260,73 @@ class ToolSandbox {
       });
     };
 
+    // ── Своё окно с произвольной вёрсткой ──
+    //
+    // agent_form описывает поля, а рисует их приложение — этого хватает
+    // для ввода, но не для всего: таблица с отбором, предпросмотр, схема,
+    // холст. Рисовать такое приложение за инструмент не может, а пускать
+    // его разметку в окно приложения нельзя — она исполнилась бы в его
+    // origin, со всеми его данными.
+    //
+    // Выход в том, что у кадра УЖЕ есть свой документ и свой origin.
+    // Приложение не рисует ничего: оно лишь показывает этот кадр как
+    // модальное окно — размером, рамкой и затемнением вокруг. Внутри
+    // инструмент делает что угодно: document.body его собственный, и
+    // дотянуться из него до приложения по-прежнему нельзя.
+    //
+    //   const res = await agent_dialog({ title: 'Выбор', width: 720 }, (done) => {
+    //     document.body.innerHTML = '<h2>…</h2><button id="ok">Готово</button>';
+    //     document.getElementById('ok').onclick = () => done({ picked: 3 });
+    //   });
+    //
+    // Ответ обязателен: окно существует ради него. Закрыл человек —
+    // придёт { closed: true }, и это отказ, а не пустой результат.
+    g.agent_dialog = async function (spec, render) {
+      const o = (spec && typeof spec === 'object') ? spec : {};
+      if (typeof render !== 'function') {
+        return { closed: true, error: 'agent_dialog: вторым аргументом нужна функция отрисовки' };
+      }
+      // Содержимое документа возвращаем как было: кадр переживает вызов
+      // и обслуживает следующие инструменты.
+      const savedBody = document.body.innerHTML;
+      const savedClass = document.body.className;
+
+      let finish;
+      const answer = new Promise((resolve) => { finish = resolve; });
+      // Человек закрыл окно крестиком или клавишей — приложение скажет
+      // об этом сюда; для инструмента это такой же ответ, как и любой
+      // другой, просто отрицательный.
+      g.__dialogClosedByUser = () => finish({ closed: true });
+
+      // Отказ приложения приходит сюда исключением (так устроен мост):
+      // отдаём его инструменту обычным ответом, чтобы окно, которое не
+      // открылось, не роняло весь вызов.
+      try {
+        await hostCall('dialog', {
+          action: 'open',
+          title: String(o.title || 'Окно инструмента'),
+          width: Math.min(1400, Math.max(320, parseInt(o.width, 10) || 720)),
+          height: Math.min(900, Math.max(220, parseInt(o.height, 10) || 480)),
+        });
+      } catch (e) {
+        g.__dialogClosedByUser = null;
+        return { closed: true, error: (e && e.message) || String(e) };
+      }
+
+      try {
+        document.body.innerHTML = '';
+        await render((value) => finish({ closed: false, value }));
+        return await answer;
+      } finally {
+        g.__dialogClosedByUser = null;
+        document.body.innerHTML = savedBody;
+        document.body.className = savedClass;
+        // Ответа приложения тут не ждём: инструменту он ничего не даёт, а
+        // потеряйся он — вызов повис бы уже ПОСЛЕ того, как всё сделано.
+        try { hostCall('dialog', { action: 'close' }); } catch (_) {}
+      }
+    };
+
     // ── Старый способ «скачать файл» тоже должен работать ──
     //
     // ЧТО БЫЛО. Модель пишет привычное: new Blob → URL.createObjectURL →
@@ -394,6 +461,13 @@ class ToolSandbox {
         hostWaiters.delete(msg.id);
         if (msg.error) waiter.reject(new Error(msg.error));
         else waiter.resolve(msg.value);
+        return;
+      }
+
+      // Приложение сообщает, что модальное окно закрыл человек. Это не
+      // отмена вызова: инструмент получит ответ и решит сам, что делать.
+      if (msg.type === 'dialog-closed') {
+        try { if (typeof g.__dialogClosedByUser === 'function') g.__dialogClosedByUser(); } catch (_) {}
         return;
       }
 
@@ -582,8 +656,11 @@ class ToolSandbox {
       entryRef.timer = timer;
       this.pending.set(id, { done, timer, timeoutMs, rearm: (extraMs) => {
         const cur = this.pending.get(id);
-        if (!cur || !cur.timer || !(extraMs > 0)) return;
-        clearTimeout(cur.timer);
+        // Таймера может не быть вовсе — его сняло удержание; тогда
+        // взводим заново на полный срок: столько инструменту и
+        // причиталось до того, как открылось окно.
+        if (!cur || !timeoutMs) return;
+        if (cur.timer) clearTimeout(cur.timer);
         cur.timer = setTimeout(() => {
           cur.done({ error: 'Timeout: инструмент не ответил за ' + timeoutMs + ' мс' });
           this.destroy('остановлена по таймауту');
@@ -593,14 +670,32 @@ class ToolSandbox {
     });
   }
 
-  // Продлить таймаут всех идущих вызовов на время, которое ждали
-  // человека. Вызывается мостом, когда закрылась форма: секунды,
-  // потраченные на ввод, к работе инструмента отношения не имеют.
-  extendTimeout(waitedMs) {
-    if (!(waitedMs > 0)) return;
+  // ── Пока ждём человека, таймаут не идёт ──
+  //
+  // Продлевать срок ПОСЛЕ закрытия окна недостаточно: пока человек
+  // заполняет форму, старый срок успевает истечь, и кадр сносится прямо
+  // из-под открытого окна. Поэтому ожидание оформлено как удержание:
+  // hold() останавливает отсчёт, release() возвращает его и добавляет
+  // отсчёту столько, сколько ждали.
+  holdTimeout() {
+    this._holds = (this._holds || 0) + 1;
+    for (const entry of this.pending.values()) {
+      if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+    }
+  }
+
+  releaseTimeout(waitedMs) {
+    this._holds = Math.max(0, (this._holds || 0) - 1);
+    if (this._holds > 0) return;
     for (const entry of this.pending.values()) {
       try { entry.rearm?.(waitedMs); } catch (_) {}
     }
+  }
+
+  // Сообщить кадру, что модальное окно закрыл человек. Вызов при этом
+  // продолжается: инструмент сам решит, что вернуть.
+  notifyDialogClosed() {
+    this._send({ __ts: 1, type: 'dialog-closed' });
   }
 
   _send(msg) {

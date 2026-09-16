@@ -731,21 +731,158 @@ class FakeDB {
     ok('закрытое окно возвращает отказ, а не пустые значения',
        cancelled.submitted === false && !cancelled.error, JSON.stringify(cancelled));
 
-    // Время в форме — ожидание человека, а не работа инструмента.
-    let waited = 0, extended = 0;
+    // Время в форме — ожидание человека, а не работа инструмента. Причём
+    // срок обязан стоять ПОКА окно открыто: продление задним числом не
+    // спасает — старый срок успевал истечь прямо под открытым окном.
+    let waited = 0, held = 0, released = 0, holdsInside = -1;
     eng.ui.noteHumanWait = (ms) => { waited = ms; };
-    eng.sandbox = { extendTimeout: (ms) => { extended = ms; } };
-    eng._activeBudget = { deadline: Date.now() + 1000 };
+    eng.sandbox = { holdTimeout: () => { held++; }, releaseTimeout: (ms) => { released = ms; } };
+    eng._activeBudget = { deadline: Date.now() + 1000, holds: 0 };
     const before = eng._activeBudget.deadline;
-    eng.ui.showToolFormModal = () => new Promise(r => setTimeout(() => r({ submitted: true, values: {} }), 120));
+    eng.ui.showToolFormModal = () => new Promise(r => setTimeout(() => {
+      holdsInside = eng._activeBudget.holds;
+      r({ submitted: true, values: {} });
+    }, 120));
     await eng._sandboxForm({ fields: [{ name: 'x', type: 'text', label: 'X' }] });
     ok('ожидание человека отдано наружу', waited >= 100, String(waited));
-    ok('таймаут песочницы отодвинут', extended >= 100, String(extended));
-    ok('и срок вызова тоже', eng._activeBudget.deadline > before);
+    ok('пока форма открыта, срок вызова удерживается', holdsInside === 1, String(holdsInside));
+    ok('таймаут песочницы удержан и отпущен', held === 1 && released >= 100, held + '/' + released);
+    ok('удержание снято после закрытия', eng._activeBudget.holds === 0);
+    ok('срок сдвинут на время ожидания', eng._activeBudget.deadline > before);
 
     eng.ui = null;
     const noUi = await eng._sandboxForm({ fields: [{ name: 'x', type: 'text', label: 'X' }] });
     ok('без интерфейса форма отвечает объяснимой ошибкой', !!noUi.error, JSON.stringify(noUi));
+  }
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Рантайм: своё окно инструмента ──');
+  {
+    // Приложению уходит просьба показать КАДР модальным окном, а рисует
+    // внутри сам инструмент. Проверяем обе стороны разговора.
+    const { posted, api } = makeRuntime();
+    const done = api.handle({
+      __ts: 1, type: 'run', id: 'w1', params: {},
+      code: 'const r = await agent_dialog({ title: "Выбор", width: 5000, height: 10 }, (finish) => {' +
+            '  document.body.innerHTML = "<b id=\'z\'>своя вёрстка</b>";' +
+            '  setTimeout(() => finish({ picked: 3 }), 0);' +
+            '});' +
+            'return { closed: r.closed, picked: r.value && r.value.picked };',
+    });
+    await tick();
+    const req = posted.find(m => m.type === 'host' && m.kind === 'dialog');
+    ok('просьба показать окно ушла приложению', !!req && req.payload.action === 'open');
+    ok('заголовок передан', req.payload.title === 'Выбор');
+    // Размеры приходят из кода, написанного моделью: 5000 пикселей в
+    // ширину и 10 в высоту — это не окно, а поломанный экран.
+    ok('нелепые размеры окна приводятся к разумным',
+       req.payload.width <= 1400 && req.payload.height >= 220,
+       req.payload.width + 'x' + req.payload.height);
+
+    await api.handle({ __ts: 1, type: 'host-result', id: req.id, value: { opened: true } });
+    await done;
+    const out = posted.find(m => m.id === 'w1' && m.type === 'result');
+    ok('ответ из окна вернулся инструменту',
+       out && out.value.closed === false && out.value.picked === 3, JSON.stringify(out && out.value));
+    ok('закрытие окна заказано приложением',
+       posted.some(m => m.type === 'host' && m.kind === 'dialog' && m.payload.action === 'close'));
+    ok('документ кадра возвращён в прежний вид', !window.document.getElementById('z'));
+
+    // Человек закрыл окно — это ответ, просто отрицательный.
+    const done2 = api.handle({
+      __ts: 1, type: 'run', id: 'w2', params: {},
+      code: 'const r = await agent_dialog({ title: "Ждём" }, () => {});' +
+            'return { closed: r.closed, value: r.value };',
+    });
+    await tick();
+    const req2 = posted.filter(m => m.type === 'host' && m.kind === 'dialog').pop();
+    await api.handle({ __ts: 1, type: 'host-result', id: req2.id, value: { opened: true } });
+    await tick();
+    await api.handle({ __ts: 1, type: 'dialog-closed' });
+    await done2;
+    const out2 = posted.find(m => m.id === 'w2' && m.type === 'result');
+    ok('закрытие человеком — отказ, а не пустое значение',
+       out2 && out2.value.closed === true && out2.value.value === undefined, JSON.stringify(out2 && out2.value));
+
+    // Приложение может и отказать (нет кадра, нет интерфейса). Отказ —
+    // это ответ инструменту, а не падение всего вызова.
+    const done3 = api.handle({
+      __ts: 1, type: 'run', id: 'w4', params: {},
+      code: 'const r = await agent_dialog({ title: "Не выйдет" }, () => {});' +
+            'return { closed: r.closed, err: r.error };',
+    });
+    await tick();
+    const req3 = posted.filter(m => m.type === 'host' && m.kind === 'dialog').pop();
+    await api.handle({ __ts: 1, type: 'host-result', id: req3.id, error: 'кадр недоступен' });
+    await done3;
+    const out4 = posted.find(m => m.id === 'w4' && m.type === 'result');
+    ok('отказ приложения приходит ответом, а не падением',
+       out4 && out4.value.closed === true && out4.value.err === 'кадр недоступен',
+       JSON.stringify(out4 && out4.value));
+
+    // Без функции отрисовки окно бессмысленно.
+    await api.handle({
+      __ts: 1, type: 'run', id: 'w3', params: {},
+      code: 'return await agent_dialog({ title: "Пусто" });',
+    });
+    const out3 = posted.find(m => m.id === 'w3' && m.type === 'result');
+    ok('окно без отрисовки отвечает объяснимой ошибкой',
+       out3 && out3.value.closed === true && /отрисовки/.test(out3.value.error), JSON.stringify(out3 && out3.value));
+  }
+
+  console.log('\n── Окно инструмента: сторона приложения ──');
+  {
+    const eng = new X.ToolsEngine(new FakeDB());
+    const shown = [];
+    let closed = 0, waited = 0;
+    eng.ui = {
+      showSandboxDialog: (o) => { shown.push(o); },
+      closeSandboxDialog: () => { closed++; },
+      noteHumanWait: (ms) => { waited += ms; },
+    };
+    eng.sandbox = { frame: {}, notifyDialogClosed() { this.notified = true; },
+                    holdTimeout() { this.held = (this.held || 0) + 1; },
+                    releaseTimeout(ms) { this.released = ms; } };
+    eng._activeBudget = { deadline: Date.now() + 1000, holds: 0 };
+    const before = eng._activeBudget.deadline;
+
+    const opened = await eng._sandboxDialog({ action: 'open', title: 'Выбор', width: 800, height: 400 });
+    ok('окно открыто', opened.opened === true && shown.length === 1, JSON.stringify(opened));
+    ok('приложению отдан именно кадр песочницы', shown[0].frame === eng.sandbox.frame);
+    ok('пока окно открыто, ход агента стоит',
+       eng._activeBudget.holds === 1 && eng.sandbox.held === 1,
+       eng._activeBudget.holds + '/' + eng.sandbox.held);
+
+    await new Promise(r => setTimeout(r, 40));
+    const res = await eng._sandboxDialog({ action: 'close' });
+    ok('окно закрыто по слову инструмента', res.closed === true && closed === 1);
+    ok('удержание снято, время возвращено',
+       eng._activeBudget.holds === 0 && eng._activeBudget.deadline > before && waited >= 30,
+       eng._activeBudget.holds + '/' + waited);
+
+    // Повторное закрытие ничего не ломает и время не приписывает дважды.
+    const waitedBefore = waited;
+    await eng._sandboxDialog({ action: 'close' });
+    ok('повторное закрытие безвредно', closed === 1 && waited === waitedBefore);
+
+    // Человек закрыл окно, а инструмент не отозвался: висеть навсегда
+    // окно не должно — ни на экране, ни в бюджете хода.
+    X.ToolsEngine.DIALOG_CLOSE_GRACE_MS = 30;
+    await eng._sandboxDialog({ action: 'open', title: 'Молчун' });
+    shown[shown.length - 1].onClose();
+    ok('кадр узнал о закрытии', eng.sandbox.notified === true);
+    ok('но окно ещё держится — ответ за инструментом', eng._activeBudget.holds === 1);
+    await new Promise(r => setTimeout(r, 80));
+    ok('молчащий инструмент теряет окно сам',
+       closed === 2 && eng._activeBudget.holds === 0, closed + '/' + eng._activeBudget.holds);
+
+    // Отказы должны быть объяснимыми, а не молчаливыми.
+    eng.sandbox = { frame: null };
+    const noFrame = await eng._sandboxDialog({ action: 'open' });
+    ok('без кадра песочницы окно отвечает ошибкой', !!noFrame.error, JSON.stringify(noFrame));
+    eng.ui = null;
+    const noUi = await eng._sandboxDialog({ action: 'open' });
+    ok('без интерфейса тоже', !!noUi.error, JSON.stringify(noUi));
   }
 
   console.log('\n==============================================');

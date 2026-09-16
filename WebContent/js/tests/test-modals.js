@@ -342,6 +342,74 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ok('закрытие окна — отказ, а не пустые значения', res2.submitted === false, JSON.stringify(res2));
   }
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Окно инструмента: кадр песочницы на экране ──');
+  {
+    // Главное обещание: кадр НЕ ПЕРЕЕЗЖАЕТ по дереву. Перенос <iframe>
+    // перезагружает его документ — то есть убивает инструмент, который
+    // прямо сейчас показывает это окно.
+    const frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('aria-hidden', 'true');
+    frame.setAttribute('tabindex', '-1');
+    const hidden = 'position:absolute;width:0;height:0;border:0;left:-9999px;';
+    frame.style.cssText = hidden;
+    document.body.appendChild(frame);
+    const parentBefore = frame.parentNode;
+
+    let asked = 0;
+    ui.showSandboxDialog({
+      frame, title: 'Отчёт <b>за квартал</b>', width: 800, height: 400,
+      onClose: () => { asked++; },
+    });
+
+    const shell = document.querySelector('.sandbox-dialog');
+    ok('окно появилось', !!shell);
+    ok('кадр остался на своём месте в дереве', frame.parentNode === parentBefore);
+    ok('и не стал потомком рамки окна', !shell.contains(frame));
+    ok('кадр показан на экране', /position:\s*fixed/.test(frame.style.cssText) &&
+       frame.style.width === '800px', frame.style.cssText);
+    ok('сказано, что окно нарисовал инструмент', /окно инструмента/.test(shell.textContent));
+
+    // Заголовок приходит из кода инструмента — текстом, и только текстом.
+    ok('разметка в заголовке не исполняется',
+       !shell.querySelector('.sandbox-dialog-title b') &&
+       /<b>за квартал<\/b>/.test(shell.querySelector('.sandbox-dialog-title').textContent));
+
+    // Закрытие — просьба к инструменту, а не снос окна: ответ обязателен,
+    // и что вернуть, решает он сам.
+    shell.querySelector('.sandbox-dialog-close').dispatchEvent(
+      new window.MouseEvent('click', { bubbles: true }));
+    ok('крестик просит инструмент закрыться', asked === 1);
+    ok('но окно остаётся до его ответа', !!document.querySelector('.sandbox-dialog'));
+    pressEsc();
+    ok('Esc делает то же самое', asked === 2);
+
+    ui.closeSandboxDialog();
+    ok('после ответа окно снято', !document.querySelector('.sandbox-dialog'));
+    // Сравниваем по смыслу, а не посимвольно: браузер переписывает
+    // cssText по-своему (0 → 0px), и точное совпадение строк ничего бы
+    // не проверяло, кроме форматирования.
+    ok('кадр вернулся в прежнее невидимое состояние',
+       frame.style.position === 'absolute' && parseInt(frame.style.left, 10) < -1000 &&
+       parseInt(frame.style.width, 10) === 0 && frame.getAttribute('aria-hidden') === 'true',
+       frame.style.cssText);
+    ok('и по-прежнему на месте — документ не перезагружался',
+       frame.parentNode === parentBefore);
+    pressEsc();
+    ok('после закрытия Esc окна уже не касается', asked === 2);
+
+    // Размеры приходят из кода инструмента: окно больше экрана — поломка.
+    ui.showSandboxDialog({ frame, title: 'Огромное', width: 99999, height: 99999, onClose: () => {} });
+    const w = parseInt(document.querySelector('.sandbox-dialog-frame').style.width, 10);
+    ok('окно не вылезает за пределы экрана', w <= (window.innerWidth || 1024), String(w));
+    ui.closeSandboxDialog();
+
+    ok('без кадра окно не открывается молча', (() => {
+      try { ui.showSandboxDialog({ title: 'Ничего' }); return false; } catch (_) { return true; }
+    })());
+  }
+
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('='.repeat(46));

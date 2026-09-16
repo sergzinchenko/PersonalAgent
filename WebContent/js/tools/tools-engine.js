@@ -89,3 +89,8 @@ class ToolsEngine {
 // файлом, без правки ядра и без разрастания _builtinDefs().
 ToolsEngine.HANDLER_CONTRIBUTORS = [];
 ToolsEngine.DEF_CONTRIBUTORS = [];
+
+// Сколько ждать инструмент после того, как человек закрыл его окно.
+// Закрытие — это сообщение внутрь кадра, а не команда: ответить на него
+// должен сам инструмент. Не ответил — окно снимаем сами.
+ToolsEngine.DIALOG_CLOSE_GRACE_MS = 3000;

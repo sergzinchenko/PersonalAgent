@@ -2112,3 +2112,83 @@ body.resizing-plan #plan-panel * { pointer-events: none; }
   color: var(--text-secondary);
   border-left: 2px solid var(--warning);
 }
+
+/* ===== ОКНО ИНСТРУМЕНТА (кадр песочницы) =====
+   Приложение рисует только рамку: содержимое — это сам <iframe>
+   песочницы, положенный поверх неё (см. showSandboxDialog в
+   js/ui/ui-editors.js). Кадр при этом остаётся на своём месте в дереве —
+   перенос <iframe> перезагрузил бы документ и убил идущий инструмент. */
+.sandbox-dialog-veil {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 1200;
+  animation: fadeIn 0.2s ease;
+}
+
+.sandbox-dialog-frame {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1201;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  overflow: hidden;
+  animation: slideUp 0.25s ease;
+}
+
+.sandbox-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.sandbox-dialog-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Видно, что окно нарисовало не приложение: внутри чужая вёрстка, и
+   человек вправе об этом знать, прежде чем что-то туда вводить. */
+.sandbox-dialog-mark {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.sandbox-dialog-close {
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.sandbox-dialog-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* Сам кадр на время показа. Фон белый намеренно: документ инструмента
+   про тему приложения ничего не знает, и на тёмном фоне его текст по
+   умолчанию был бы нечитаем. */
+iframe.sandbox-dialog-view {
+  z-index: 1202;
+  background: #fff;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+/* Фон не прокручивается: кадр закреплён на месте, и уезжающая под ним
+   страница выглядела бы поломкой. */
+.sandbox-dialog-open, .sandbox-dialog-open body { overflow: hidden; }
