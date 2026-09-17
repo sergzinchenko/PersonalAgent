@@ -68,11 +68,12 @@ Object.assign(ToolsEngine.prototype, {
           },
           { signal: ctl.signal });
 
-        if (res.error) return { ...res, mcpServer: res.host };
+        if (res.error) return { ...this._explainMcpAbort(res, timeoutMs), mcpServer: res.host };
 
         if (!res.ok) {
           return {
             error: `MCP-сервер ответил ${res.status}: ` + String(res.text || '').slice(0, 300),
+            hint: res.hint,
             mcpServer: res.host,
           };
         }
@@ -169,12 +170,27 @@ Object.assign(ToolsEngine.prototype, {
   // двух разных локальных прокси у одного человека не бывает, а вторая
   // копия настройки означала бы вторую копию ошибок в ней.
   async _mcpFetch(server, body, { signal = null } = {}) {
+    // ── Срок на весь обмен ──
+    // Вызов инструмента приносит свой срок (signal), а подключение сервера
+    // (initialize, tools/list) раньше не имело никакого: сервер, который
+    // не закрывает поток ответа, держал окно подключения вечно. Число —
+    // общее из ⚙ Ограничения, как и у вызова.
+    if (!signal) {
+      const shared = await this._toolLimits();
+      const ms = (shared.timeoutSeconds || 30) * 1000;
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), ms);
+      try {
+        const r = await this._mcpFetch(server, body, { signal: ctl.signal });
+        return this._explainMcpAbort(r, ms);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     const viaProxy = server.transport === 'proxy';
     const addr = this._checkMcpAddress(server.url, { viaProxy });
     if (addr.error) return { error: addr.error };
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (server.token) headers['Authorization'] = 'Bearer ' + server.token;
 
     let url = addr.url;
     if (viaProxy) {
@@ -188,26 +204,251 @@ Object.assign(ToolsEngine.prototype, {
       }
       url = proxy.baseUrl.replace(/\/+$/, '') + '/?url=' + encodeURIComponent(addr.url);
     }
+    const route = { url, host: addr.host, viaProxy, token: server.token };
 
+    // Инициализация — сама по себе запрос, ей сессия не нужна.
+    if (body && body.method === 'initialize') return this._mcpPost(route, body, null, signal);
+
+    const key = addr.url + '|' + (viaProxy ? 'proxy' : 'direct');
+    let session = await this._mcpSession(key, route, signal);
+    if (session.error) return session;
+
+    let res = await this._mcpPost(route, body, session, signal);
+
+    // ── Сессия истекла ──
+    // Сервер забыл сессию (перезапуск, срок жизни) и отвечает 404 на её id.
+    // По спецификации клиент начинает заново — один раз: второй 404 уже
+    // не про сессию, и зацикливаться на нём незачем.
+    if (session.sessionId && res.status === 404) {
+      this._mcpSessions.delete(key);
+      session = await this._mcpSession(key, route, signal);
+      if (session.error) return session;
+      res = await this._mcpPost(route, body, session, signal);
+    }
+
+    // Сервер требует сессию, а её id браузер прочитать не смог: заголовок
+    // ответа не открыт для чтения со страницы (CORS). Со стороны это
+    // выглядит как «сервер не инициализирован» при успешной инициализации.
+    if (!res.error && !res.ok && res.status === 400 && !session.sessionId && session.lifecycle &&
+        /session|not initialized/i.test(String(res.text || ''))) {
+      res.hint = viaProxy
+        ? 'Сервер работает с сессиями, но их идентификатор не дошёл через прокси. Перезапустите прокси ' +
+          'свежей версией (node proxy/proxy.js) — она пропускает заголовок Mcp-Session-Id.'
+        : 'Сервер работает с сессиями, но браузер не может прочитать их идентификатор: сервер не открыл ' +
+          'заголовок Mcp-Session-Id для чтения (Access-Control-Expose-Headers). Включите в подключении ' +
+          'отправку через локальный прокси — или откройте заголовок в настройках CORS сервера.';
+    }
+    return res;
+  },
+
+  // Обрыв по сроку выглядит как «signal is aborted without reason» —
+  // по такой строке не понять, что случилось и что делать.
+  _explainMcpAbort(r, ms) {
+    if (!r || !r.error || !/abort/i.test(r.error)) return r;
+    return {
+      ...r,
+      error: `MCP-сервер не завершил ответ за ${Math.round(ms / 1000)} с.`,
+      hint: 'Сервер мог ответить потоком событий и не закрыть его после ответа. Если сервер точно ' +
+            'закрывает поток, причиной бывает антивирус или веб-фильтр между браузером и сервером: ' +
+            'он отдаёт браузеру ответ только целиком. Проверьте сервер, отключите проверку трафика ' +
+            'для его адреса или увеличьте таймаут вызова в ⚙ Настройки → Ограничения.',
+    };
+  },
+
+  // ══════════════════════════════════════════════
+  //  MCP Streamable HTTP: сессия и один запрос
+  //
+  //  Раньше клиент слал голый JSON-RPC и ждал голый JSON. Серверы на
+  //  официальных SDK так не разговаривают:
+  //   • запрос обязан объявить Accept: application/json, text/event-stream —
+  //     иначе 406 «Client must accept both…»;
+  //   • ответ может прийти потоком событий (text/event-stream), где
+  //     JSON-RPC-ответ лежит в поле data одного из событий;
+  //   • до любых вызовов нужна инициализация: initialize → ответ сервера
+  //     (он может выдать Mcp-Session-Id) → notifications/initialized;
+  //     id сессии и согласованная версия протокола идут дальше в каждом
+  //     запросе заголовками.
+  //  Старые серверы, не знающие initialize, продолжают работать: их отказ
+  //  «нет такого метода» запоминается, и вызовы идут без сессии, как раньше.
+  // ══════════════════════════════════════════════
+  async _mcpSession(key, route, signal) {
+    if (!this._mcpSessions) this._mcpSessions = new Map();
+    const cached = this._mcpSessions.get(key);
+    if (cached) return cached;
+
+    // Параллельные вызовы одного сервера ждут одну инициализацию, а не
+    // заводят каждый свою сессию.
+    const pending = (async () => {
+      const init = {
+        jsonrpc: '2.0',
+        id: 'init-' + Date.now(),
+        method: 'initialize',
+        params: {
+          protocolVersion: ToolsEngine.MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'ai-agent-browser', version: String(typeof APP_RELEASE_COUNT !== 'undefined' ? APP_RELEASE_COUNT : 0) },
+        },
+      };
+      const r = await this._mcpPost(route, init, null, signal);
+
+      // Сеть или прокси недоступны — это не свойство сервера, запоминать
+      // нечего: следующий вызов попробует снова.
+      if (r.error) { this._mcpSessions.delete(key); return r; }
+
+      let data = null;
+      try { data = JSON.parse(r.text); } catch (_) { data = null; }
+
+      // Сервер без жизненного цикла: метода initialize у него нет. Это
+      // устойчивое свойство — запоминаем и дальше работаем по-старому.
+      const noMethod = (data && data.error && data.error.code === -32601) || r.status === 404 || r.status === 405;
+      if (noMethod) return { lifecycle: false };
+
+      if (!r.ok || !data || data.error) {
+        // Отказ по другой причине (авторизация, сбой сервера) — не
+        // запоминаем: токен поправят, сервер поднимут.
+        this._mcpSessions.delete(key);
+        const why = data && data.error
+          ? (data.error.message || JSON.stringify(data.error))
+          : ('HTTP ' + r.status + ': ' + String(r.text || '').slice(0, 300));
+        return { error: 'MCP-сервер не принял инициализацию: ' + why, hint: r.hint, host: r.host };
+      }
+
+      const session = {
+        lifecycle: true,
+        sessionId: r.sessionId || null,
+        protocolVersion: (data.result && data.result.protocolVersion) || ToolsEngine.MCP_PROTOCOL_VERSION,
+        serverInfo: (data.result && data.result.serverInfo) || null,
+      };
+      // Уведомление ответа не ждёт (сервер отвечает 202 без тела); его
+      // неудача вызов не ломает — сервер, которому оно важно, скажет об
+      // этом на следующем запросе.
+      try {
+        await this._mcpPost(route, { jsonrpc: '2.0', method: 'notifications/initialized' }, session, signal);
+      } catch (_) { /* см. выше */ }
+      return session;
+    })();
+
+    this._mcpSessions.set(key, pending);
+    const result = await pending;
+    // В кэше остаётся готовый результат, а не промис: так его видно при
+    // отладке и проще сбросить.
+    if (this._mcpSessions.get(key) === pending) this._mcpSessions.set(key, result);
+    return result;
+  },
+
+  // Сбросить сессии сервера: после правки подключения или его удаления
+  // старая сессия относится уже не к тому, что настроено.
+  _forgetMcpSessions(url) {
+    if (!this._mcpSessions || !url) return;
+    for (const k of Array.from(this._mcpSessions.keys())) {
+      if (k.startsWith(url + '|')) this._mcpSessions.delete(k);
+    }
+  },
+
+  async _mcpPost(route, body, session, signal) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+    };
+    if (route.token) headers['Authorization'] = 'Bearer ' + route.token;
+    if (session && session.sessionId) headers['Mcp-Session-Id'] = session.sessionId;
+    if (session && session.lifecycle && session.protocolVersion) headers['MCP-Protocol-Version'] = session.protocolVersion;
+
+    let resp;
     try {
-      const resp = await fetch(url, {
-        method: 'POST', headers, signal,
-        body: JSON.stringify(body),
-      });
-      const text = await resp.text();
-      return { ok: resp.ok, status: resp.status, text, host: addr.host, viaProxy };
+      resp = await fetch(route.url, { method: 'POST', headers, signal, body: JSON.stringify(body) });
     } catch (e) {
       // Через прокси причина отказа другая, и подсказка тоже: сервер
       // может быть жив, а не запущен — прокси.
       return {
-        error: (viaProxy ? 'Локальный прокси не ответил: ' : 'Не удалось обратиться к MCP-серверу: ') +
+        error: (route.viaProxy ? 'Локальный прокси не ответил: ' : 'Не удалось обратиться к MCP-серверу: ') +
                ((e && e.message) || String(e)),
-        hint: viaProxy
+        hint: route.viaProxy
           ? 'Проверьте, что прокси запущен («node proxy/proxy.js») и адрес в настройках верен.'
           : 'Если сервер во внутренней сети, включите отправку через локальный прокси в настройках подключения.',
-        host: addr.host,
+        host: route.host,
       };
     }
+
+    const getHeader = (n) => { try { return resp.headers && resp.headers.get ? resp.headers.get(n) : null; } catch (_) { return null; } };
+    const type = String(getHeader('content-type') || '').toLowerCase();
+    const out = { ok: resp.ok, status: resp.status, host: route.host, viaProxy: route.viaProxy,
+                  sessionId: getHeader('mcp-session-id') };
+
+    try {
+      if (type.includes('text/event-stream')) {
+        const msg = await this._readMcpEventStream(resp, body && body.id);
+        out.text = msg === null ? '' : JSON.stringify(msg);
+        if (msg === null && resp.ok) {
+          out.ok = false;
+          out.text = 'Поток событий закончился без ответа на запрос';
+        }
+      } else {
+        out.text = await resp.text();
+      }
+    } catch (e) {
+      return { error: 'Ответ MCP-сервера оборвался: ' + ((e && e.message) || String(e)), host: route.host };
+    }
+    return out;
+  },
+
+  // ── Ответ потоком событий ──
+  // Сервер может прислать в потоке и свои сообщения — уведомления о
+  // ходе работы, запросы к клиенту, — а ответ на наш запрос узнаётся по
+  // id. Как только он пришёл, поток больше не нужен: читать его до конца
+  // значило бы ждать, пока сервер сам решит закрыть соединение.
+  async _readMcpEventStream(resp, wantId) {
+    const matches = (m) => m && typeof m === 'object' && ('result' in m || 'error' in m) &&
+      (wantId === undefined || wantId === null || m.id === wantId || m.id === null);
+
+    const takeEvents = (chunk, onMessage) => {
+      // Событие — строки до пустой строки; данные — склейка полей data.
+      for (const block of chunk.split(/\r?\n\r?\n/)) {
+        const data = block.split(/\r?\n/)
+          .filter(l => l.startsWith('data:'))
+          .map(l => l.slice(5).replace(/^ /, ''))
+          .join('\n');
+        if (!data) continue;
+        let msg;
+        try { msg = JSON.parse(data); } catch (_) { continue; }
+        const list = Array.isArray(msg) ? msg : [msg];
+        for (const m of list) if (onMessage(m)) return true;
+      }
+      return false;
+    };
+
+    let found = null;
+    const onMessage = (m) => { if (matches(m)) { found = m; return true; } return false; };
+
+    const reader = resp.body && typeof resp.body.getReader === 'function' ? resp.body.getReader() : null;
+    if (!reader) {
+      takeEvents(await resp.text(), onMessage);
+      return found;
+    }
+
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (value) buf += decoder.decode(value, { stream: !done });
+        // Разбираем только завершённые события; хвост ждёт продолжения.
+        const cut = buf.search(/\r?\n\r?\n(?![\s\S]*\r?\n\r?\n)/);
+        if (cut >= 0) {
+          const sep = buf.slice(cut).match(/^\r?\n\r?\n/)[0];
+          const complete = buf.slice(0, cut);
+          buf = buf.slice(cut + sep.length);
+          if (takeEvents(complete, onMessage)) break;
+        }
+        if (done) {
+          if (buf.trim()) takeEvents(buf, onMessage);
+          break;
+        }
+      }
+    } finally {
+      try { await reader.cancel(); } catch (_) { /* поток уже закрыт */ }
+    }
+    return found;
   },
 
   // viaProxy меняет не строгость, а СМЫСЛ проверок. Запрет внутренних
@@ -329,22 +570,34 @@ Object.assign(ToolsEngine.prototype, {
     const addr = this._checkMcpAddress(url, { viaProxy: transport === 'proxy' });
     if (addr.error) return { error: addr.error };
 
-    let data;
-    const listed = await this._mcpFetch({ url, token, transport },
-      { jsonrpc: '2.0', method: 'tools/list', id: 1 });
-    if (listed.error) return { error: listed.error, hint: listed.hint };
-    if (!listed.ok) {
-      return { error: `MCP-сервер ответил ${listed.status}: ` + String(listed.text || '').slice(0, 300) };
+    // ── Перечень инструментов, постранично ──
+    // Сервер с большим набором отдаёт его частями: nextCursor в ответе
+    // означает «есть ещё». Без продолжения импортировалась бы только
+    // первая страница, и часть инструментов молча пропала бы. Предел
+    // страниц — на случай сервера, который курсор не продвигает.
+    const mcpTools = [];
+    let cursor;
+    for (let page = 0; page < 50; page++) {
+      const listed = await this._mcpFetch({ url, token, transport },
+        { jsonrpc: '2.0', method: 'tools/list', id: page + 1, ...(cursor ? { params: { cursor } } : {}) });
+      if (listed.error) return { error: listed.error, hint: listed.hint };
+      if (!listed.ok) {
+        return { error: `MCP-сервер ответил ${listed.status}: ` + String(listed.text || '').slice(0, 300), hint: listed.hint };
+      }
+      let data;
+      try {
+        data = JSON.parse(listed.text);
+      } catch (e) {
+        return { error: 'MCP-сервер вернул не JSON: ' + String(listed.text || '').slice(0, 200) };
+      }
+      if (data.error) {
+        return { error: 'MCP-ошибка: ' + (data.error.message || JSON.stringify(data.error)) };
+      }
+      mcpTools.push(...(data.result?.tools || []));
+      const next = data.result?.nextCursor;
+      if (!next || next === cursor) break;
+      cursor = next;
     }
-    try {
-      data = JSON.parse(listed.text);
-    } catch (e) {
-      return { error: 'MCP-сервер вернул не JSON: ' + String(listed.text || '').slice(0, 200) };
-    }
-    if (data.error) {
-      return { error: 'MCP-ошибка: ' + (data.error.message || JSON.stringify(data.error)) };
-    }
-    const mcpTools = data.result?.tools || [];
 
     const serverId = 'mcpsrv_' + uid();
     const folder = {
@@ -417,6 +670,9 @@ Object.assign(ToolsEngine.prototype, {
     if (transportChanged) server.transport = newTransport;
 
     if (token || transportChanged) {
+      // Сессия заведена со старым токеном или по старому маршруту — она
+      // относится уже не к тому, что настроено.
+      this._forgetMcpSessions(server.url);
       const encToken = token ? await SecretsVault.encrypt(this.db, token) : server.token;
       server.token = encToken;
       await this.db.put('mcp_servers', server);
@@ -456,6 +712,7 @@ Object.assign(ToolsEngine.prototype, {
   async removeMcpServer(id) {
     const server = await this.db.get('mcp_servers', id);
     if (!server) return false;
+    this._forgetMcpSessions(server.url);
 
     const allFolders = await this.db.getAll('folders');
     const folderIds = new Set();

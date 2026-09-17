@@ -305,6 +305,160 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
   }
 
   // ══════════════════════════════════════════════
+  console.log('\n── MCP Streamable HTTP: протокол ──');
+  {
+    // Сервер на официальном SDK: без Accept с обоими типами — 406, без
+    // инициализации — 400, ответ потоком событий, id сессии в заголовке,
+    // истёкшая сессия — 404. Заглушка ведёт себя ровно так.
+    const origFetch = sandbox.fetch;
+    const seen = [];
+    let sessions = new Set();
+    let issued = 0;
+    let serverList = [];
+    const hdr = (h) => ({ get: (n) => h[String(n).toLowerCase()] ?? null });
+    const reply = (status, headers, text) => ({
+      ok: status >= 200 && status < 300, status,
+      headers: hdr(headers),
+      text: async () => text,
+      json: async () => JSON.parse(text),
+    });
+    const sse = (obj) => 'event: message\n' + 'data: ' + JSON.stringify({ jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1 } }) +
+      '\n\nevent: message\ndata: ' + JSON.stringify(obj) + '\n\n';
+
+    sandbox.fetch = async (url, init) => {
+      const h = Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+      const msg = JSON.parse(init.body);
+      seen.push({ method: msg.method, headers: h });
+      if (!/application\/json/.test(h.accept || '') || !/text\/event-stream/.test(h.accept || '')) {
+        return reply(406, { 'content-type': 'application/json' },
+          JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Not Acceptable: Client must accept both application/json and text/event-stream' }, id: null }));
+      }
+      if (msg.method === 'initialize') {
+        const sid = 'sess-' + (++issued);
+        sessions.add(sid);
+        return reply(200, { 'content-type': 'text/event-stream', 'mcp-session-id': sid },
+          sse({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'srv', version: '1' } } }));
+      }
+      const sid = h['mcp-session-id'];
+      if (!sid) return reply(400, { 'content-type': 'application/json' },
+        JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: Server not initialized' }, id: null }));
+      if (!sessions.has(sid)) return reply(404, { 'content-type': 'application/json' },
+        JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Session not found' }, id: null }));
+      if (msg.method === 'notifications/initialized') return reply(202, {}, '');
+      if (msg.method === 'tools/list') {
+        const page = msg.params && msg.params.cursor === 'p2' ? 2 : 1;
+        const result = page === 1
+          ? { tools: [{ name: 'sse_tool', description: 'x', inputSchema: { type: 'object', properties: {} } }], nextCursor: 'p2' }
+          : { tools: [{ name: 'sse_tool_2', description: 'y', inputSchema: { type: 'object', properties: {} } }] };
+        serverList.push(page);
+        return reply(200, { 'content-type': 'text/event-stream' }, sse({ jsonrpc: '2.0', id: msg.id, result }));
+      }
+      if (msg.method === 'tools/call') {
+        return reply(200, { 'content-type': 'text/event-stream' },
+          sse({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ответ из потока' }] } }));
+      }
+      return reply(400, {}, 'unexpected');
+    };
+
+    const sec = engine.security;
+    const prevLocal = sec && sec.mcpLimits ? { ...sec.mcpLimits } : null;
+    const conn = await engine.connectMcpServer({ name: 'SDK', url: 'https://sdk.test/mcp', token: 'tk' });
+    ok('сервер на официальном SDK подключается', !conn.error && conn.importedCount === 2, JSON.stringify(conn));
+    ok('каждый запрос объявляет оба типа ответа',
+       seen.every(x => /application\/json/.test(x.headers.accept) && /text\/event-stream/.test(x.headers.accept)));
+    ok('первым идёт initialize, за ним — notifications/initialized',
+       seen[0].method === 'initialize' && seen[1].method === 'notifications/initialized', seen.map(x => x.method).join(','));
+    ok('id сессии из заголовка уходит в следующих запросах',
+       seen.slice(1).every(x => x.headers['mcp-session-id'] === 'sess-1'));
+    ok('и согласованная сервером версия протокола — тоже',
+       seen.slice(1).every(x => x.headers['mcp-protocol-version'] === '2025-03-26'));
+    ok('перечень инструментов собран со всех страниц', serverList.join(',') === '1,2', serverList.join(','));
+    ok('ответ из потока событий разобран, уведомления в потоке пропущены', conn.importedCount === 2);
+
+    seen.length = 0;
+    const called = await engine.executeTool('sse_tool', { q: 1 }, { bypassSecurity: true });
+    ok('вызов инструмента проходит, ответ — из потока событий',
+       !called.error && JSON.stringify(called).includes('ответ из потока'), JSON.stringify(called));
+    ok('повторной инициализации для второго запроса нет — сессия переиспользуется',
+       seen.length === 1 && seen[0].method === 'tools/call', seen.map(x => x.method).join(','));
+
+    // Сервер перезапустился и забыл сессию.
+    sessions = new Set();
+    seen.length = 0;
+    const again = await engine.executeTool('sse_tool', {}, { bypassSecurity: true });
+    ok('истёкшая сессия заводится заново, и вызов проходит',
+       !again.error && seen.map(x => x.method).join(',') === 'tools/call,initialize,notifications/initialized,tools/call',
+       seen.map(x => x.method).join(',') + ' ' + JSON.stringify(again));
+
+    await engine.removeMcpServer(conn.server.id);
+    ok('удаление сервера забывает его сессию',
+       ![...(engine._mcpSessions || new Map()).keys()].some(k => k.startsWith('https://sdk.test/mcp')));
+
+    // ── Старый сервер без жизненного цикла ──
+    seen.length = 0;
+    sandbox.fetch = async (url, init) => {
+      const msg = JSON.parse(init.body);
+      seen.push({ method: msg.method });
+      if (msg.method === 'initialize') {
+        return reply(200, { 'content-type': 'application/json' },
+          JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } }));
+      }
+      return reply(200, { 'content-type': 'application/json' },
+        JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'old_tool', inputSchema: { type: 'object', properties: {} } }] } }));
+    };
+    const legacy = await engine.connectMcpServer({ name: 'Старый', url: 'https://old.test/rpc', token: '' });
+    ok('старый сервер без initialize по-прежнему подключается', !legacy.error && legacy.importedCount === 1, JSON.stringify(legacy));
+    seen.length = 0;
+    await engine.executeTool('old_tool', {}, { bypassSecurity: true });
+    ok('его отказ от initialize запомнен — вызовы идут без лишних попыток',
+       seen.length === 1 && seen[0].method === 'tools/call', seen.map(x => x.method).join(','));
+    await engine.removeMcpServer(legacy.server.id);
+
+    // ── Сессия без читаемого id (CORS не открыл заголовок) ──
+    sandbox.fetch = async (url, init) => {
+      const msg = JSON.parse(init.body);
+      if (msg.method === 'initialize') {
+        return reply(200, { 'content-type': 'application/json' },   // mcp-session-id не виден странице
+          JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-06-18' } }));
+      }
+      if (msg.method === 'notifications/initialized') return reply(202, {}, '');
+      return reply(400, { 'content-type': 'application/json' },
+        JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: No valid session ID provided' }, id: null }));
+    };
+    const hidden = await engine.connectMcpServer({ name: 'Скрытый', url: 'https://hidden.test/mcp', token: '' });
+    ok('если id сессии не виден браузеру — ошибка с объяснением и решением',
+       !!hidden.error && /Mcp-Session-Id/.test(hidden.hint || '') && /прокси/.test(hidden.hint || ''),
+       JSON.stringify(hidden));
+
+    // ── Сервер не закрывает ответ ──
+    // Раньше у подключения не было срока вовсе: окно висело вечно.
+    // Заглушка AbortController в этой среде событий не знает, поэтому
+    // здесь — маленький настоящий, ровно с тем, чем пользуется клиент.
+    const origAC = sandbox.AbortController;
+    sandbox.AbortController = class {
+      constructor() {
+        const handlers = [];
+        this.signal = { aborted: false, addEventListener: (_e, fn) => handlers.push(fn) };
+        this._handlers = handlers;
+      }
+      abort() { this.signal.aborted = true; this._handlers.forEach(fn => fn()); }
+    };
+    const origLimits = engine._toolLimits;
+    engine._toolLimits = async () => ({ timeoutSeconds: 0.2, maxResponseChars: 100000 });
+    sandbox.fetch = (url, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('signal is aborted without reason')));
+    });
+    const stuck = await engine.connectMcpServer({ name: 'Молчун', url: 'https://stuck.test/mcp', token: '' });
+    ok('подключение к серверу, не завершающему ответ, обрывается по сроку', !!stuck.error && /не завершил ответ/.test(stuck.error),
+       JSON.stringify(stuck));
+    ok('и объясняет, что проверить', /потоком событий/.test(stuck.hint || '') && /антивирус|фильтр/.test(stuck.hint || ''),
+       stuck.hint);
+    engine._toolLimits = origLimits;
+    sandbox.AbortController = origAC;
+
+    sandbox.fetch = origFetch;
+  }
+
   console.log('\n── MCP через локальный прокси ──');
   {
     const origFetch = sandbox.fetch;
@@ -365,8 +519,12 @@ const { ToolsEngine, LLMRegistry, SecurityEngine } = sandbox;
     await engine.updateMcpServer(viaProxy.server.id, { transport: 'proxy' });
     calls.length = 0;
     await engine.executeTool('inner_tool', {}, { bypassSecurity: true });
+    // После смены маршрута сессия заводится заново (initialize →
+    // notifications/initialized → вызов), и всё это — через прокси.
+    const lastBody = calls.length ? JSON.parse(calls[calls.length - 1].init.body) : {};
     ok('с возвращённым прокси вызов снова проходит',
-       calls.length === 1 && calls[0].url.startsWith('http://localhost:3000/?url='),
+       calls.length >= 1 && calls.every(c => c.url.startsWith('http://localhost:3000/?url=')) &&
+       lastBody.method === 'tools/call',
        JSON.stringify(calls.map(c => c.url)));
 
     await engine.removeMcpServer(viaProxy.server.id);

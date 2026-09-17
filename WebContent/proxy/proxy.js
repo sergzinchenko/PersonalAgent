@@ -255,10 +255,16 @@ function createCaptureStream(label) {
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS');
+  // Mcp-Session-Id и MCP-Protocol-Version — заголовки протокола MCP
+  // (Streamable HTTP): без разрешения браузер не отправит их вовсе, и
+  // сервер с сессиями отвечал бы «не инициализирован».
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, X-Target-Url, Authorization, X-Custom-Headers, X-Use-Sso'
+    'Content-Type, Accept, X-Target-Url, Authorization, X-Custom-Headers, X-Use-Sso, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID'
   );
+  // Id сессии сервер выдаёт в заголовке ответа, а читать со страницы
+  // браузер разрешает только открытые заголовки.
+  res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version, Content-Type');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
 
@@ -507,6 +513,10 @@ const server = http.createServer(async (req, res) => {
 
       const respHeaders = { ...upstreamResp.headers };
       ['transfer-encoding', 'connection', 'keep-alive'].forEach((h) => delete respHeaders[h]);
+      // Как и в прямом пути: разрешения странице выдаёт прокси, а не цель.
+      for (const h of Object.keys(respHeaders)) {
+        if (h.toLowerCase().startsWith('access-control-')) delete respHeaders[h];
+      }
       res.writeHead(upstreamResp.statusCode, respHeaders);
       res.end(upstreamResp.body);
     } catch (err) {
@@ -556,6 +566,12 @@ const server = http.createServer(async (req, res) => {
 
     const respHeaders = { ...upRes.headers };
     ['transfer-encoding', 'connection', 'keep-alive'].forEach((h) => delete respHeaders[h]);
+    // CORS-заголовки цели убираем: разрешения странице выдаёт прокси
+    // (setCors), и чужое «Expose-Headers» без Mcp-Session-Id прятало бы
+    // от неё id сессии MCP.
+    for (const h of Object.keys(respHeaders)) {
+      if (h.toLowerCase().startsWith('access-control-')) delete respHeaders[h];
+    }
     res.writeHead(code, respHeaders);
 
     const capture = createCaptureStream('Response body');
