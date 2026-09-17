@@ -333,6 +333,22 @@ class ToolSandbox {
         return { closed: true, error: (e && e.message) || String(e) };
       }
 
+      // Подсказки при наведении — так же, как в окнах приложения: любому
+      // элементу с классом hint и атрибутом title достаётся знак вопроса
+      // и курсор-подсказка. Стиль кладётся один раз и переживает окно:
+      // тело документа восстанавливается, заголовок — нет, и так и надо.
+      if (!document.getElementById('agent-hint-style')) {
+        const st = document.createElement('style');
+        st.id = 'agent-hint-style';
+        st.textContent =
+          '.hint{cursor:help}' +
+          '.hint::after{content:"?";display:inline-block;margin-left:5px;width:14px;height:14px;' +
+          'line-height:14px;text-align:center;border-radius:50%;background:#e4e4ea;color:#555;' +
+          'font:600 10px/14px system-ui,sans-serif;vertical-align:1px}' +
+          '.hint:hover::after{background:#6c5ce7;color:#fff}';
+        (document.head || document.documentElement).appendChild(st);
+      }
+
       try {
         document.body.innerHTML = '';
         await render((value) => finish({ closed: false, value }));

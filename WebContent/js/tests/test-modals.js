@@ -438,7 +438,11 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
          const l = hintOf(t);
          return l && (l.getAttribute('title') || '').length > 40;
        }), labels.map(l => l.textContent).join('/'));
-    ok('о подсказке видно, что она есть', labels.every(l => !!l.querySelector('span')));
+    // Знак вопроса рисует стиль (.lbl-hint::after), лишней разметки в
+    // подписи нет — только класс.
+    ok('о подсказке видно, что она есть', labels.length >= 3 && labels.every(l => !l.querySelector('span')));
+    ok('пояснение к классу сложности тоже стало подсказкой',
+       /подсказку при выборе модели/.test((hintOf('Класс сложности') || { getAttribute: () => '' }).getAttribute('title') || ''));
     ok('та же подсказка и на самом поле',
        (document.getElementById('me_ctx').getAttribute('title') || '').length > 40);
 
@@ -523,6 +527,130 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ui.closeSandboxDialog();
     await wait(1200);
     ok('после закрытия отсчёт не продолжает тикать', expired === 1, String(expired));
+  }
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Подсказки к полям — при наведении ──');
+  {
+    // Правило одно на все окна: мелкий текст под полем уходит в title.
+    // Проверяем на разметке, повторяющей реальные формы приложения.
+    ui._showModal('Проверка', `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+        Вступление к разделу — не пояснение к полю.
+      </div>
+      <div class="form-group" id="g_plain">
+        <label>Таймаут, секунд</label>
+        <input id="h_timeout" type="number">
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+          Зависший инструмент вернёт <code>ошибку</code> вместо ожидания.
+        </div>
+      </div>
+      <div class="form-group" id="g_rows">
+        <label class="check-row"><input type="checkbox" id="h_https"> Требовать https</label>
+        <div style="font-size:11px;color:var(--text-muted);margin:2px 0 8px 22px;">По http токен уходит открытым.</div>
+        <label class="check-row"><input type="checkbox" id="h_local"> Разрешить localhost</label>
+        <div style="font-size:11px;color:var(--text-muted);margin:2px 0 0 22px;">Нужно для сервера на этой машине.</div>
+      </div>
+      <div class="form-group" id="g_radio">
+        <label>Режим</label>
+        <label class="check-row"><input type="radio" name="m"> Мягкий</label>
+        <label class="check-row"><input type="radio" name="m"> Строгий</label>
+        <div style="font-size:11px;color:var(--text-muted);">Как агент спрашивает разрешение.</div>
+      </div>
+      <div class="form-group" id="g_buttons">
+        <button class="btn btn-secondary btn-sm" id="h_check">Проверить</button>
+        <button class="btn btn-secondary btn-sm" id="h_gen">Сгенерировать файлы</button>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Соберёт config.js по вашим значениям.</div>
+      </div>
+      <div class="form-group" id="g_keep">
+        <label>Ключ</label>
+        <input id="h_key">
+        <div style="font-size:11px;color:var(--warning);">Ключ хранится в браузере — осторожно.</div>
+        <div id="h_status" style="font-size:11px;color:var(--text-muted);">проверяется…</div>
+        <div style="font-size:11px;color:var(--text-muted);">Получить ключ: <a href="#">здесь</a></div>
+        <div class="keep-visible" style="font-size:11px;color:var(--text-muted);">Оставлено на виду намеренно.</div>
+      </div>
+    `, null, null);
+    await tick();
+    const modal = document.querySelector('#modals .modal');
+    const lbl = (sel) => modal.querySelector(sel);
+
+    const plainLabel = lbl('#g_plain label');
+    ok('пояснение ушло в подсказку подписи',
+       /Зависший инструмент вернёт ошибку вместо ожидания/.test(plainLabel.getAttribute('title') || ''),
+       plainLabel.getAttribute('title'));
+    ok('подпись помечена знаком вопроса', plainLabel.classList.contains('lbl-hint'));
+    ok('та же подсказка над самим полем',
+       /Зависший/.test(document.getElementById('h_timeout').getAttribute('title') || ''));
+    ok('мелкого текста под полем больше нет', !/Зависший/.test(lbl('#g_plain').textContent));
+
+    const rows = modal.querySelectorAll('#g_rows label');
+    ok('у каждого флажка — своя подсказка',
+       /открытым/.test(rows[0].getAttribute('title') || '') && /этой машине/.test(rows[1].getAttribute('title') || '') &&
+       !/этой машине/.test(rows[0].getAttribute('title') || ''),
+       [rows[0].getAttribute('title'), rows[1].getAttribute('title')].join(' | '));
+
+    const radio = modal.querySelectorAll('#g_radio label');
+    ok('пояснение к группе вариантов — у заголовка группы, а не у последнего варианта',
+       /разрешение/.test(radio[0].getAttribute('title') || '') && !radio[2].getAttribute('title'),
+       [radio[0].getAttribute('title'), radio[2].getAttribute('title')].join(' | '));
+
+    ok('пояснение к действию — подсказкой над его кнопкой',
+       /config\.js/.test(document.getElementById('h_gen').getAttribute('title') || '') &&
+       !document.getElementById('h_check').getAttribute('title') &&
+       !/Соберёт/.test(lbl('#g_buttons').textContent));
+
+    const keep = lbl('#g_keep').textContent;
+    ok('предупреждение остаётся на виду', /осторожно/.test(keep));
+    ok('текст, который обновляет код, остаётся на месте', !!document.getElementById('h_status'));
+    ok('текст со ссылкой остаётся — ссылку в подсказку не спрячешь', /Получить ключ/.test(keep));
+    ok('от превращения можно отказаться явно', /Оставлено на виду/.test(keep));
+    ok('вступление к разделу не трогается', /Вступление к разделу/.test(modal.textContent));
+
+    // Дорисованное после открытия — тем же правилом.
+    const late = document.createElement('div');
+    late.className = 'form-group';
+    late.innerHTML = '<label>Поздно</label><input id="h_late">' +
+      '<div style="font-size:11px;color:var(--text-muted);">Появилось после открытия окна.</div>';
+    modal.appendChild(late);
+    await tick();
+    ok('подсказки в дорисованном содержимом тоже превращаются',
+       /после открытия/.test(late.querySelector('label').getAttribute('title') || '') &&
+       !/после открытия/.test(late.textContent), late.innerHTML.slice(0, 120));
+
+    // Растягивание.
+    ok('окно формы растягивается', modal.classList.contains('modal-resizable'));
+    document.querySelector('#modals .modal-actions .btn-secondary').click();
+
+    const q = ui._confirm('Удалить?');
+    await tick();
+    ok('вопрос «да/нет» не растягивается — тянуть там нечего',
+       !document.querySelector('#modals .modal').classList.contains('modal-resizable'));
+    document.querySelector('#modals .modal-actions .btn-secondary').click();
+    await q;
+
+    // Форма, которую рисует инструмент: подсказка поля — при наведении.
+    const pf = ui.showToolFormModal({ title: 'С подсказками', fields: [
+      { name: 'city', label: 'Город', type: 'text', hint: 'Где <b>доставка</b>' },
+      { name: 'kind', label: 'Тип', type: 'radio', hint: 'Как везти',
+        options: [{ value: 'a', label: 'А' }, { value: 'b', label: 'Б' }] },
+      { name: 'ok', label: 'Срочно', type: 'checkbox', hint: 'Дороже вдвое' },
+    ] });
+    await tick();
+    const fm = document.querySelector('#modals .modal');
+    const fl = fm.querySelectorAll('label');
+    ok('подсказка поля формы инструмента — при наведении на подпись',
+       fl[0].classList.contains('lbl-hint') && fl[0].getAttribute('title') === 'Где <b>доставка</b>',
+       fl[0].getAttribute('title'));
+    ok('и на самом поле', document.getElementById('tf_0').getAttribute('title') === 'Где <b>доставка</b>');
+    ok('разметка из подсказки не исполняется', !fm.querySelector('b'));
+    ok('у группы переключателей подсказка — у заголовка группы',
+       /Как везти/.test(fm.querySelector('#tf_1 > label').getAttribute('title') || ''));
+    ok('у флажка — у его подписи', /Дороже/.test(fm.querySelector('#tf_2').closest('label').getAttribute('title') || ''));
+    ok('мелкого текста подсказок в форме нет', !/Где|Как везти|Дороже/.test(fm.textContent));
+    ok('форма инструмента растягивается', fm.classList.contains('modal-resizable'));
+    document.querySelector('#modals .modal-actions .btn-secondary').click();
+    await pf;
   }
 
   console.log('\n' + '='.repeat(46));

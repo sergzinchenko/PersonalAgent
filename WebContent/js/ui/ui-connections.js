@@ -461,7 +461,7 @@ Object.assign(UI.prototype, {
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <div class="form-group" style="flex:1;min-width:190px;">
-          <label class="lbl-hint" title="${HINTS.ctx}">Окно контекста<span>?</span></label>
+          <label class="lbl-hint" title="${HINTS.ctx}">Окно контекста</label>
           <input type="number" id="me_ctx" min="0" value="${ctx}" placeholder="0 — неизвестно"
                  title="${HINTS.ctx}">
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;display:flex;gap:6px;align-items:center;">
@@ -471,12 +471,12 @@ Object.assign(UI.prototype, {
           </div>
         </div>
         <div class="form-group" style="flex:1;min-width:190px;">
-          <label class="lbl-hint" title="${HINTS.tokens}">max_tokens<span>?</span></label>
+          <label class="lbl-hint" title="${HINTS.tokens}">max_tokens</label>
           <input type="number" id="me_tokens" min="1" value="${m ? m.maxTokens : defTokens}"
                  title="${HINTS.tokens}">
         </div>
         <div class="form-group" style="flex:1;min-width:190px;">
-          <label class="lbl-hint" title="${HINTS.temp}">Температура<span>?</span></label>
+          <label class="lbl-hint" title="${HINTS.temp}">Температура</label>
           <input type="number" id="me_temp" step="0.1" min="0" max="2" value="${m ? m.temperature : 0.7}"
                  title="${HINTS.temp}">
         </div>

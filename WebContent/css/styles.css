@@ -2212,9 +2212,13 @@ iframe.sandbox-dialog-view {
    подсказке вообще узнали: невидимый title читают только те, кто и так
    знает, что он там есть. */
 .lbl-hint { cursor: help; }
-.lbl-hint > span {
+/* Знак вопроса рисуется стилем, а не разметкой: подсказки превращаются из
+   текста автоматически (см. _applyHoverHints), и лишний элемент в подписи
+   пришлось бы вставлять туда же — а подписи бывают и с полем внутри. */
+.lbl-hint::after {
+  content: '?';
   display: inline-block;
-  margin-left: 4px;
+  margin-left: 5px;
   width: 13px;
   height: 13px;
   line-height: 13px;
@@ -2224,8 +2228,11 @@ iframe.sandbox-dialog-view {
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 600;
+  text-transform: none;
+  vertical-align: 1px;
+  flex: none;
 }
-.lbl-hint:hover > span { background: var(--accent); color: #fff; }
+.lbl-hint:hover::after { background: var(--accent); color: #fff; }
 
 /* Место под «Заметкой» до пробы не пустует: там сказано, что в нём
    появится и как это получить. */
@@ -2274,3 +2281,24 @@ iframe.sandbox-dialog-view {
   cursor: pointer;
 }
 .wait-stop:hover { color: var(--accent); }
+
+
+/* ===== РАСТЯГИВАЕМОЕ ОКНО =====
+   Тянется за правый нижний угол. Размер при открытии закреплён как
+   наименьший (см. _makeResizable), здесь снят только потолок: обычные 520
+   пикселей ширины и 80% высоты мешали бы растянуть окно. */
+.modal.modal-resizable {
+  resize: both;
+  overflow: auto;
+  max-width: 96vw;
+  max-height: 92vh;
+}
+.modal.modal-resizable:not(.modal-wide)::after {
+  content: '⁘';
+  position: sticky;
+  float: right;
+  bottom: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  pointer-events: none;
+}

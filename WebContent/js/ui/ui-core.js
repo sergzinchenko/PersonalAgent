@@ -497,7 +497,8 @@ class UI {
       this._showModal(title,
         `<p style="font-size:13px;color:var(--text-primary);line-height:1.6;">${this._escHtml(message)}</p>`,
         () => { settled = true; resolve(true); },
-        () => { if (!settled) resolve(false); }
+        () => { if (!settled) resolve(false); },
+        { resizable: false }
       );
     });
   }
@@ -535,9 +536,15 @@ class UI {
   //  options.wide (bool) — широкая раскладка окна.
   //  options.cls (string) — свой класс окна: раскладка, которую незачем
   //  делать общей (см. .modal-model в css/styles.css).
+  //  options.resizable (bool, по умолчанию да) — окно тянется мышью за
+  //  угол, а размер при открытии для него наименьший. Выключается только
+  //  у простых вопросов «да/нет»: тянуть там нечего.
+  //
+  //  Пояснения к полям показываются при наведении, а не мелким текстом
+  //  под полем — см. _applyHoverHints.
   // ══════════════════════════════════════════════
   _showModal(title, bodyHtml, onSave, onCancel, options = {}) {
-    const { wide = false, cls = '' } = options;
+    const { wide = false, cls = '', resizable = true } = options;
     const id = 'modal_' + uid();
     const modals = document.getElementById('modals');
     modals.innerHTML = `
@@ -552,6 +559,11 @@ class UI {
         </div>
       </div>
     `;
+
+    const box = modals.querySelector('.modal');
+    this._applyHoverHints(box);
+    this._watchModalHints(modals);
+    if (resizable) this._makeResizable(box);
 
     // Esc — единственный способ закрыть окно помимо кнопок. Слушатель
     // глобальный (фокус может быть где угодно внутри формы) и снимает сам
@@ -587,6 +599,131 @@ class UI {
     });
 
     return id;
+  }
+
+
+  // ══════════════════════════════════════════════
+  //  Подсказки к полям — при наведении
+  //
+  //  Пояснение к полю читают один раз, а место под формой оно занимает
+  //  всегда. Поэтому мелкий текст под полем превращается в подсказку:
+  //  текст уходит в title подписи (и самих полей ввода рядом с ней), у
+  //  подписи появляется знак вопроса, а сам текст из формы убирается.
+  //
+  //  Делается это здесь, одним проходом по готовому окну, а не правкой
+  //  каждой из полусотни форм: так правило одно, и новая форма получает
+  //  его сама, без того чтобы кто-то о нём помнил.
+  //
+  //  Что считается пояснением к полю — узко и намеренно:
+  //   • непосредственный потомок .form-group — то есть текст ВНУТРИ поля
+  //     формы, а не вступление к разделу;
+  //   • мелкий шрифт (11px) или явный класс field-hint;
+  //   • без id и без элементов управления внутри: у текста с id его
+  //     обновляет код (состояние, результат проверки), а ссылку или
+  //     кнопку в подсказку не спрячешь;
+  //   • не предупреждение: текст цвета warning/danger остаётся на виду —
+  //     о риске должны прочесть, а не догадаться навести мышь.
+  //  Отказаться от превращения можно классом keep-visible.
+  // ══════════════════════════════════════════════
+  static _isFieldHint(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName;
+    if (tag !== 'DIV' && tag !== 'SMALL' && tag !== 'P' && tag !== 'SPAN') return false;
+    if (el.classList.contains('keep-visible')) return false;
+    const explicit = el.classList.contains('field-hint');
+    if (!explicit) {
+      const st = (el.getAttribute('style') || '').replace(/\s+/g, '');
+      if (!/font-size:1[01]px/.test(st)) return false;
+      if (/var\(--(warning|danger|error)\)/.test(st)) return false;
+    }
+    if (el.id || el.querySelector('[id], input, select, textarea, button, a')) return false;
+    return !!el.textContent.trim();
+  }
+
+  _applyHoverHints(root) {
+    if (!root || !root.querySelectorAll) return;
+    const groups = [];
+    if (root.matches && root.matches('.form-group')) groups.push(root);
+    groups.push(...root.querySelectorAll('.form-group'));
+
+    for (const group of groups) {
+      let label = null;
+      let controls = [];
+      // Группа переключателей: заголовок группы, под ним несколько
+      // подписей-вариантов, и одно пояснение в конце. Оно про группу, а
+      // не про последний вариант — привязываем к заголовку.
+      let title = null;
+      let rows = 0;
+      // Группа без подписи и полей — только кнопки действий. Пояснение в
+      // ней относится к кнопке прямо перед ним: «Сгенерировать файлы» и
+      // абзац о том, что именно сгенерируется.
+      let lastButton = null;
+      for (const el of Array.from(group.children)) {
+        if (el.tagName === 'BUTTON') { lastButton = el; continue; }
+        if (el.tagName === 'LABEL') {
+          if (el.classList.contains('check-row')) rows++;
+          else { title = el; rows = 0; }
+          label = el;
+          controls = [];
+          continue;
+        }
+
+        if (UI._isFieldHint(el)) {
+          const text = el.textContent.replace(/\s+/g, ' ').trim();
+          const owner = (rows > 1 && title) ? title : label;
+          const targets = owner ? [owner, ...(owner === label ? controls : [])]
+            : (controls.length ? controls : (lastButton ? [lastButton] : []));
+          rows = 0;
+          if (!targets.length) continue;   // привязать не к чему — пусть остаётся
+          for (const t of targets) {
+            const prev = t.getAttribute('title');
+            t.setAttribute('title', prev ? prev + '\n\n' + text : text);
+          }
+          if (owner) owner.classList.add('lbl-hint');
+          el.remove();
+          continue;
+        }
+
+        // Поля ввода запоминаем, чтобы подсказка всплывала и над ними,
+        // а не только над подписью: мышь чаще у поля, чем у его названия.
+        if (el.matches && el.matches('input, select, textarea')) controls.push(el);
+        else if (el.querySelectorAll) controls.push(...el.querySelectorAll('input, select, textarea'));
+      }
+    }
+  }
+
+  // Часть окон дорисовывает содержимое уже после открытия: вкладки,
+  // списки, ответ проверки. Подсказки в таком содержимом превращаются
+  // тем же правилом — наблюдатель один на все окна.
+  _watchModalHints(modals) {
+    if (this._hintObserver || !modals || typeof MutationObserver === 'undefined') return;
+    this._hintObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const n of m.addedNodes) {
+          if (n.nodeType !== 1) continue;
+          const group = n.closest ? n.closest('.form-group') : null;
+          this._applyHoverHints(group || n);
+        }
+      }
+    });
+    this._hintObserver.observe(modals, { childList: true, subtree: true });
+  }
+
+  // ── Растягиваемое окно ──
+  // Размер при открытии становится наименьшим: окно рассчитано на своё
+  // содержимое, и меньше оно уже не помещается. Ширина при этом
+  // закрепляется в пикселях — иначе снятие обычного предела ширины
+  // (520px) растянуло бы окно на весь экран сразу при открытии.
+  _makeResizable(box) {
+    if (!box) return;
+    const w = box.offsetWidth;
+    const h = box.offsetHeight;
+    if (w > 0 && h > 0) {
+      box.style.width = w + 'px';
+      box.style.minWidth = w + 'px';
+      box.style.minHeight = h + 'px';
+    }
+    box.classList.add('modal-resizable');
   }
 
 

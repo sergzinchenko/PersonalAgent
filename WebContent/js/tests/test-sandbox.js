@@ -838,6 +838,11 @@ class FakeDB {
     ok('закрытие окна заказано приложением',
        posted.some(m => m.type === 'host' && m.kind === 'dialog' && m.payload.action === 'close'));
     ok('документ кадра возвращён в прежний вид', !window.document.getElementById('z'));
+    // Подсказки при наведении в своей вёрстке: элементу с классом hint и
+    // атрибутом title достаётся знак вопроса — как в окнах приложения.
+    const hintStyle = window.document.getElementById('agent-hint-style');
+    ok('в окне инструмента есть стиль подсказок при наведении',
+       !!hintStyle && /\.hint::after/.test(hintStyle.textContent), hintStyle && hintStyle.textContent.slice(0, 60));
 
     // Человек закрыл окно — это ответ, просто отрицательный.
     const done2 = api.handle({

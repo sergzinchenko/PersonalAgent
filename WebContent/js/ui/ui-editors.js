@@ -242,9 +242,13 @@ Object.assign(UI.prototype, {
       const rows = fields.map((f, i) => {
         const id = idOf(i);
         const label = this._escHtml(f.label || f.name || '');
-        const hint = f.hint
-          ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${this._escHtml(f.hint)}</div>`
-          : '';
+        // Подсказка поля — при наведении, как у всех форм приложения: и на
+        // подписи (со знаком вопроса), и на самом поле. Разметка здесь
+        // явная, а не через общее превращение текста: у группы
+        // переключателей несколько подписей, и угадывать, к какой из них
+        // относится пояснение, незачем — оно известно из описания.
+        const tip = f.hint ? ` title="${this._escHtml(f.hint)}"` : '';
+        const tipCls = f.hint ? ' lbl-hint' : '';
         const req = f.required ? ' <span style="color:var(--danger);">*</span>' : '';
 
         if (f.type === 'info') {
@@ -253,16 +257,16 @@ Object.assign(UI.prototype, {
         }
         if (f.type === 'checkbox') {
           return `<div class="form-group">
-                    <label class="check-row">
+                    <label class="check-row${tipCls}"${tip}>
                       <input type="checkbox" id="${id}" ${f.value ? 'checked' : ''}> ${label}
-                    </label>${hint}
+                    </label>
                   </div>`;
         }
         if (f.type === 'select') {
           const opts = (f.options || []).map(o =>
             `<option value="${this._escHtml(o.value)}" ${o.value === f.value ? 'selected' : ''}>${this._escHtml(o.label)}</option>`).join('');
-          return `<div class="form-group"><label>${label}${req}</label>
-                    <select id="${id}">${opts}</select>${hint}</div>`;
+          return `<div class="form-group"><label class="${tipCls.trim()}"${tip}>${label}${req}</label>
+                    <select id="${id}"${tip}>${opts}</select></div>`;
         }
         if (f.type === 'radio') {
           const opts = (f.options || []).map((o, k) =>
@@ -270,20 +274,20 @@ Object.assign(UI.prototype, {
                <input type="radio" name="${id}" value="${this._escHtml(o.value)}" ${o.value === f.value ? 'checked' : ''}>
                ${this._escHtml(o.label)}
              </label>`).join('');
-          return `<div class="form-group" id="${id}"><label>${label}${req}</label>${opts}${hint}</div>`;
+          return `<div class="form-group" id="${id}"><label class="${tipCls.trim()}"${tip}>${label}${req}</label>${opts}</div>`;
         }
         if (f.type === 'textarea') {
-          return `<div class="form-group"><label>${label}${req}</label>
-                    <textarea id="${id}" rows="${f.rows || 4}"
-                      placeholder="${this._escHtml(f.placeholder || '')}">${this._escHtml(f.value || '')}</textarea>${hint}</div>`;
+          return `<div class="form-group"><label class="${tipCls.trim()}"${tip}>${label}${req}</label>
+                    <textarea id="${id}" rows="${f.rows || 4}"${tip}
+                      placeholder="${this._escHtml(f.placeholder || '')}">${this._escHtml(f.value || '')}</textarea></div>`;
         }
         const type = f.type === 'number' ? 'number' : (f.type === 'password' ? 'password' : (f.type === 'date' ? 'date' : 'text'));
         const minmax = f.type === 'number'
           ? `${f.min !== undefined ? ` min="${f.min}"` : ''}${f.max !== undefined ? ` max="${f.max}"` : ''}${f.step !== undefined ? ` step="${f.step}"` : ''}`
           : '';
-        return `<div class="form-group"><label>${label}${req}</label>
-                  <input type="${type}" id="${id}"${minmax} value="${this._escHtml(f.value === undefined ? '' : f.value)}"
-                    placeholder="${this._escHtml(f.placeholder || '')}">${hint}</div>`;
+        return `<div class="form-group"><label class="${tipCls.trim()}"${tip}>${label}${req}</label>
+                  <input type="${type}" id="${id}"${minmax}${tip} value="${this._escHtml(f.value === undefined ? '' : f.value)}"
+                    placeholder="${this._escHtml(f.placeholder || '')}"></div>`;
       }).join('');
 
       const head = spec.description
