@@ -56,6 +56,8 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     'js/ui/ui-editors.js',
     'js/ui/ui-review.js',
     'js/ui/ui-transfer.js',
+    'js/ui/ui-about.js',
+    'js/ui/ui-backup.js',
   ];
   window.eval(files.map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n;\n') + '\nwindow.__UI = UI;\n');
   const UI = window.__UI;
@@ -946,6 +948,63 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     await tick();
     ok('результат замены виден', /Заменено/.test(rb.textContent) && rb.disabled);
     document.querySelector('#modals .modal-actions .btn-primary').click();
+  }
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Первый запуск: история релизов ──');
+  {
+    let marked = false;
+    ui.agent.about = {
+      releaseCount: () => 3,
+      all: () => [
+        { n: 1, title: 'Начало', items: ['Чаты'] },
+        { n: 2, title: 'Инструменты', items: ['Песочница'] },
+        { n: 3, title: 'Навыки', items: ['Проверка формы'] },
+      ],
+      unread: async () => [],
+      markRead: async () => { marked = true; },
+    };
+    ui.updateReleaseBadge = async () => {};
+    ui.showBackupImportModal = async () => 'восстановление';
+
+    const title = () => (document.querySelector('#modals h2') || {}).textContent || '';
+    const first = ui.offerFirstRunRestore();
+    await tick();
+
+    const hist = document.getElementById('first_run_history');
+    ok('в окне первого запуска есть кнопка истории релизов',
+       /Первый запуск/.test(title()) && !!hist && /История релизов/.test(hist.textContent) &&
+       /всего релизов: 3/.test(hist.getAttribute('title') || ''),
+       hist && hist.textContent);
+    ok('кнопки выбора остались на местах',
+       /Начать с нуля/.test(document.querySelector('#modals .modal-actions .btn-secondary').textContent) &&
+       /Восстановить/.test(document.querySelector('#modals .modal-actions .btn-primary').textContent));
+
+    hist.click();
+    for (let i = 0; i < 50 && !/История доработок/.test(title()); i++) await tick(1);
+    ok('по кнопке открывается история релизов', /История доработок/.test(title()));
+    ok('в ней все релизы, от новых к старым',
+       /Релиз 3/.test(document.querySelector('#modals').textContent) &&
+       document.querySelector('#modals').textContent.indexOf('Релиз 3') < document.querySelector('#modals').textContent.indexOf('Релиз 1'));
+
+    document.querySelector('#modals .modal-actions .btn-primary').click();
+    for (let i = 0; i < 50 && !/Первый запуск/.test(title()); i++) await tick(1);
+    ok('после «Понятно» возвращается окно первого запуска', /Первый запуск/.test(title()));
+    ok('просмотр из первого запуска не отмечает релизы прочитанными', !marked);
+
+    document.getElementById('first_run_history').click();
+    for (let i = 0; i < 50 && !/История доработок/.test(title()); i++) await tick(1);
+    pressEsc();
+    for (let i = 0; i < 50 && !/Первый запуск/.test(title()); i++) await tick(1);
+    ok('и после закрытия по Esc — тоже', /Первый запуск/.test(title()));
+
+    document.querySelector('#modals .modal-actions .btn-secondary').click();
+    ok('«Начать с нуля» по-прежнему завершает выбор', (await first) === false);
+
+    const second = ui.offerFirstRunRestore();
+    await tick();
+    document.querySelector('#modals .modal-actions .btn-primary').click();
+    ok('«Восстановить из файла» по-прежнему ведёт к восстановлению', (await second) === 'восстановление');
   }
 
   console.log('\n' + '='.repeat(46));

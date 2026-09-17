@@ -103,16 +103,21 @@ Object.assign(UI.prototype, {
   // ── «Что нового» ──
   // Показывает возможности, а не изменения в коде (см. core/changelog.js).
   // markRead=true — обычный случай: окно показано, значит прочитано.
-  async showWhatsNewModal({ onlyUnread = false, markRead = true } = {}) {
+  // onClose — если окно открыто посреди другого сценария (например, из
+  // окна первого запуска), тот должен продолжиться после закрытия: окно у
+  // приложения одно, и история заменяет собой то, откуда её открыли.
+  async showWhatsNewModal({ onlyUnread = false, markRead = true, onClose = null } = {}) {
     const about = this.agent.about;
-    if (!about) return;
+    if (!about) { onClose?.(); return; }
+    let closed = false;
+    const done = onClose ? () => { if (!closed) { closed = true; onClose(); } } : null;
 
     const list = onlyUnread ? await about.unread() : about.all();
     if (!list.length) {
       this._showModal('✨ Что нового', `
         <p style="font-size:13px;color:var(--text-secondary);">
           Непрочитанного нет. Всего релизов: ${about.releaseCount()}.
-        </p>`, null);
+        </p>`, done, done);
       return;
     }
 
@@ -132,7 +137,7 @@ Object.assign(UI.prototype, {
         Подробности любого пункта можно спросить у самого агента.
       </p>
       ${rows}
-    `, null, null, { wide: true });
+    `, done, done, { wide: true });
 
     const close = document.querySelector('#modals .btn-primary');
     if (close) close.textContent = 'Понятно';

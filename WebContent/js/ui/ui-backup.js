@@ -351,7 +351,23 @@ Object.assign(UI.prototype, {
   // Возвращает true, если восстановление запущено (страница вот-вот
   // перезагрузится и спрашивать имя уже не нужно).
   async offerFirstRunRestore() {
-    const wants = await new Promise((resolve) => {
+    // Выбор повторяется, пока человек смотрит историю релизов: окно у
+    // приложения одно, и история на время заменяет собой это окно. Без
+    // возврата сюда запуск так и остался бы ждать ответа, которого уже
+    // негде дать.
+    for (;;) {
+      const choice = await this._firstRunChoice();
+      if (choice === 'history') {
+        await new Promise((resolve) => this.showWhatsNewModal({ onlyUnread: false, markRead: false, onClose: resolve }));
+        continue;
+      }
+      if (choice !== 'restore') return false;
+      return await this.showBackupImportModal({ firstRun: true });
+    }
+  },
+
+  _firstRunChoice() {
+    return new Promise((resolve) => {
       let settled = false;
       this._showModal('👋 Первый запуск', `
         <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:10px;">
@@ -362,20 +378,39 @@ Object.assign(UI.prototype, {
         <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">
           Копии нет? Тогда начнём с чистого листа — и первым делом придумаем агенту имя.
         </p>
-      `, () => { settled = true; resolve(true); }, () => { if (!settled) resolve(false); });
+      `, () => { settled = true; resolve('restore'); }, () => { if (!settled) { settled = true; resolve('fresh'); } });
 
       // Кнопки окна общие для всего приложения («Отмена» / «Сохранить»),
       // а здесь выбирают между двумя равноправными путями — подписи
       // должны называть именно их, иначе «Сохранить» предлагает сохранить
       // то, чего ещё нет.
-      const save = document.querySelector('#modals .modal-actions .btn-primary');
+      const actions = document.querySelector('#modals .modal-actions');
+      const save = actions?.querySelector('.btn-primary');
       if (save) save.textContent = '📂 Восстановить из файла';
-      const cancel = document.querySelector('#modals .modal-actions .btn-secondary');
+      const cancel = actions?.querySelector('.btn-secondary');
       if (cancel) cancel.textContent = 'Начать с нуля';
-    });
 
-    if (!wants) return false;
-    return await this.showBackupImportModal({ firstRun: true });
+      // История релизов — посмотреть, что умеет агент и как менялся,
+      // прежде чем решать. Не выбор, а справка: после неё окно вернётся.
+      const count = this.agent.about?.releaseCount?.() || 0;
+      if (actions && count) {
+        const hist = document.createElement('button');
+        hist.type = 'button';
+        hist.className = 'btn btn-secondary btn-sm modal-aside-btn';
+        hist.id = 'first_run_history';
+        hist.textContent = '📜 История релизов';
+        hist.title = `Что появлялось в агенте от релиза к релизу — всего релизов: ${count}. ` +
+          'После просмотра вы вернётесь к этому окну.';
+        hist.addEventListener('click', () => {
+          if (settled) return;
+          settled = true;
+          resolve('history');
+        });
+        // В конец разметки, а слева — стилем (order: -1): поиск первой
+        // .btn-secondary должен по-прежнему находить «Начать с нуля».
+        actions.appendChild(hist);
+      }
+    });
   },
 
 });

@@ -2338,6 +2338,10 @@ iframe.sandbox-dialog-view {
 
 /* ===== ПРОВЕРКА ФОРМЫ МОДЕЛЬЮ (ui/ui-review.js) ===== */
 .modal-actions .review-btn { margin-right: auto; }
+.modal-actions .modal-aside-btn { order: -1; margin-right: auto; align-self: center; }
+/* Рядом с кнопкой-справкой подписи кнопок выбора не переносятся: в
+   узком окне «Начать с нуля» разваливалось на две строки. */
+.modal-actions:has(.modal-aside-btn) .btn { white-space: nowrap; }
 
 .review-panel {
   margin: 14px 0 4px;
