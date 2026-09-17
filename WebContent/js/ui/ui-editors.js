@@ -235,6 +235,7 @@ Object.assign(UI.prototype, {
   showToolFormModal(spec) {
     return new Promise((resolve) => {
       let settled = false;
+      let stopCountdown = () => {};
       const fields = Array.isArray(spec.fields) ? spec.fields : [];
       const idOf = (i) => 'tf_' + i;
 
@@ -291,9 +292,13 @@ Object.assign(UI.prototype, {
         : '';
 
       // Откуда взялось окно, должно быть видно: форму показывает не
-      // приложение, а инструмент, и человек вправе это знать.
-      const foot = `<div style="font-size:11px;color:var(--text-muted);margin-top:10px;">
-          Форму запросил инструмент агента. Введённое уйдёт в него, а не в переписку.
+      // приложение, а инструмент, и человек вправе это знать. Рядом —
+      // сколько ещё ждут ответа: пока форма открыта, ход агента стоит.
+      const foot = `<div style="font-size:11px;color:var(--text-muted);margin-top:10px;
+                                display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <span style="flex:1;min-width:200px;">Форму запросил инструмент агента.
+            Введённое уйдёт в него, а не в переписку.</span>
+          ${this._waitCountdownHtml(spec.seconds, 'tf_wait')}
         </div>`;
 
       this._showModal('📝 ' + this._escHtml(spec.title || 'Данные для инструмента'),
@@ -319,9 +324,25 @@ Object.assign(UI.prototype, {
             // сложит её как текст — ошибка тихая и обнаруживается поздно.
             values[f.name] = f.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
           });
+          stopCountdown();
           resolve({ submitted: true, values });
         },
-        () => { if (!settled) resolve({ submitted: false }); });
+        () => { stopCountdown(); if (!settled) resolve({ submitted: false }); });
+
+      // Отсчёт заводится после отрисовки: его элементы появляются вместе
+      // с окном. Истёк — окно закрывается само, а инструмент получает
+      // пометку timedOut и отвечает тем, что задал заранее.
+      stopCountdown = this._startWaitCountdown(spec.seconds, {
+        box: document.getElementById('tf_wait'),
+        label: document.getElementById('tf_wait_left'),
+        stop: document.getElementById('tf_wait_stop'),
+      }, () => {
+        if (settled) return;
+        settled = true;
+        const modals = document.getElementById('modals');
+        if (modals) modals.innerHTML = '';
+        resolve({ submitted: false, timedOut: true });
+      });
 
       setTimeout(() => {
         const first = document.getElementById(idOf(fields.findIndex(f => f.type !== 'info')));
@@ -347,7 +368,73 @@ Object.assign(UI.prototype, {
   //  остаётся там, где создан, и меняется только его оформление, а рамка
   //  с заголовком подкладывается под него отдельным слоем.
   // ══════════════════════════════════════════════
-  showSandboxDialog({ frame, title, width, height, onClose } = {}) {
+  // ── Обратный отсчёт ожидания ──
+  // Окно ждёт человека, а человек может отойти от экрана и не вернуться:
+  // ход агента будет стоять, пока кто-нибудь не заметит. Поэтому у окна,
+  // открытого инструментом, всегда видно, сколько его ещё будут ждать, и
+  // отсчёт можно остановить — тогда отвечают спокойно, сколько нужно.
+  //
+  // Заводится одним вызовом на форму и на окно: правило у них общее.
+  // Возвращает stop() — снять отсчёт, когда окно закрылось само.
+  _startWaitCountdown(seconds, els, onExpire) {
+    const total = parseInt(seconds, 10) || 0;
+    if (!total || !els || !els.box) return () => {};
+
+    let left = total;
+    let timer = null;
+    const label = els.label;
+    const box = els.box;
+    box.hidden = false;
+
+    const draw = () => {
+      const m = Math.floor(left / 60);
+      const sec = left % 60;
+      if (label) label.textContent = m ? `${m}:${String(sec).padStart(2, '0')}` : `${sec} с`;
+      // Последние полминуты выделяем: до этого числа человек не смотрит.
+      box.classList.toggle('wait-soon', left <= 30);
+    };
+
+    const stop = () => { clearTimeout(timer); timer = null; };
+
+    const tick = () => {
+      left--;
+      if (left <= 0) {
+        stop();
+        box.classList.add('wait-over');
+        if (label) label.textContent = 'время вышло';
+        try { onExpire?.(); } catch (_) {}
+        return;
+      }
+      draw();
+      timer = setTimeout(tick, 1000);
+    };
+
+    draw();
+    timer = setTimeout(tick, 1000);
+
+    // Остановка отсчёта — решение человека: он у экрана, ответит сам.
+    els.stop?.addEventListener('click', () => {
+      stop();
+      box.classList.remove('wait-soon');
+      box.classList.add('wait-held');
+      if (label) label.textContent = 'отсчёт остановлен';
+      els.stop.remove();
+    });
+
+    return stop;
+  },
+
+  // Разметка отсчёта. Одна на оба окна, чтобы выглядели одинаково.
+  _waitCountdownHtml(seconds, id) {
+    if (!seconds) return '';
+    return `<span class="wait-countdown" id="${id}" hidden title="Столько ещё ждут вашего ответа. ` +
+      `Когда время выйдет, окно закроется ответом, который задал инструмент.">` +
+      `<span class="wait-clock">⏳</span><span id="${id}_left"></span>` +
+      `<button type="button" class="wait-stop" id="${id}_stop" ` +
+      `title="Остановить отсчёт и отвечать без спешки">стоп</button></span>`;
+  },
+
+  showSandboxDialog({ frame, title, width, height, seconds, onClose, onExpire } = {}) {
     if (!frame) throw new Error('нет кадра песочницы');
     // Предыдущее окно закрываем молча: два разом невозможны — вызов
     // инструмента в песочнице один за раз.
@@ -367,6 +454,7 @@ Object.assign(UI.prototype, {
         <div class="sandbox-dialog-head">
           <span class="sandbox-dialog-title"></span>
           <span class="sandbox-dialog-mark">окно инструмента</span>
+          ${this._waitCountdownHtml(seconds, 'sd_wait')}
           <button class="sandbox-dialog-close" title="Закрыть (Esc)">✕</button>
         </div>
       </div>`;
@@ -392,6 +480,12 @@ Object.assign(UI.prototype, {
     this._sandboxDialogKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); ask(); } };
     document.addEventListener('keydown', this._sandboxDialogKey);
 
+    this._sandboxDialogStop = this._startWaitCountdown(seconds, {
+      box: shell.querySelector('#sd_wait'),
+      label: shell.querySelector('#sd_wait_left'),
+      stop: shell.querySelector('#sd_wait_stop'),
+    }, onExpire);
+
     this._sandboxDialogShell = shell;
     this._sandboxDialogFrame = frame;
     // Пока окно открыто, страница за ним не прокручивается: кадр
@@ -401,6 +495,8 @@ Object.assign(UI.prototype, {
   },
 
   closeSandboxDialog() {
+    try { this._sandboxDialogStop?.(); } catch (_) {}
+    this._sandboxDialogStop = null;
     if (this._sandboxDialogKey) {
       document.removeEventListener('keydown', this._sandboxDialogKey);
       this._sandboxDialogKey = null;

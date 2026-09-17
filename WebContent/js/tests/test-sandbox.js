@@ -702,7 +702,9 @@ class FakeDB {
       ],
     });
     ok('форма показана', !!shown && shown.title === 'Заявка');
-    ok('значения вернулись инструменту', res.submitted === true && res.values.a === 1, JSON.stringify(res));
+    ok('значения вернулись инструменту в поле value',
+       res.value.submitted === true && res.value.a === undefined && res.value.values.a === 1,
+       JSON.stringify(res));
     ok('неизвестный тип поля превращается в обычный текст',
        shown.fields.find(f => f.name === 'hack').type === 'text');
     ok('варианты выбора приведены к паре «значение — подпись»',
@@ -724,12 +726,12 @@ class FakeDB {
        [shown.title.length, shown.fields[0].label.length, shown.fields[0].value.length].join('/'));
 
     const empty = await eng._sandboxForm({ fields: [{ type: 'info', text: 'только текст' }] });
-    ok('форма без полей ввода отклоняется', !!empty.error && empty.submitted === false, JSON.stringify(empty));
+    ok('форма без полей ввода отклоняется', !!empty.error, JSON.stringify(empty));
 
     eng.ui.showToolFormModal = async () => ({ submitted: false });
     const cancelled = await eng._sandboxForm({ fields: [{ name: 'x', type: 'text', label: 'X' }] });
     ok('закрытое окно возвращает отказ, а не пустые значения',
-       cancelled.submitted === false && !cancelled.error, JSON.stringify(cancelled));
+       cancelled.value.submitted === false && !cancelled.error, JSON.stringify(cancelled));
 
     // Время в форме — ожидание человека, а не работа инструмента. Причём
     // срок обязан стоять ПОКА окно открыто: продление задним числом не
@@ -847,7 +849,7 @@ class FakeDB {
     const before = eng._activeBudget.deadline;
 
     const opened = await eng._sandboxDialog({ action: 'open', title: 'Выбор', width: 800, height: 400 });
-    ok('окно открыто', opened.opened === true && shown.length === 1, JSON.stringify(opened));
+    ok('окно открыто', opened.value.opened === true && shown.length === 1, JSON.stringify(opened));
     ok('приложению отдан именно кадр песочницы', shown[0].frame === eng.sandbox.frame);
     ok('пока окно открыто, ход агента стоит',
        eng._activeBudget.holds === 1 && eng.sandbox.held === 1,
@@ -855,7 +857,7 @@ class FakeDB {
 
     await new Promise(r => setTimeout(r, 40));
     const res = await eng._sandboxDialog({ action: 'close' });
-    ok('окно закрыто по слову инструмента', res.closed === true && closed === 1);
+    ok('окно закрыто по слову инструмента', res.value.closed === true && closed === 1);
     ok('удержание снято, время возвращено',
        eng._activeBudget.holds === 0 && eng._activeBudget.deadline > before && waited >= 30,
        eng._activeBudget.holds + '/' + waited);
@@ -883,6 +885,89 @@ class FakeDB {
     eng.ui = null;
     const noUi = await eng._sandboxDialog({ action: 'open' });
     ok('без интерфейса тоже', !!noUi.error, JSON.stringify(noUi));
+  }
+
+  console.log('\n── Инструмент и приложение: сквозной обмен ──');
+  {
+    // Все проверки выше смотрят на одну сторону разговора. Между тем
+    // ломается как раз стык: приложение отвечало мосту своим объектом, а
+    // мост берёт из ответа только поле value — и ответ человека пропадал
+    // по дороге, оставляя вызов висеть после закрытия формы.
+    //
+    // Настоящего кадра в jsdom нет (srcdoc там не исполняется), поэтому
+    // кадр заменён живым рантаймом: сообщения ходят те же самые и теми
+    // же путями, только через setTimeout вместо postMessage.
+    const eng = new X.ToolsEngine(new FakeDB());
+    const sb = eng.sandbox;
+    let api = null;
+    const inbox = { postMessage: () => {} };
+    sb._ensureFrame = () => {
+      sb.frame = { contentWindow: inbox };
+      sb.frameReady = Promise.resolve(true);
+      return sb.frameReady;
+    };
+    sb._send = (m) => setTimeout(() => api.handle(m), 0);
+    api = X.ToolSandbox._runtime({
+      global: window,
+      post: (m) => setTimeout(() => sb._onMessage({ source: inbox, data: m }), 0),
+    });
+
+    let shownSpec = null;
+    let formAnswer = { submitted: true, values: { city: 'Тверь', qty: 7 } };
+    eng.ui = {
+      showToolFormModal: async (spec) => { shownSpec = spec; return formAnswer; },
+      noteHumanWait: () => {},
+    };
+    // Предел вызова ставит executeTool; здесь код песочницы запускается
+    // напрямую, поэтому задаём его сами.
+    eng._activeTimeoutMs = 5000;
+
+    // Ровно тот код, на котором это и обнаружилось.
+    const code = "const form = await agent_form({ title: 'Проверка формы', fields: [" +
+      "{ name: 'city', label: 'Город', type: 'text', value: 'Москва' }," +
+      "{ name: 'qty', label: 'Сколько', type: 'number', value: 3 } ] });" +
+      "if (!form.submitted) return { отказ: 'пользователь закрыл форму' };" +
+      "return { получено: form.values };";
+
+    const out = await sb.run(code, {}, { timeoutMs: 5000 });
+    ok('ответ человека доходит до кода инструмента',
+       out && out.получено && out.получено.city === 'Тверь', JSON.stringify(out));
+    ok('вызов завершается, а не остаётся ждать после закрытия формы',
+       !out.error && sb.pending.size === 0, JSON.stringify(out));
+
+    // Отказ человека — тоже ответ, и он тоже должен дойти.
+    formAnswer = { submitted: false };
+    const refused = await sb.run(code, {}, { timeoutMs: 5000 });
+    ok('и отказ доходит', refused && refused['отказ'], JSON.stringify(refused));
+
+    // Срок ответа: по умолчанию — предел вызова.
+    ok('окну задан обратный отсчёт по пределу вызова',
+       shownSpec && shownSpec.seconds === 5, String(shownSpec && shownSpec.seconds));
+
+    // Время вышло: инструмент получает заранее заданный ответ.
+    formAnswer = { submitted: false, timedOut: true };
+    const timedCode = "const f = await agent_form({ seconds: 30, onTimeout: { city: 'Москва' }," +
+      " fields: [{ name: 'city', type: 'text', label: 'Город' }] });" +
+      "return { submitted: f.submitted, timedOut: f.timedOut, city: f.values && f.values.city };";
+    const timed = await sb.run(timedCode, {}, { timeoutMs: 5000 });
+    ok('по истечении срока приходит ответ, заданный инструментом',
+       timed.submitted === true && timed.timedOut === true && timed.city === 'Москва',
+       JSON.stringify(timed));
+    ok('свой срок инструмента передан окну', shownSpec.seconds === 30, String(shownSpec.seconds));
+
+    // Без onTimeout истёкший срок — отказ, а не выдуманные значения.
+    const timedCode2 = "const f = await agent_form({ seconds: 30, fields: [{ name: 'x', type: 'text', label: 'X' }] });" +
+      "return { submitted: f.submitted, timedOut: f.timedOut };";
+    const timed2 = await sb.run(timedCode2, {}, { timeoutMs: 5000 });
+    ok('без заданного ответа истёкший срок — отказ',
+       timed2.submitted === false && timed2.timedOut === true, JSON.stringify(timed2));
+
+    // Файл проверяем тем же путём: у него протокол был правильным, и
+    // сквозная проверка должна это подтверждать, а не только форму.
+    const dl = await sb.run("return await agent_download({ name: 'a.txt', content: 'привет' });",
+      {}, { timeoutMs: 5000 });
+    ok('и скачивание проходит тем же путём', dl && dl.ok === true && dl.filename === 'a.txt',
+       JSON.stringify(dl));
   }
 
   console.log('\n==============================================');

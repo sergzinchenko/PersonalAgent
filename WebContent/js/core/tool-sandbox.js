@@ -250,14 +250,27 @@ class ToolSandbox {
     //
     // Возвращает { submitted: true, values: {...} } либо
     // { submitted: false } — если человек закрыл окно.
-    g.agent_form = function (spec) {
+    // ── Срок ответа ──
+    // Окно ждёт человека, а человек может не вернуться к экрану вовсе.
+    // Поэтому у каждой формы есть обратный отсчёт: по умолчанию — предел
+    // времени на вызов инструмента, но его можно задать своим (seconds)
+    // или снять совсем (seconds: 0). Что вернуть, когда время вышло,
+    // решает инструмент: onTimeout — это заранее заданный ответ, и он
+    // приходит так же, как если бы его ввёл человек, только с пометкой
+    // timedOut. Без onTimeout истёкший срок — отказ.
+    g.agent_form = async function (spec) {
       const o = (spec && typeof spec === 'object') ? spec : {};
-      return hostCall('form', {
+      const res = await hostCall('form', {
         title: String(o.title || 'Данные для инструмента'),
         description: o.description ? String(o.description) : '',
         submitLabel: o.submitLabel ? String(o.submitLabel) : '',
         fields: Array.isArray(o.fields) ? o.fields : [],
+        seconds: o.seconds,
       });
+      if (res && res.timedOut && o.onTimeout && typeof o.onTimeout === 'object') {
+        return { submitted: true, timedOut: true, values: o.onTimeout };
+      }
+      return res;
     };
 
     // ── Своё окно с произвольной вёрсткой ──
@@ -297,6 +310,12 @@ class ToolSandbox {
       // об этом сюда; для инструмента это такой же ответ, как и любой
       // другой, просто отрицательный.
       g.__dialogClosedByUser = () => finish({ closed: true });
+      // Срок ответа вышел. Заранее заданный ответ (onTimeout) приходит
+      // так же, как ответ человека, только с пометкой timedOut; без него
+      // истёкший срок — отказ.
+      g.__dialogTimedOut = () => finish(o.onTimeout && typeof o.onTimeout === 'object'
+        ? { closed: false, timedOut: true, value: o.onTimeout }
+        : { closed: true, timedOut: true });
 
       // Отказ приложения приходит сюда исключением (так устроен мост):
       // отдаём его инструменту обычным ответом, чтобы окно, которое не
@@ -307,6 +326,7 @@ class ToolSandbox {
           title: String(o.title || 'Окно инструмента'),
           width: Math.min(1400, Math.max(320, parseInt(o.width, 10) || 720)),
           height: Math.min(900, Math.max(220, parseInt(o.height, 10) || 480)),
+          seconds: o.seconds,
         });
       } catch (e) {
         g.__dialogClosedByUser = null;
@@ -319,6 +339,7 @@ class ToolSandbox {
         return await answer;
       } finally {
         g.__dialogClosedByUser = null;
+        g.__dialogTimedOut = null;
         document.body.innerHTML = savedBody;
         document.body.className = savedClass;
         // Ответа приложения тут не ждём: инструменту он ничего не даёт, а
@@ -468,6 +489,13 @@ class ToolSandbox {
       // отмена вызова: инструмент получит ответ и решит сам, что делать.
       if (msg.type === 'dialog-closed') {
         try { if (typeof g.__dialogClosedByUser === 'function') g.__dialogClosedByUser(); } catch (_) {}
+        return;
+      }
+
+      // Срок ответа вышел: окно закрывается тем ответом, который
+      // инструмент задал заранее.
+      if (msg.type === 'dialog-timeout') {
+        try { if (typeof g.__dialogTimedOut === 'function') g.__dialogTimedOut(); } catch (_) {}
         return;
       }
 
@@ -696,6 +724,11 @@ class ToolSandbox {
   // продолжается: инструмент сам решит, что вернуть.
   notifyDialogClosed() {
     this._send({ __ts: 1, type: 'dialog-closed' });
+  }
+
+  // Сообщить кадру, что вышел срок ответа.
+  notifyDialogTimeout() {
+    this._send({ __ts: 1, type: 'dialog-timeout' });
   }
 
   _send(msg) {

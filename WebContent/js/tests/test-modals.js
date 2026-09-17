@@ -421,6 +421,9 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
       connections: [{ id: 'c1', name: 'Провайдер', models: [] }],
       allModels: () => [], describe: () => null,
     };
+    // Закрытие карточки возвращает в настройки — целого окна настроек
+    // этой проверке не нужно, поэтому возврат заглушен.
+    ui._backToProviders = async () => { document.getElementById('modals').innerHTML = ''; };
     await ui.showModelEditor('c1', null, 'gpt-4o-mini');
     await tick();
 
@@ -453,7 +456,73 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
        /Определить/.test(report.textContent) && /рассужден/.test(report.textContent),
        report.textContent.slice(0, 80));
 
-    document.querySelector('#modals .btn-secondary')?.click();
+    // Закрываем именно кнопкой окна: первая .btn-secondary в карточке —
+    // это «Определить» рядом с полем окна контекста.
+    document.querySelector('#modals .modal-actions .btn-secondary')?.click();
+  }
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Сколько ещё ждут ответа ──');
+  {
+    // Окно ждёт человека, а ход агента всё это время стоит. Человек может
+    // отойти от экрана и не вернуться — поэтому видно, сколько его ещё
+    // ждут, и по истечении срока окно отвечает само.
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+    const p1 = ui.showToolFormModal({
+      title: 'Со сроком', seconds: 1,
+      fields: [{ name: 'x', label: 'X', type: 'text' }],
+    });
+    await tick();
+    const box = document.getElementById('tf_wait');
+    ok('в форме виден обратный отсчёт', !!box && box.hidden === false);
+    ok('и сказано, что будет, когда время выйдет',
+       /закроется ответом/.test(box.getAttribute('title') || ''), box.getAttribute('title'));
+    ok('отсчёт можно остановить', !!document.getElementById('tf_wait_stop'));
+
+    const timedOut = await Promise.race([p1, wait(2500).then(() => 'не дождались')]);
+    ok('по истечении срока форма отвечает сама',
+       timedOut && timedOut.timedOut === true && timedOut.submitted === false,
+       JSON.stringify(timedOut));
+    ok('и окно закрывается', !document.querySelector('#modals .modal'));
+
+    // Остановленный отсчёт не срабатывает: человек у экрана и ответит сам.
+    const p2 = ui.showToolFormModal({
+      title: 'Со стопом', seconds: 1,
+      fields: [{ name: 'x', label: 'X', type: 'text' }],
+    });
+    await tick();
+    document.getElementById('tf_wait_stop').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const held = await Promise.race([p2, wait(2500).then(() => 'ещё ждём')]);
+    ok('остановленный отсчёт окно не закрывает', held === 'ещё ждём', JSON.stringify(held));
+    ok('и это видно', /остановлен/.test(document.getElementById('tf_wait').textContent));
+    ok('кнопка остановки исчезает — второй раз останавливать нечего',
+       !document.getElementById('tf_wait_stop'));
+    document.querySelector('#modals .modal-actions .btn-primary').click();
+    const after = await p2;
+    ok('после остановки ответ принимается как обычно', after.submitted === true, JSON.stringify(after));
+
+    // Без срока отсчёта нет вовсе: инструмент вправе ждать сколько угодно.
+    const p3 = ui.showToolFormModal({ title: 'Без срока', fields: [{ name: 'x', label: 'X', type: 'text' }] });
+    await tick();
+    ok('без заданного срока отсчёта не появляется', !document.getElementById('tf_wait'));
+    document.querySelector('#modals .modal-actions .btn-secondary').click();
+    await p3;
+
+    // То же самое в окне инструмента — отсчёт там в заголовке.
+    const frame = document.createElement('iframe');
+    frame.style.cssText = 'position:absolute;width:0;height:0;border:0;left:-9999px;';
+    document.body.appendChild(frame);
+    let expired = 0;
+    ui.showSandboxDialog({ frame, title: 'Со сроком', seconds: 1, onClose: () => {}, onExpire: () => { expired++; } });
+    const head = document.querySelector('.sandbox-dialog-head #sd_wait');
+    ok('в заголовке окна тоже виден отсчёт', !!head && head.hidden === false);
+    await wait(1400);
+    ok('по истечении срока окно сообщает об этом инструменту', expired === 1, String(expired));
+    ok('и это написано прямо в заголовке', /время вышло/.test(head.textContent), head.textContent);
+    ui.closeSandboxDialog();
+    await wait(1200);
+    ok('после закрытия отсчёт не продолжает тикать', expired === 1, String(expired));
   }
 
   console.log('\n' + '='.repeat(46));

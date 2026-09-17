@@ -146,6 +146,9 @@ Object.assign(ToolsEngine.prototype, {
 	    // отсчёт, а при закрытии срок сдвигается на время ожидания.
 	    const budget = { deadline: timeoutMs > 0 ? Date.now() + timeoutMs : 0, holds: 0 };
 	    this._activeBudget = budget;
+	    // Предел вызова нужен ещё и окнам инструмента: по нему заводится
+	    // обратный отсчёт ответа, если инструмент не задал свой.
+	    this._activeTimeoutMs = timeoutMs;
 	    const withTimeout = (promise) => {
 	      if (interactive || !timeoutMs || timeoutMs <= 0) return promise;
 	      return Promise.race([
@@ -281,6 +284,12 @@ Object.assign(ToolsEngine.prototype, {
   // отчёт, выгрузка, картинка, — упирался в стену: File System Access в
   // кадре обезврежен, a.click() ничего не делает. Теперь кадр просит, а
   // файл отдаёт приложение — оно же и записывает это в журнал.
+  // ── Мост в приложение: ровно два вида ответа ──
+  // { value } — то, что получит код инструмента; { error } — отказ,
+  // который превратится у него в исключение. Ответ «просто объектом»
+  // мост молча проглатывает (см. _bridgeHost): поля value в нём нет,
+  // и инструмент получает undefined. Именно так форма и теряла ответ
+  // человека, а вызов после закрытия окна оставался висеть.
   async _sandboxHost({ kind, payload }) {
     if (kind === 'download') return this._sandboxDownload(payload || {});
     if (kind === 'form') return this._sandboxForm(payload || {});
@@ -309,6 +318,21 @@ Object.assign(ToolsEngine.prototype, {
     try { this.ui?.noteHumanWait?.(waited); } catch (_) {}
   },
 
+  // ── Сколько ждать человека ──
+  // По умолчанию — ровно столько, сколько отпущено на вызов инструмента:
+  // так окно не переживает собственный вызов. Инструмент может задать
+  // свой срок (seconds) или снять отсчёт совсем (0) — например, когда
+  // окно открывается по просьбе человека и ждать его незачем.
+  _humanDeadlineSec(seconds) {
+    if (seconds !== undefined && seconds !== null && seconds !== '') {
+      const own = parseInt(seconds, 10);
+      if (!isFinite(own) || own <= 0) return 0;
+      return Math.min(3600, Math.max(5, own));
+    }
+    const fromCall = Math.round((this._activeTimeoutMs || 0) / 1000);
+    return fromCall > 0 ? Math.min(3600, Math.max(5, fromCall)) : 0;
+  },
+
   // ── Окно инструмента с его собственной вёрсткой ──
   //
   // Приложение здесь ничего не рисует: оно показывает КАДР песочницы как
@@ -322,7 +346,7 @@ Object.assign(ToolsEngine.prototype, {
     const ui = this.ui;
     const action = String(payload.action || '');
 
-    if (action === 'close') { this._finishDialog(); return { closed: true }; }
+    if (action === 'close') { this._finishDialog(); return { value: { closed: true } }; }
 
     if (!ui || typeof ui.showSandboxDialog !== 'function') {
       return { error: 'Окна инструментов недоступны: интерфейс не подключён' };
@@ -341,6 +365,16 @@ Object.assign(ToolsEngine.prototype, {
         title: String(payload.title || 'Окно инструмента'),
         width: parseInt(payload.width, 10) || 720,
         height: parseInt(payload.height, 10) || 480,
+        seconds: this._humanDeadlineSec(payload.seconds),
+        // Срок вышел — кадру уходит заранее заданный ответ. Дальше всё
+        // как при закрытии человеком: ответить должен сам инструмент, а
+        // если он молчит, окно снимается по той же отсрочке.
+        onExpire: () => {
+          try { this.sandbox.notifyDialogTimeout(); } catch (_) {}
+          clearTimeout(this._dialogCloseTimer);
+          this._dialogCloseTimer = setTimeout(() => this._finishDialog(),
+            ToolsEngine.DIALOG_CLOSE_GRACE_MS);
+        },
         onClose: () => {
           try { this.sandbox.notifyDialogClosed(); } catch (_) {}
           // Инструмент мог и не послушаться: код писала модель, и ответа
@@ -357,7 +391,7 @@ Object.assign(ToolsEngine.prototype, {
       this._releaseBudget(0);
       return { error: 'Окно не открылось: ' + ((e && e.message) || e) };
     }
-    return { opened: true };
+    return { value: { opened: true } };
   },
 
   // Закрыть окно и вернуть время. Вызывается с трёх сторон — сам
@@ -445,6 +479,7 @@ Object.assign(ToolsEngine.prototype, {
         title: str(spec.title, 120) || 'Данные для инструмента',
         description: str(spec.description, 1000),
         submitLabel: str(spec.submitLabel, 40),
+        seconds: this._humanDeadlineSec(spec.seconds),
         fields,
       });
     } catch (e) {
@@ -454,9 +489,11 @@ Object.assign(ToolsEngine.prototype, {
     const waited = Date.now() - startedAt;
     this._releaseBudget(waited);
 
+    // Ответ мосту — в поле value: иначе он до инструмента не доедет.
+    if (res && res.timedOut) return { value: { submitted: false, timedOut: true, values: {} } };
     return res && res.submitted
-      ? { submitted: true, values: res.values || {} }
-      : { submitted: false, values: {} };
+      ? { value: { submitted: true, values: res.values || {} } }
+      : { value: { submitted: false, values: {} } };
   },
 
   async _sandboxDownload({ name, content, mime, base64 }) {
