@@ -103,6 +103,9 @@ class SecurityEngine {
     'confluence_get_page', 'confluence_search', 'confluence_comments',
     'xwiki_get_page', 'xwiki_search', 'xwiki_comments', 'xwiki_objects', 'xwiki_livetable',
     'import_skill_from_text',
+    // Поиск в интернете: заголовки и фрагменты пишут авторы чужих
+    // страниц — ровно тот текст, который может нести указания модели.
+    'web_search',
     // Артефакт — сохранённый результат прежнего вызова: его содержимое
     // пришло извне ровно так же, просто раньше.
     'artifact_read', 'artifact_grep',
@@ -208,6 +211,12 @@ class SecurityEngine {
 
     // Сеть
     http_fetch: 'network',
+    // Поиск: службу и маршрут выбрал пользователь в настройках, модель
+    // выбирает только запрос — та же логика, что у вики, а не у http_fetch,
+    // где хост назначает модель. Результат при этом внешний (см.
+    // EXTERNAL_SOURCES), а настройка — запись.
+    web_search: 'read',
+    web_search_configure: 'write',
     // Через локальный прокси пользователя. Категория та же, но у вызова с
     // sso:true есть отдельное, более строгое правило в check().
     proxy_fetch: 'network',

@@ -252,16 +252,19 @@ function createCaptureStream(label) {
   });
 }
 
-function setCors(res) {
+const BASE_ALLOW_HEADERS =
+  'Content-Type, Accept, X-Target-Url, Authorization, X-Custom-Headers, X-Use-Sso, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID';
+
+function setCors(res, req) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS');
-  // Mcp-Session-Id и MCP-Protocol-Version — заголовки протокола MCP
-  // (Streamable HTTP): без разрешения браузер не отправит их вовсе, и
-  // сервер с сессиями отвечал бы «не инициализирован».
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Accept, X-Target-Url, Authorization, X-Custom-Headers, X-Use-Sso, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID'
-  );
+  // Разрешаем ровно те заголовки, которые страница просит в предварительном
+  // запросе, поверх базового набора. Фиксированный список отсекал любой
+  // заголовок не из него ещё в браузере — например ключ поисковой службы
+  // (X-Subscription-Token у Brave Search), — и запрос до прокси не доходил.
+  // Mcp-Session-Id и MCP-Protocol-Version — заголовки протокола MCP.
+  const asked = req && req.headers ? String(req.headers['access-control-request-headers'] || '').trim() : '';
+  res.setHeader('Access-Control-Allow-Headers', asked ? BASE_ALLOW_HEADERS + ', ' + asked : BASE_ALLOW_HEADERS);
   // Id сессии сервер выдаёт в заголовке ответа, а читать со страницы
   // браузер разрешает только открытые заголовки.
   res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version, Content-Type');
@@ -418,7 +421,7 @@ function runCurlRequest({ method, url, headers, body, hostname }) {
 }
 
 const server = http.createServer(async (req, res) => {
-  setCors(res);
+  setCors(res, req);
 
   section('REQUEST');
   console.log(paint(`${req.method} ${req.url}`, COLORS.yellow + COLORS.bold));

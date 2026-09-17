@@ -2500,3 +2500,11 @@ iframe.sandbox-dialog-view {
 .dep-manual { flex-direction: column; align-items: flex-start; }
 .dep-suggest { color: var(--text-secondary); font-size: 12px; }
 .dep-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+
+/* ===== ПОИСК В ИНТЕРНЕТЕ: проверка в форме ===== */
+.ws-test-result { font-size: 12px; line-height: 1.5; margin-top: 6px; }
+.ws-test-result ul { margin: 4px 0 0; padding-left: 18px; }
+.ws-test-result.ws-test-ok  { color: var(--success); }
+.ws-test-result.ws-test-ok li { color: var(--text-primary); }
+.ws-test-result.ws-test-bad { color: var(--danger); }

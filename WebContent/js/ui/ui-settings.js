@@ -385,6 +385,7 @@ Object.assign(UI.prototype, {
           <div class="form-group">
             <button class="btn btn-secondary btn-sm" id="sec-check-proxy">🔌 Проверить прокси</button>
             <button class="btn btn-secondary btn-sm" id="sec-gen-proxy">📦 Сгенерировать файлы прокси</button>
+            <button class="btn btn-secondary btn-sm" id="sec-web-search">🔎 Поиск в интернете</button>
             <span id="proxy_check_result" style="font-size:12px;margin-left:8px;"></span>
             <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
               Генератор соберёт <code>config.js</code> по вашим значениям, приложит
@@ -727,6 +728,12 @@ Object.assign(UI.prototype, {
       // где ты что менял), поэтому текущий адрес прокси генератор берёт
       // из уже сохранённого this.proxy, а не из поля формы.
       document.getElementById('sec-gen-proxy')?.addEventListener('click', () => this.showProxySetupModal());
+      // Настройка поиска открывается поверх настроек, а после неё
+      // человек возвращается туда же — как из окна подключения модели.
+      document.getElementById('sec-web-search')?.addEventListener('click', async () => {
+        await this.showWebSearchConfigModal();
+        await this.showSettingsModal('security');
+      });
 
       document.getElementById('sec-check-proxy')?.addEventListener('click', async () => {
         const out = document.getElementById('proxy_check_result');

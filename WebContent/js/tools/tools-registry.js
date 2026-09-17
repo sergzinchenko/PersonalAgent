@@ -29,7 +29,7 @@ ToolsEngine.PLACEMENT = {
     'builtin_import_chat', 'builtin_import_chats', 'builtin_chat_folder', 'builtin_move_chat',
   ],
   folder_tools_net: [
-    'builtin_fetch', 'builtin_proxy_fetch',
+    'builtin_fetch', 'builtin_proxy_fetch', 'builtin_web_search', 'builtin_web_search_configure',
   ],
   folder_tools_workspace: [
     'builtin_list_workspace', 'builtin_create_folder', 'builtin_rename_folder',

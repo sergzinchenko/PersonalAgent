@@ -720,6 +720,168 @@ Object.assign(UI.prototype, {
   },
 
 
+  // ── Поиск в интернете ──
+  // Служба, маршрут и ключ. Ключ уходит из поля прямо в шифрованное
+  // хранилище и модели не показывается (см. tools/tools-websearch.js).
+  // «Проверить поиск» делает пробный запрос с тем, что введено в форме,
+  // ещё до сохранения: так ошибка в ключе или маршруте видна сразу, а не
+  // в середине работы агента.
+  showWebSearchConfigModal() {
+    return new Promise(async (resolve) => {
+      let settled = false;
+      const tools = this.agent.tools;
+      const P = ToolsEngine.WEB_SEARCH_PROVIDERS;
+      const saved = await this.agent.db.get('settings', 'web_search').catch(() => null);
+      const cfg = await tools._webSearchConfig();
+      const esc = (t) => this._escHtml(String(t ?? ''));
+
+      const HINTS = {
+        duckduckgo: 'Без ключа и регистрации. Отвечает только через локальный прокси: браузеру напрямую читать выдачу не разрешает. При частых запросах может попросить подтвердить, что вы не робот.',
+        searxng: 'Ваш экземпляр SearXNG — метапоиск без ключа. В его settings.yml в search.formats должен быть включён json. Напрямую работает, если экземпляр разрешает CORS; иначе — через прокси.',
+        brave: 'Brave Search API: ключ — на api-dashboard.search.brave.com (есть бесплатный тариф). Браузеру напрямую не отвечает — нужен локальный прокси.',
+        google: 'Google Programmable Search: ключ Custom Search JSON API из Google Cloud и идентификатор поисковой системы (cx) из programmablesearchengine.google.com. Работает напрямую, без прокси.',
+        tavily: 'Tavily — поиск, рассчитанный на агентов: ключ на app.tavily.com (есть бесплатный лимит). Если напрямую не отвечает — включите прокси.',
+      };
+
+      const options = Object.entries(P).map(([k, v]) =>
+        `<option value="${k}" ${cfg.provider === k ? 'selected' : ''}>${esc(v.title)}</option>`).join('');
+
+      this._showModal('🔎 Поиск в интернете', `
+        <div class="form-group">
+          <label>Поисковая служба</label>
+          <select id="ws_provider">${options}</select>
+          <div id="ws_provider_note" class="code-status" style="color:var(--text-secondary);line-height:1.5;"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="check-row">
+            <input type="checkbox" id="ws_proxy" ${cfg.viaProxy ? 'checked' : ''}> Через локальный прокси
+          </label>
+          <div style="font-size:11px;color:var(--text-muted);">
+            Большинство поисковых служб не дают браузеру читать ответ напрямую (CORS). Прокси запускается
+            на вашей машине («node proxy/proxy.js»), его адрес — в ⚙ Настройки → Безопасность.
+          </div>
+          <div id="ws_proxy_warn" class="keep-visible" style="font-size:11px;color:var(--warning);" hidden></div>
+        </div>
+
+        <div class="form-group" id="ws_searxng_row">
+          <label>Адрес экземпляра SearXNG</label>
+          <input id="ws_searxng" value="${esc(cfg.searxngUrl)}" placeholder="https://searx.example.org">
+        </div>
+
+        <div class="form-group" id="ws_key_row">
+          <label>Ключ доступа</label>
+          <input id="ws_key" type="password" placeholder="${saved && saved.apiKey && cfg.apiKey ? 'Сохранён — оставьте пустым, чтобы не менять' : ''}">
+          <div style="font-size:11px;color:var(--text-muted);">
+            Хранится в браузере в зашифрованном виде, как ключи провайдеров. Модели не передаётся.
+          </div>
+        </div>
+
+        <div class="form-group" id="ws_cx_row">
+          <label>Идентификатор поисковой системы (cx)</label>
+          <input id="ws_cx" value="${esc(cfg.googleCx)}" placeholder="0123456789abcdef0">
+        </div>
+
+        <div class="form-group">
+          <label>Результатов по умолчанию</label>
+          <input id="ws_count" type="number" min="1" max="20" value="${cfg.count}">
+          <div style="font-size:11px;color:var(--text-muted);">
+            Сколько результатов вернуть, если агент не попросил другое число. Больше результатов —
+            больше контекста на каждый поиск.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <button type="button" class="btn btn-secondary btn-sm" id="ws_test">🔎 Проверить поиск</button>
+          <div id="ws_test_result" class="ws-test-result"></div>
+        </div>
+
+        ${saved ? `<label class="check-row">
+          <input type="checkbox" id="ws_forget"> Забыть настройки поиска
+        </label>` : ''}
+      `, async () => {
+        settled = true;
+        if (document.getElementById('ws_forget')?.checked) {
+          await tools._webSearchForget();
+          return resolve({ forgotten: true });
+        }
+        const form = readForm();
+        const res = await tools._webSearchSaveConfig({ ...form.save });
+        resolve(res);
+      }, () => { if (!settled) resolve({ cancelled: true }); });
+
+      const $ = (id) => document.getElementById(id);
+
+      const readForm = () => {
+        const provider = $('ws_provider').value;
+        const key = $('ws_key').value;
+        const keepKey = !key && !!(saved && saved.apiKey && cfg.apiKey);
+        const values = {
+          provider,
+          viaProxy: $('ws_proxy').checked,
+          searxngUrl: $('ws_searxng').value.trim().replace(/\/+$/, ''),
+          googleCx: $('ws_cx').value.trim(),
+          count: parseInt($('ws_count').value, 10) || 5,
+        };
+        return {
+          save: { ...values, apiKey: key, keepKey },
+          // Для проверки ключ нужен настоящий: сохранённый берётся из
+          // расшифрованных настроек, новый — из поля.
+          test: { ...values, apiKey: key || (keepKey ? cfg.apiKey : '') },
+        };
+      };
+
+      // Поля показываются по выбранной службе: ключ у DuckDuckGo и cx у
+      // Brave только сбивали бы с толку.
+      const sync = () => {
+        const provider = $('ws_provider').value;
+        const info = P[provider];
+        $('ws_searxng_row').hidden = provider !== 'searxng';
+        $('ws_key_row').hidden = !info.needsKey;
+        $('ws_cx_row').hidden = provider !== 'google';
+        $('ws_provider_note').textContent = HINTS[provider] || '';
+        const warn = $('ws_proxy_warn');
+        const proxyOn = $('ws_proxy').checked;
+        let text = '';
+        if (proxyOn && !cfg.proxyBaseUrl) {
+          text = 'Адрес прокси не задан: укажите его в ⚙ Настройки → Безопасность → «Локальный прокси».';
+        } else if (!proxyOn && info.cors === false) {
+          text = `${info.title} напрямую из браузера не работает — включите прокси.`;
+        }
+        warn.textContent = text;
+        warn.hidden = !text;
+      };
+      $('ws_provider').addEventListener('change', sync);
+      $('ws_proxy').addEventListener('change', sync);
+      sync();
+
+      $('ws_test').addEventListener('click', async () => {
+        const out = $('ws_test_result');
+        const btn = $('ws_test');
+        btn.disabled = true;
+        out.className = 'ws-test-result';
+        out.textContent = 'Ищу «новости» …';
+        let r;
+        try {
+          r = await tools._webSearch({ query: 'новости', count: 3 }, readForm().test);
+        } catch (e) {
+          r = { error: (e && e.message) || String(e) };
+        }
+        btn.disabled = false;
+        if (r.error) {
+          out.className = 'ws-test-result ws-test-bad';
+          out.textContent = '✗ ' + r.error + (r.hint ? ' — ' + r.hint : '');
+          return;
+        }
+        out.className = 'ws-test-result ws-test-ok';
+        out.innerHTML = `✓ Работает: найдено ${r.count}` +
+          (r.results.length ? '<ul>' + r.results.map(x =>
+            `<li>${esc(x.title)} <span style="color:var(--text-muted);">— ${esc(x.url)}</span></li>`).join('') + '</ul>' : '');
+      });
+    });
+  },
+
+
   // ── Схема имён импортируемых функций ──
   // Имена инструментов — то, чем пользователь и модель пользуются каждый
   // день, и угадать их за человека нельзя: в одном сервисе operationId

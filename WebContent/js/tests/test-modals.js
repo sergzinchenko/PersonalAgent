@@ -1007,6 +1007,76 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ok('«Восстановить из файла» по-прежнему ведёт к восстановлению', (await second) === 'восстановление');
   }
 
+  // ══════════════════════════════════════════════
+  console.log('\n── Форма настройки поиска в интернете ──');
+  {
+    window.ToolsEngine = { WEB_SEARCH_PROVIDERS: {
+      duckduckgo: { title: 'DuckDuckGo', needsKey: false, cors: false },
+      searxng: { title: 'SearXNG (свой экземпляр)', needsKey: false, cors: null },
+      brave: { title: 'Brave Search API', needsKey: true, cors: false },
+      google: { title: 'Google Programmable Search', needsKey: true, cors: true },
+      tavily: { title: 'Tavily Search API', needsKey: true, cors: null },
+    } };
+    let savedArgs = null, testArgs = null;
+    const stored = { key: 'web_search', provider: 'brave', viaProxy: true, apiKey: 'enc:OLD-KEY', count: 5 };
+    ui.agent.db.get = async (store, key) => (store === 'settings' && key === 'web_search') ? stored : null;
+    ui.agent.tools = {
+      _webSearchConfig: async () => ({ saved: true, provider: 'brave', viaProxy: true, searxngUrl: '', googleCx: '',
+        count: 5, apiKey: 'OLD-KEY', proxyBaseUrl: 'http://localhost:3000' }),
+      _webSearchSaveConfig: async (a) => { savedArgs = a; return { provider: a.provider, viaProxy: a.viaProxy }; },
+      _webSearchForget: async () => true,
+      _webSearch: async (params, override) => { testArgs = { params, override };
+        return { count: 1, results: [{ title: '<b>Новость</b>', url: 'https://n.test' }] }; },
+    };
+
+    const done = ui.showWebSearchConfigModal();
+    for (let i = 0; i < 50 && !document.getElementById('ws_provider'); i++) await tick(1);
+    const $ = (id) => document.getElementById(id);
+    const modal = document.querySelector('#modals .modal');
+
+    ok('форма открылась с сохранённой службой', $('ws_provider').value === 'brave' && $('ws_proxy').checked);
+    ok('сохранённый ключ в поле не показан', $('ws_key').value === '' && !modal.innerHTML.includes('OLD-KEY'));
+    ok('а подсказано, что он сохранён', /Сохранён/.test($('ws_key').getAttribute('placeholder')));
+    ok('для Brave видно поле ключа, но не cx и не адрес SearXNG',
+       !$('ws_key_row').hidden && $('ws_cx_row').hidden && $('ws_searxng_row').hidden);
+    ok('и сказано, где взять ключ', /api-dashboard\.search\.brave\.com/.test($('ws_provider_note').textContent));
+
+    $('ws_provider').value = 'duckduckgo';
+    $('ws_provider').dispatchEvent(new window.Event('change'));
+    ok('у DuckDuckGo поля ключа нет', $('ws_key_row').hidden);
+    $('ws_proxy').checked = false;
+    $('ws_proxy').dispatchEvent(new window.Event('change'));
+    ok('без прокси DuckDuckGo сразу предупреждает, что не заработает',
+       !$('ws_proxy_warn').hidden && /включите прокси/.test($('ws_proxy_warn').textContent));
+    ok('и это предупреждение не спрятано в подсказку', !!$('ws_proxy_warn'));
+
+    $('ws_provider').value = 'google';
+    $('ws_provider').dispatchEvent(new window.Event('change'));
+    ok('у Google — поле cx', !$('ws_cx_row').hidden && !$('ws_key_row').hidden);
+    $('ws_cx').value = 'CX-FORM';
+    $('ws_test').click();
+    for (let i = 0; i < 50 && !/Работает/.test($('ws_test_result').textContent); i++) await tick(1);
+    ok('«Проверить поиск» ищет с тем, что введено в форме',
+       testArgs && testArgs.override.provider === 'google' && testArgs.override.googleCx === 'CX-FORM',
+       JSON.stringify(testArgs && testArgs.override));
+    ok('с сохранённым ключом, если новый не введён', testArgs && testArgs.override.apiKey === 'OLD-KEY');
+    ok('результат проверки показан, разметка из выдачи не исполняется',
+       /Работает: найдено 1/.test($('ws_test_result').textContent) && !$('ws_test_result').querySelector('b'));
+    ok('проверка ничего не сохранила', savedArgs === null);
+
+    ui.agent.tools._webSearch = async () => ({ error: 'Google отказал в доступе (403)', hint: 'Проверь ключ' });
+    $('ws_test').click();
+    for (let i = 0; i < 50 && !/отказал/.test($('ws_test_result').textContent); i++) await tick(1);
+    ok('ошибка проверки показана с подсказкой', /✗ Google отказал/.test($('ws_test_result').textContent) && /Проверь ключ/.test($('ws_test_result').textContent));
+
+    document.querySelector('#modals .modal-actions .btn-primary').click();
+    const res = await done;
+    ok('сохранение передаёт выбранное', savedArgs && savedArgs.provider === 'google' && savedArgs.googleCx === 'CX-FORM' && savedArgs.viaProxy === false,
+       JSON.stringify(savedArgs));
+    ok('пустое поле ключа означает «не менять»', savedArgs && savedArgs.keepKey === true && savedArgs.apiKey === '');
+    ok('форма вернула результат', res && res.provider === 'google');
+  }
+
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('='.repeat(46));
