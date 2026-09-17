@@ -25,11 +25,12 @@ Object.assign(UI.prototype, {
         </div>
         <div class="form-group">
           <label>Parameters (JSON Schema)</label>
-          <textarea id="t_params" rows="6">${tool ? JSON.stringify(tool.parameters, null, 2) : '{\n  "type": "object",\n  "properties": {},\n  "required": []\n}'}</textarea>
+          <textarea id="t_params" rows="8">${this._escHtml(tool ? JSON.stringify(tool.parameters, null, 2) : '{\n  "type": "object",\n  "properties": {},\n  "required": []\n}')}</textarea>
+          <div id="t_params_status" class="code-status"></div>
         </div>
         <div class="form-group">
           <label>Handler Code (JavaScript, получает params)</label>
-          <textarea id="t_handler" rows="5">${tool?.handlerCode || '// return { result: params.input };\n'}</textarea>
+          <textarea id="t_handler" rows="10">${this._escHtml(tool?.handlerCode || '// return { result: params.input };\n')}</textarea>
         </div>
       `, async () => {
         const id = isEdit ? editId : 'custom_' + uid();
@@ -56,13 +57,116 @@ Object.assign(UI.prototype, {
           parentId: targetParentId,
         };
         await this.agent.db.put('tools', toolObj);
+
+        // ── Навыки, говорящие об инструменте по имени ──
+        // Имя в тексте редактируемых навыков заменяется сразу: человек сам
+        // переименовал инструмент в редакторе, и замена целого слова-
+        // идентификатора однозначна. Всё, что так не исправить, —
+        // защищённые навыки и сменившиеся параметры — показывается отдельным
+        // окном с причиной и предложенным решением.
+        if (tool && this.agent.skills?.toolReferenceImpact) {
+          try {
+            const impact = await this.agent.skills.toolReferenceImpact(tool, toolObj);
+            const fixed = await this.agent.skills.applyToolRename(impact);
+            if (fixed.length || impact.manual.length) {
+              this.agent.tools.unregisterHandler(id);
+              this.renderTools();
+              this.renderSkills?.();
+              return this.showToolDependencyReport(impact, fixed);
+            }
+          } catch (e) {
+            console.error('Проверка зависимостей инструмента не удалась', e);
+          }
+        }
         this.agent.tools.unregisterHandler(id);   // ← сбрасываем stale-handler из registry       
         this.renderTools();
       }, null, { review: { kind: 'tool', editId } });
+
+      // ── Подсветка кода и проверка JSON на лету ──
+      // Ошибка в схеме параметров раньше обнаруживалась молча: при
+      // сохранении битый JSON заменялся пустой схемой, и инструмент
+      // терял все параметры. Теперь её видно сразу под полем.
+      if (typeof CodeHighlight !== 'undefined') {
+        const paramsEl = document.getElementById('t_params');
+        CodeHighlight.attach(paramsEl, 'json');
+        CodeHighlight.attach(document.getElementById('t_handler'), 'js');
+        const status = document.getElementById('t_params_status');
+        const checkJson = () => {
+          if (!status || !paramsEl) return;
+          try {
+            const v = JSON.parse(paramsEl.value);
+            const okShape = v && typeof v === 'object' && v.type === 'object' && typeof v.properties === 'object';
+            status.className = 'code-status ' + (okShape ? 'code-ok' : 'code-warn');
+            status.textContent = okShape
+              ? '✓ JSON корректен · параметров: ' + Object.keys(v.properties).length
+              : '⚠ JSON корректен, но это не схема вида { "type": "object", "properties": { … } }';
+          } catch (e) {
+            status.className = 'code-status code-bad';
+            status.textContent = '✗ Ошибка JSON: ' + e.message + ' — при сохранении схема была бы заменена пустой';
+          }
+        };
+        paramsEl?.addEventListener('input', checkJson);
+        checkJson();
+      }
     };
     loadAndShow();
   },
 
+
+  // ── Отчёт о зависимостях после переименования инструмента ──
+  showToolDependencyReport(impact, fixed) {
+    const esc = (t) => this._escHtml(String(t ?? ''));
+    const renamed = impact.renamed
+      ? `<p style="margin:0 0 10px;">Инструмент переименован: <code>${esc(impact.oldName)}</code> → <code>${esc(impact.newName)}</code>.</p>`
+      : '';
+    const params = impact.removedParams.length
+      ? `<p style="margin:0 0 10px;">Больше нет параметров: ${impact.removedParams.map(p => `<code>${esc(p)}</code>`).join(', ')}` +
+        (impact.addedParams.length ? `; появились: ${impact.addedParams.map(p => `<code>${esc(p)}</code>`).join(', ')}` : '') + '.</p>'
+      : '';
+
+    const fixedHtml = fixed.length
+      ? `<div class="dep-section"><div class="dep-title">✅ Исправлено автоматически</div>
+          ${fixed.map(f => `<div class="dep-row">Навык «${esc(f.skillName)}» — имя заменено (${f.count})
+            <button type="button" class="btn btn-secondary btn-sm dep-open" data-skill="${esc(f.skillId)}">Открыть навык</button></div>`).join('')}
+        </div>`
+      : '';
+
+    const manualHtml = impact.manual.length
+      ? `<div class="dep-section"><div class="dep-title">⚠️ Требует решения</div>
+          ${impact.manual.map((m, k) => `<div class="dep-row dep-manual">
+              <div><b>Навык «${esc(m.skillName)}»</b>: ${esc(m.reason)}</div>
+              <div class="dep-suggest">Предложение: ${esc(m.suggestion)}</div>
+              <div class="dep-actions">
+                ${m.replace ? `<button type="button" class="btn btn-primary btn-sm dep-replace" data-k="${k}">
+                    Заменить «${esc(m.replace.from)}» → «${esc(m.replace.to)}»</button>` : ''}
+                ${m.kind === 'protected' || m.kind === 'protected-params' ? '' :
+                  `<button type="button" class="btn btn-secondary btn-sm dep-open" data-skill="${esc(m.skillId)}">Открыть навык</button>`}
+              </div>
+            </div>`).join('')}
+        </div>`
+      : '';
+
+    this._showModal('🔗 Навыки, связанные с инструментом', `
+      ${renamed}${params}
+      <p style="margin:0 0 12px;color:var(--text-secondary);">
+        Привязка навыков к инструменту переживает переименование сама, а текст навыков — нет:
+        модель получила бы указание про инструмент, которого больше нет.
+      </p>
+      ${fixedHtml}${manualHtml}
+    `, () => {}, null, { saveLabel: 'Готово', cancelLabel: 'Закрыть', review: null });
+
+    const box = document.querySelector('#modals .modal');
+    box?.querySelectorAll('.dep-open').forEach(b => b.addEventListener('click', () => {
+      this.showAddSkillModal(b.dataset.skill);
+    }));
+    box?.querySelectorAll('.dep-replace').forEach(b => b.addEventListener('click', async () => {
+      const m = impact.manual[parseInt(b.dataset.k, 10)];
+      const n = await this.agent.skills.replaceWordInSkill(m.skillId, m.replace.from, m.replace.to);
+      b.disabled = true;
+      b.textContent = n ? `✓ Заменено (${n})` : 'Нечего заменять';
+      if (n) this.renderSkills?.();
+    }));
+  },
 
   // Подключение нового сервера: вся логика (проверка адреса, импорт
   // tools/list, создание папки-контейнера) — в ToolsEngine.connectMcpServer,

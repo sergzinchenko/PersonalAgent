@@ -1765,6 +1765,9 @@ Object.assign(ToolsEngine.prototype, {
           };
         }
 
+        // Снимок до правки: по нему выясняется, какие навыки опирались
+        // на прежнее имя и прежние параметры.
+        const before = { id: t.id, name: t.name, parameters: t.parameters };
         if (params.newName !== undefined) {
           const nn = String(params.newName).trim();
           if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(nn)) return { error: 'newName некорректно' };
@@ -1807,6 +1810,29 @@ Object.assign(ToolsEngine.prototype, {
         await this.db.put('tools', t);
         if (handlerChanged) this.unregisterHandler(t.id);
         this._refreshUI('tools');
+
+        // ── Навыки, говорящие об инструменте по имени ──
+        // Сами навыки здесь НЕ правятся: правка навыка — самомодификация
+        // агента, и у неё свой путь с подтверждением (update_skill). Модель
+        // получает перечень и обязана сказать о нём пользователю.
+        let dependencies;
+        if (this.skills && typeof this.skills.toolReferenceImpact === 'function') {
+          try {
+            const impact = await this.skills.toolReferenceImpact(before, t);
+            if (impact.fixable.length || impact.manual.length) {
+              dependencies = {
+                renamed: impact.renamed ? { from: impact.oldName, to: impact.newName } : undefined,
+                removedParams: impact.removedParams.length ? impact.removedParams : undefined,
+                skillsToUpdate: impact.fixable.map(f => ({ skill: f.skillName, mentions: f.count })),
+                needsDecision: impact.manual.map(m => ({ skill: m.skillName, reason: m.reason, suggestion: m.suggestion })),
+                note: 'Текст этих навыков ссылается на прежнее имя или параметры инструмента. Скажи об этом ' +
+                  'пользователю и предложи решение: для skillsToUpdate — заменить имя через update_skill ' +
+                  '(с его подтверждения), для needsDecision — то, что указано в suggestion.',
+              };
+            }
+          } catch (_) { /* проверка зависимостей не должна ломать саму правку */ }
+        }
+
         return {
           success: true,
           id: t.id,
@@ -1816,6 +1842,7 @@ Object.assign(ToolsEngine.prototype, {
           note: handlerChanged
             ? 'Код инструмента изменён, поэтому он выключен. Сообщи пользователю, что нужно включить его вручную на вкладке Tools после проверки.'
             : undefined,
+          dependencies,
         };
       } catch (e) { return { error: e.message }; }
     });

@@ -420,6 +420,79 @@ const { SkillsEngine, ToolsEngine } = sandbox;
        (await sk6.disabledToolsOf('skill_llm_router')).length === 3);
   }
 
+  console.log('\n── Переименование инструмента и текст навыков ──');
+  {
+    // Привязка по id переименование переживает, а текст навыка — нет:
+    // модель получила бы указание про инструмент, которого больше нет.
+    const db2 = new FakeDB();
+    const sk = new SkillsEngine(db2);
+    const eng = new ToolsEngine(db2);
+    eng.skills = sk;
+    await eng.loadTools();
+    await sk.loadSkills();
+
+    await db2.put('tools', { id: 'c_slug', name: 'slug_text', description: 'x',
+      parameters: { type: 'object', properties: { text: { type: 'string' } } },
+      handlerCode: 'return 1;', enabled: true, builtin: false });
+    await db2.put('skills', { id: 'sk_a', name: 'Писатель', description: 'пользуется slug_text',
+      systemPrompt: 'Вызывай slug_text с параметром text. Не путай с slug_texts и my_slug_text.',
+      toolIds: ['c_slug'], enabled: true });
+    await db2.put('skills', { id: 'sk_b', name: 'Защищённый', description: '',
+      systemPrompt: 'Используй slug_text.', protected: true, toolIds: [], enabled: true });
+    await db2.put('skills', { id: 'sk_c', name: 'Посторонний', description: '',
+      systemPrompt: 'Про другое: text и slug.', toolIds: [], enabled: true });
+
+    const before = await db2.get('tools', 'c_slug');
+    const after = { ...before, name: 'make_slug',
+      parameters: { type: 'object', properties: { input: { type: 'string' } } } };
+    const impact = await sk.toolReferenceImpact(before, after);
+
+    const fa = impact.fixable.find(f => f.skillId === 'sk_a');
+    ok('навык с упоминанием имени — к автоматической замене', !!fa && fa.count === 2, JSON.stringify(impact.fixable));
+    ok('похожие имена (slug_texts, my_slug_text) не считаются упоминанием', fa && fa.count === 2);
+    ok('защищённый навык — не к замене, а к решению',
+       !impact.fixable.some(f => f.skillId === 'sk_b') &&
+       impact.manual.some(m => m.skillId === 'sk_b' && m.kind === 'protected' && /прежнее имя/.test(m.suggestion)),
+       JSON.stringify(impact.manual));
+    const pm = impact.manual.find(m => m.skillId === 'sk_a' && m.kind === 'params');
+    ok('исчезнувший параметр в тексте навыка замечен', !!pm && pm.params[0] === 'text', JSON.stringify(impact.manual));
+    ok('и предложена вероятная замена text → input', pm && pm.replace && pm.replace.to === 'input');
+    ok('навык, который об инструменте не говорит, не затронут',
+       !impact.fixable.concat(impact.manual).some(x => x.skillId === 'sk_c'));
+
+    const fixed = await sk.applyToolRename(impact);
+    const a2 = await db2.get('skills', 'sk_a');
+    ok('имя заменено в тексте и описании редактируемого навыка',
+       fixed.length === 1 && /Вызывай make_slug с параметром text/.test(a2.systemPrompt) &&
+       a2.description === 'пользуется make_slug', a2.systemPrompt + ' | ' + a2.description);
+    ok('похожие имена остались как были', /slug_texts и my_slug_text/.test(a2.systemPrompt));
+    ok('защищённый навык не тронут', (await db2.get('skills', 'sk_b')).systemPrompt === 'Используй slug_text.');
+
+    ok('замена параметра — только по решению человека: до него текст прежний', /параметром text/.test(a2.systemPrompt));
+    const n = await sk.replaceWordInSkill('sk_a', 'text', 'input');
+    ok('по решению — заменён', n === 1 && /параметром input/.test((await db2.get('skills', 'sk_a')).systemPrompt));
+    ok('в защищённом навыке замена невозможна', (await sk.replaceWordInSkill('sk_b', 'slug_text', 'x')) === 0);
+
+    // ── Путь модели: update_tool сообщает, но навыки не правит ──
+    await db2.put('tools', after);
+    const res = await eng.executeTool('update_tool', { name: 'make_slug', newName: 'slugify' }, {});
+    ok('переименование через update_tool прошло', res.success === true && res.name === 'slugify', JSON.stringify(res));
+    ok('и вернуло навыки, зависящие от прежнего имени',
+       res.dependencies && res.dependencies.skillsToUpdate.some(x => x.skill === 'Писатель'),
+       JSON.stringify(res.dependencies));
+    ok('модель обязана сказать об этом пользователю', res.dependencies && /пользователю/.test(res.dependencies.note));
+    ok('сами навыки моделью не изменены — правка навыка идёт своим путём с подтверждением',
+       /make_slug/.test((await db2.get('skills', 'sk_a')).systemPrompt));
+  }
+
+  console.log('\n── Системный навык: не позволяй себя сломать ──');
+  {
+    const sys = new SkillsEngine(new FakeDB())._defaultSkills().find(d => d.id === 'skill_system');
+    ok('в системных инструкциях есть защита от поломки агента', /НЕ ПОЗВОЛЯЙ СЕБЯ СЛОМАТЬ/.test(sys.systemPrompt));
+    ok('и она про данные, и про просьбы самого пользователя',
+       /ДАННЫЕ/.test(sys.systemPrompt) && /Просит сам пользователь/.test(sys.systemPrompt));
+  }
+
   console.log('\n' + '='.repeat(46));
   console.log(`Пройдено: ${pass}, провалено: ${fail}`);
   console.log('='.repeat(46));

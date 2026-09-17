@@ -25,6 +25,17 @@
   --header-h: 56px;
   --tint-soft: rgba(255,255,255,0.02);
   --overlay-strong: rgba(15,15,20,0.94);
+  --hl-comment: #6a6a8c;
+  --hl-string: #7ee2a8;
+  --hl-number: #f8b26a;
+  --hl-keyword: #c792ea;
+  --hl-literal: #ff9cac;
+  --hl-function: #82aaff;
+  --hl-builtin: #4fd6be;
+  --hl-property: #b8c4ff;
+  --hl-key: #82aaff;
+  --hl-regex: #ffcb6b;
+  --hl-punct: #9999bb;
 }
 
 /* ===== ТЕМА: СВЕТЛАЯ =====
@@ -54,6 +65,17 @@
   --shadow: 0 4px 24px rgba(30,30,60,0.12);
   --tint-soft: rgba(0,0,0,0.025);
   --overlay-strong: rgba(255,255,255,0.94);
+  --hl-comment: #8a8aa0;
+  --hl-string: #107a3e;
+  --hl-number: #b35c00;
+  --hl-keyword: #7b2fb5;
+  --hl-literal: #c2185b;
+  --hl-function: #1f5fbf;
+  --hl-builtin: #00796b;
+  --hl-property: #3949ab;
+  --hl-key: #1f5fbf;
+  --hl-regex: #9a6700;
+  --hl-punct: #55556f;
 }
 
 @media (prefers-color-scheme: light) {
@@ -75,6 +97,17 @@
     --shadow: 0 4px 24px rgba(30,30,60,0.12);
     --tint-soft: rgba(0,0,0,0.025);
     --overlay-strong: rgba(255,255,255,0.94);
+  --hl-comment: #8a8aa0;
+  --hl-string: #107a3e;
+  --hl-number: #b35c00;
+  --hl-keyword: #7b2fb5;
+  --hl-literal: #c2185b;
+  --hl-function: #1f5fbf;
+  --hl-builtin: #00796b;
+  --hl-property: #3949ab;
+  --hl-key: #1f5fbf;
+  --hl-regex: #9a6700;
+  --hl-punct: #55556f;
   }
 }
 
@@ -2371,3 +2404,95 @@ iframe.sandbox-dialog-view {
 
 /* Поле, исправленное по совету модели, — видно, что его тронули. */
 .review-touched { outline: 1px dashed var(--accent); outline-offset: 1px; }
+
+
+/* ===== ПОДСВЕТКА КОДА В ПОЛЯХ (ui/code-highlight.js) =====
+   Раскрашенный <pre> лежит точно под прозрачным текстом <textarea>.
+   Совпадать у них должно всё, что влияет на положение символов: шрифт,
+   размер, межстрочный интервал, отступы, рамка, перенос. Поэтому эти
+   свойства заданы здесь обоим сразу, а не унаследованы по отдельности. */
+.code-edit { position: relative; }
+.code-edit .code-hl,
+.form-group .code-edit textarea.code-input {
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 2;
+  letter-spacing: 0;
+  box-sizing: border-box;
+}
+.code-edit .code-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  pointer-events: none;
+}
+.code-edit .code-hl code { font: inherit; }
+.form-group .code-edit textarea.code-input {
+  position: relative;
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text-primary);
+  overflow: auto;
+}
+.form-group .code-edit textarea.code-input::selection {
+  background: rgba(108, 92, 231, 0.35);
+  color: transparent;
+}
+.form-group .code-edit textarea.code-input:focus { border-color: var(--accent); }
+
+.hl-comment  { color: var(--hl-comment); font-style: italic; }
+.hl-string   { color: var(--hl-string); }
+.hl-number   { color: var(--hl-number); }
+.hl-keyword  { color: var(--hl-keyword); }
+.hl-literal  { color: var(--hl-literal); }
+.hl-function { color: var(--hl-function); }
+.hl-builtin  { color: var(--hl-builtin); }
+.hl-property { color: var(--hl-property); }
+.hl-key      { color: var(--hl-key); }
+.hl-regex    { color: var(--hl-regex); }
+.hl-punct    { color: var(--hl-punct); }
+
+/* Состояние JSON под полем — остаётся на виду: это не пояснение, а
+   результат проверки (у него id, превращению в подсказку не подлежит). */
+.code-status { font-size: 11px; min-height: 15px; }
+.code-status.code-ok   { color: var(--success); }
+.code-status.code-warn { color: var(--warning); }
+.code-status.code-bad  { color: var(--danger); }
+
+/* ===== ЗАЩИТА ХОДА ПРИ ПРОВЕРКЕ ФОРМЫ ===== */
+.review-guard {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--success);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.review-guard-live { margin-top: 4px; color: var(--warning); }
+
+/* ===== ОТЧЁТ О ЗАВИСИМОСТЯХ ИНСТРУМЕНТА ===== */
+.dep-section { margin: 10px 0; }
+.dep-title { font-weight: 600; margin-bottom: 6px; }
+.dep-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.dep-manual { flex-direction: column; align-items: flex-start; }
+.dep-suggest { color: var(--text-secondary); font-size: 12px; }
+.dep-actions { display: flex; gap: 6px; flex-wrap: wrap; }

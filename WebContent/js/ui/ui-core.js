@@ -544,7 +544,8 @@ class UI {
   //  под полем — см. _applyHoverHints.
   // ══════════════════════════════════════════════
   _showModal(title, bodyHtml, onSave, onCancel, options = {}) {
-    const { wide = false, cls = '', resizable = true, review = null } = options;
+    const { wide = false, cls = '', resizable = true, review = null,
+            saveLabel = 'Сохранить', cancelLabel = 'Отмена' } = options;
     const id = 'modal_' + uid();
     const modals = document.getElementById('modals');
     // options.review = { kind, editId } — у редактора объекта появляется
@@ -558,8 +559,8 @@ class UI {
           ${rv ? rv.panel : ''}
           <div class="modal-actions">
             ${rv ? rv.button : ''}
-            <button class="btn btn-secondary" id="${id}_cancel">Отмена</button>
-            <button class="btn btn-primary" id="${id}_save">Сохранить</button>
+            <button class="btn btn-secondary" id="${id}_cancel">${cancelLabel}</button>
+            <button class="btn btn-primary" id="${id}_save">${saveLabel}</button>
           </div>
         </div>
       </div>
