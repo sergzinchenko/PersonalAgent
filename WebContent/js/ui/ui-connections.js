@@ -268,7 +268,7 @@ Object.assign(UI.prototype, {
       // и прятать его за лишним кликом незачем.
       this._openProviders.add(saved.id);
       await this._backToProviders();
-    }, () => this._backToProviders());
+    }, () => this._backToProviders(), { review: { kind: 'provider' } });
 
     document.querySelectorAll('input[name="pe_auth"]').forEach(r => {
       r.addEventListener('change', () => {
@@ -518,7 +518,7 @@ Object.assign(UI.prototype, {
       await this._backToProviders();
       // Своя раскладка: карточка модели шире прочих окон и растягивается,
       // а нынешний размер для неё — наименьший (см. .modal-model).
-    }, () => this._backToProviders(), { cls: 'modal-model' });
+    }, () => this._backToProviders(), { cls: 'modal-model', review: { kind: 'model' } });
 
     // max_tokens следует за окном контекста, пока пользователь не тронул
     // его вручную, — иначе выставленное здесь-же значение по умолчанию

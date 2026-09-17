@@ -2302,3 +2302,72 @@ iframe.sandbox-dialog-view {
   font-size: 12px;
   pointer-events: none;
 }
+
+/* ===== ПРОВЕРКА ФОРМЫ МОДЕЛЬЮ (ui/ui-review.js) ===== */
+.modal-actions .review-btn { margin-right: auto; }
+
+.review-panel {
+  margin: 14px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.review-close {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.review-close:hover { color: var(--text-primary); }
+.review-summary {
+  padding: 6px 8px;
+  border-left: 3px solid var(--border);
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+.review-summary.review-good { border-left-color: var(--success); }
+.review-summary.review-warn { border-left-color: var(--warning); }
+.review-summary.review-bad  { border-left-color: var(--danger); }
+.review-line { margin: 4px 0; }
+.review-muted { color: var(--text-muted); }
+.review-error { color: var(--danger); }
+
+.review-issue {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.review-issue-main { display: flex; gap: 6px; color: var(--text-primary); }
+.review-icon { flex: none; }
+.review-fix { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0 22px; }
+.review-fix-text {
+  flex-basis: 100%;
+  max-height: 240px;
+  overflow: auto;
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.review-applied { opacity: 0.6; }
+.review-subhead { font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
+.review-help { margin: 0; padding-left: 18px; color: var(--text-primary); }
+.review-raw { max-height: 320px; overflow: auto; }
+
+/* Поле, исправленное по совету модели, — видно, что его тронули. */
+.review-touched { outline: 1px dashed var(--accent); outline-offset: 1px; }

@@ -58,7 +58,7 @@ Object.assign(UI.prototype, {
         await this.agent.db.put('tools', toolObj);
         this.agent.tools.unregisterHandler(id);   // ← сбрасываем stale-handler из registry       
         this.renderTools();
-      });
+      }, null, { review: { kind: 'tool', editId } });
     };
     loadAndShow();
   },
@@ -113,7 +113,7 @@ Object.assign(UI.prototype, {
       this.folderSelection.tools = res.folder.id;
       await this.refreshSidebar();
       this.renderTools();
-    });
+    }, null, { review: { kind: 'mcp' } });
   },
 
   // Правка сервера: название и токен. URL показан, но недоступен для
@@ -153,7 +153,7 @@ Object.assign(UI.prototype, {
       await this.agent.tools.updateMcpServer(serverId, { name, token, transport });
       await this.refreshSidebar();
       this.renderTools();
-    });
+    }, null, { review: { kind: 'mcp', editId: serverId } });
   },
 
 
@@ -1285,7 +1285,7 @@ module.exports = {
         await this.agent.db.put('skills', obj);
         this.renderSkills();
         this.updateChatToolbar();
-      });
+      }, null, { review: { kind: 'skill', editId } });
 
       // Фильтр и счётчик отмеченного. Инструментов бывает много (одни
       // только встроенные — четвёртый десяток), без поиска список
@@ -1360,7 +1360,7 @@ module.exports = {
         await this.agent.db.put('prompts', obj);
         this.renderPrompts();
         this.refreshSidebar();
-      });
+      }, null, { review: { kind: 'prompt', editId } });
     };
     loadAndShow();
   }

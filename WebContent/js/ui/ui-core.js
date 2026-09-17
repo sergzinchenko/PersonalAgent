@@ -544,15 +544,20 @@ class UI {
   //  под полем — см. _applyHoverHints.
   // ══════════════════════════════════════════════
   _showModal(title, bodyHtml, onSave, onCancel, options = {}) {
-    const { wide = false, cls = '', resizable = true } = options;
+    const { wide = false, cls = '', resizable = true, review = null } = options;
     const id = 'modal_' + uid();
     const modals = document.getElementById('modals');
+    // options.review = { kind, editId } — у редактора объекта появляется
+    // «🩺 Проверить с моделью» (см. ui/ui-review.js).
+    const rv = review && typeof this._reviewControlsHtml === 'function' ? this._reviewControlsHtml(id) : null;
     modals.innerHTML = `
       <div class="modal-overlay" id="${id}">
         <div class="modal${wide ? ' modal-wide' : ''}${cls ? ' ' + cls : ''}">
           <h2>${title}</h2>
           ${bodyHtml}
+          ${rv ? rv.panel : ''}
           <div class="modal-actions">
+            ${rv ? rv.button : ''}
             <button class="btn btn-secondary" id="${id}_cancel">Отмена</button>
             <button class="btn btn-primary" id="${id}_save">Сохранить</button>
           </div>
@@ -561,6 +566,7 @@ class UI {
     `;
 
     const box = modals.querySelector('.modal');
+    if (rv) this._bindReview(id, review.kind, review.editId || null);
     this._applyHoverHints(box);
     this._watchModalHints(modals);
     if (resizable) this._makeResizable(box);

@@ -53,6 +53,7 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     'js/ui/ui-settings.js',
     'js/ui/ui-connections.js',
     'js/ui/ui-editors.js',
+    'js/ui/ui-review.js',
     'js/ui/ui-transfer.js',
   ];
   window.eval(files.map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n;\n') + '\nwindow.__UI = UI;\n');
@@ -651,6 +652,141 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
     ok('форма инструмента растягивается', fm.classList.contains('modal-resizable'));
     document.querySelector('#modals .modal-actions .btn-secondary').click();
     await pf;
+  }
+
+  // ══════════════════════════════════════════════
+  console.log('\n── Проверка формы моделью ──');
+  {
+    // Модель подменена: важно не что она ответит, а что ей отправили и
+    // как ответ показан и применён.
+    const sentToModel = [];
+    let reply = '';
+    ui.agent.llm = {
+      model: 'проверочная-модель',
+      isConfigured: () => true,
+      chat: async (messages) => { sentToModel.push(messages); return { content: reply, usage: { total_tokens: 321 } }; },
+    };
+    ui.agent.tools.loadTools = async () => [{ id: 'x1', name: 'slugify_text' }, { id: 'me', name: 'my_tool' }];
+
+    // ── Редактор инструмента ──
+    ui.showAddToolModal('me');
+    for (let i = 0; i < 50 && !document.querySelector('#modals .review-btn'); i++) await tick(1);
+    const btn = document.querySelector('#modals .review-btn');
+    ok('у редактора объекта есть «Проверить с моделью»', !!btn && /Проверить с моделью/.test(btn.textContent));
+
+    document.getElementById('t_name').value = 'my tool';
+    document.getElementById('t_params').value = '{ "type": "object", "properties": {} }';
+    document.getElementById('t_handler').value = 'return localStorage.getItem(params.q);';
+
+    reply = '```json\n' + JSON.stringify({
+      summary: 'Инструмент не заработает: имя и код с ошибками.',
+      issues: [
+        { field: 't_name', severity: 'error', message: 'В имени пробел', fix: 'my_tool' },
+        { field: 't_handler', severity: 'error', message: 'localStorage недоступен в песочнице',
+          fix: 'return { q: params.q };' },
+        { field: 't_params', severity: 'warning', message: 'Нет описания параметра q',
+          fix: { type: 'object', properties: { q: { type: 'string', description: 'запрос' } }, required: ['q'] } },
+        { field: "t_name'], body, [x", severity: 'tip', message: 'Поле, которого нет', fix: 'зло' },
+        { field: null, severity: 'tip', message: 'Добавьте пример вызова в описание' },
+      ],
+      help: ['Проверьте входные параметры в начале кода'],
+    }) + '\n```';
+    btn.click();
+    for (let i = 0; i < 50 && !document.querySelector('#modals .review-issue'); i++) await tick(1);
+
+    const req = sentToModel[0];
+    ok('модели ушла форма', !!req && req.length === 2 && req[0].role === 'system');
+    ok('с правилами именно этого вида объектов', /песочниц/.test(req[0].content) && /JSON Schema/.test(req[0].content));
+    const payload = JSON.parse(req[1].content);
+    ok('поля отправлены с подписями и значениями',
+       payload.поля.some(f => f.id === 't_handler' && /localStorage/.test(f.value) && /Handler Code/.test(f.label)),
+       JSON.stringify(payload.поля.map(f => f.id)));
+    ok('и соседние объекты для контекста — без самого редактируемого',
+       payload.контекст['другие инструменты (имена)'].includes('slugify_text') &&
+       !payload.контекст['другие инструменты (имена)'].includes('my_tool'));
+
+    const panel = document.querySelector('#modals .review-panel');
+    ok('отчёт показан прямо в окне', !panel.hidden && /не заработает/.test(panel.textContent));
+    ok('видно, какая модель проверяла и во что обошлось',
+       /проверочная-модель/.test(panel.textContent) && /321 токенов/.test(panel.textContent));
+    ok('замечания привязаны к полям по их подписям', /«Имя функции \(name\)»/.test(panel.textContent), panel.textContent.slice(0, 200));
+    ok('советы вне полей тоже показаны', /пример вызова/.test(panel.textContent) && /входные параметры/.test(panel.textContent));
+
+    // Исправление не применяется само.
+    ok('исправление не применяется без спроса', document.getElementById('t_name').value === 'my tool');
+
+    let inputFired = false;
+    document.getElementById('t_name').addEventListener('input', () => { inputFired = true; });
+    const applyBtns = panel.querySelectorAll('.review-apply');
+    applyBtns[0].click();
+    ok('«Применить» ставит исправленное значение в поле', document.getElementById('t_name').value === 'my_tool');
+    ok('форма узнаёт об этом как о ручном вводе', inputFired);
+    ok('кнопка отмечает, что применено', /Применено/.test(applyBtns[0].textContent) && applyBtns[0].disabled);
+
+    applyBtns[2].click();
+    ok('исправление-объект ставится в поле как JSON',
+       JSON.parse(document.getElementById('t_params').value).required[0] === 'q');
+
+    // id поля присылает модель — он не должен ломать поиск поля.
+    const bogus = Array.from(panel.querySelectorAll('.review-issue'))
+      .find(r => /Поле, которого нет/.test(r.textContent));
+    const bogusBtn = bogus && bogus.querySelector('.review-apply');
+    ok('поле с выдуманным id исправить не предлагается', !bogusBtn);
+
+    // Разметка из ответа модели не исполняется.
+    reply = JSON.stringify({ summary: '<img src=x onerror="window.__pwn=1">', issues: [
+      { field: 't_desc', severity: 'tip', message: '<b>жирно</b>' }], help: ['<script>window.__pwn=2</script>'] });
+    btn.click();
+    for (let i = 0; i < 50 && !/жирно/.test(panel.textContent); i++) await tick(1);
+    ok('разметка из ответа модели показывается текстом',
+       !panel.querySelector('img, script') &&
+       !Array.from(panel.querySelectorAll('b')).some(b => b.textContent === 'жирно') &&
+       /<b>жирно<\/b>/.test(panel.textContent) && !window.__pwn);
+
+    // Ответ не в условленном виде — всё равно полезен.
+    reply = 'Просто текст без JSON: имя плохое.';
+    btn.click();
+    for (let i = 0; i < 50 && !/не в условленном виде/.test(panel.textContent); i++) await tick(1);
+    ok('ответ не JSON-ом показан целиком', /не в условленном виде/.test(panel.textContent) && /имя плохое/.test(panel.textContent));
+
+    document.querySelector('#modals .modal-actions .btn-secondary:not(.review-btn)').click();
+
+    // ── Секреты модели не уходят ──
+    ui.agent.models = {
+      connections: [{ id: 'c9', name: 'P', apiUrl: 'https://api.example/v1', apiKey: 'sk-СЕКРЕТ-123',
+                      customHeaderName: '', customHeaderValue: '', enabled: true, models: [] }],
+      allModels: () => [], describe: () => null,
+    };
+    await ui.showProviderEditor('c9');
+    for (let i = 0; i < 50 && !document.querySelector('#modals .review-btn'); i++) await tick(1);
+    ok('у редактора провайдера тоже есть проверка', !!document.querySelector('#modals .review-btn'));
+    sentToModel.length = 0;
+    reply = JSON.stringify({ summary: 'ок', issues: [{ field: 'pe_key', severity: 'warning', message: 'ключ', fix: 'sk-НОВЫЙ' }], help: [] });
+    document.querySelector('#modals .review-btn').click();
+    for (let i = 0; i < 50 && !sentToModel.length; i++) await tick(1);
+    for (let i = 0; i < 50 && !document.querySelector('#modals .review-issue'); i++) await tick(1);
+    const wire = JSON.stringify(sentToModel);
+    ok('значение ключа модели не отправлено', !/СЕКРЕТ/.test(wire), wire.slice(0, 300));
+    ok('но сказано, что ключ задан', /секрет задан/.test(wire));
+    ok('исправлять секрет не предлагается', !document.querySelector('#modals .review-apply'));
+    document.querySelector('#modals .modal-actions .btn-secondary:not(.review-btn)').click();
+
+    // ── Модель не настроена ──
+    ui.agent.llm = { isConfigured: () => false };
+    ui.showAddPromptModal();
+    for (let i = 0; i < 50 && !document.querySelector('#modals .review-btn'); i++) await tick(1);
+    document.querySelector('#modals .review-btn').click();
+    await tick();
+    ok('без модели — объяснение, а не молчание',
+       /Модель не настроена/.test(document.querySelector('#modals .review-panel').textContent));
+    document.querySelector('#modals .modal-actions .btn-secondary:not(.review-btn)').click();
+
+    // У простого вопроса «да/нет» проверять нечего.
+    const q = ui._confirm('Удалить?');
+    await tick();
+    ok('у вопроса «да/нет» кнопки проверки нет', !document.querySelector('#modals .review-btn'));
+    document.querySelector('#modals .modal-actions .btn-secondary').click();
+    await q;
   }
 
   console.log('\n' + '='.repeat(46));
