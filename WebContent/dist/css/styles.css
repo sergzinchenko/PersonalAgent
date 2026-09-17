@@ -25,6 +25,17 @@
   --header-h: 56px;
   --tint-soft: rgba(255,255,255,0.02);
   --overlay-strong: rgba(15,15,20,0.94);
+  --hl-comment: #6a6a8c;
+  --hl-string: #7ee2a8;
+  --hl-number: #f8b26a;
+  --hl-keyword: #c792ea;
+  --hl-literal: #ff9cac;
+  --hl-function: #82aaff;
+  --hl-builtin: #4fd6be;
+  --hl-property: #b8c4ff;
+  --hl-key: #82aaff;
+  --hl-regex: #ffcb6b;
+  --hl-punct: #9999bb;
 }
 
 /* ===== ТЕМА: СВЕТЛАЯ =====
@@ -54,6 +65,17 @@
   --shadow: 0 4px 24px rgba(30,30,60,0.12);
   --tint-soft: rgba(0,0,0,0.025);
   --overlay-strong: rgba(255,255,255,0.94);
+  --hl-comment: #8a8aa0;
+  --hl-string: #107a3e;
+  --hl-number: #b35c00;
+  --hl-keyword: #7b2fb5;
+  --hl-literal: #c2185b;
+  --hl-function: #1f5fbf;
+  --hl-builtin: #00796b;
+  --hl-property: #3949ab;
+  --hl-key: #1f5fbf;
+  --hl-regex: #9a6700;
+  --hl-punct: #55556f;
 }
 
 @media (prefers-color-scheme: light) {
@@ -75,6 +97,17 @@
     --shadow: 0 4px 24px rgba(30,30,60,0.12);
     --tint-soft: rgba(0,0,0,0.025);
     --overlay-strong: rgba(255,255,255,0.94);
+  --hl-comment: #8a8aa0;
+  --hl-string: #107a3e;
+  --hl-number: #b35c00;
+  --hl-keyword: #7b2fb5;
+  --hl-literal: #c2185b;
+  --hl-function: #1f5fbf;
+  --hl-builtin: #00796b;
+  --hl-property: #3949ab;
+  --hl-key: #1f5fbf;
+  --hl-regex: #9a6700;
+  --hl-punct: #55556f;
   }
 }
 
@@ -602,6 +635,34 @@ body.resizing-sidebar #sidebar * { pointer-events: none; }
   white-space: nowrap;
 }
 .agent-status .status-timer.near-limit { color: var(--warning); }
+
+/* Отчёт пробы модели в карточке: несколько коротких строк, каждая —
+   отдельная находка. Плохие новости выделены, но не криком. */
+.probe-report { margin: 4px 0 0; }
+.probe-line {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 3px 0 3px 10px;
+  border-left: 2px solid var(--border);
+}
+.probe-line.probe-bad { color: var(--warning); border-left-color: var(--warning); }
+
+/* Постоянная память: список записей в окне сводки. */
+.mem-list { max-height: 50vh; overflow-y: auto; }
+.mem-item { border-bottom: 1px solid var(--border); padding: 6px 0; }
+.mem-item > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.mem-item > summary::-webkit-details-marker { display: none; }
+.mem-item > summary::before { content: '▸'; color: var(--text-muted); }
+.mem-item[open] > summary::before { content: '▾'; }
+.mem-key { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.mem-size { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
 /* ── Проверка ограничений (вкладка «Ограничения») ──
    Замечание должно читаться как разбор, а не как ошибка формы: сначала
@@ -2084,3 +2145,358 @@ body.resizing-plan #plan-panel * { pointer-events: none; }
   color: var(--text-secondary);
   border-left: 2px solid var(--warning);
 }
+
+/* ===== ОКНО ИНСТРУМЕНТА (кадр песочницы) =====
+   Приложение рисует только рамку: содержимое — это сам <iframe>
+   песочницы, положенный поверх неё (см. showSandboxDialog в
+   js/ui/ui-editors.js). Кадр при этом остаётся на своём месте в дереве —
+   перенос <iframe> перезагрузил бы документ и убил идущий инструмент. */
+.sandbox-dialog-veil {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 1200;
+  animation: fadeIn 0.2s ease;
+}
+
+.sandbox-dialog-frame {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1201;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  overflow: hidden;
+  animation: slideUp 0.25s ease;
+}
+
+.sandbox-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.sandbox-dialog-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Видно, что окно нарисовало не приложение: внутри чужая вёрстка, и
+   человек вправе об этом знать, прежде чем что-то туда вводить. */
+.sandbox-dialog-mark {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.sandbox-dialog-close {
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.sandbox-dialog-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* Сам кадр на время показа. Фон белый намеренно: документ инструмента
+   про тему приложения ничего не знает, и на тёмном фоне его текст по
+   умолчанию был бы нечитаем. */
+iframe.sandbox-dialog-view {
+  z-index: 1202;
+  background: #fff;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+/* Фон не прокручивается: кадр закреплён на месте, и уезжающая под ним
+   страница выглядела бы поломкой. */
+.sandbox-dialog-open, .sandbox-dialog-open body { overflow: hidden; }
+
+/* ===== КАРТОЧКА МОДЕЛИ =====
+   Шире обычного окна: в ней три числовых поля в ряд и отчёт пробы, а в
+   520px всё это слипалось. Растягивается мышью за угол, но только в
+   большую сторону — нынешний размер задан как наименьший, потому что
+   меньше содержимое уже не помещается. */
+.modal.modal-model {
+  width: min(880px, 96vw);
+  min-width: min(880px, 96vw);
+  max-width: 96vw;
+  min-height: 520px;
+  max-height: 92vh;
+  resize: both;
+  overflow: auto;
+}
+
+/* Подпись с подсказкой при наведении. Знак вопроса нужен, чтобы о
+   подсказке вообще узнали: невидимый title читают только те, кто и так
+   знает, что он там есть. */
+.lbl-hint { cursor: help; }
+/* Знак вопроса рисуется стилем, а не разметкой: подсказки превращаются из
+   текста автоматически (см. _applyHoverHints), и лишний элемент в подписи
+   пришлось бы вставлять туда же — а подписи бывают и с полем внутри. */
+.lbl-hint::after {
+  content: '?';
+  display: inline-block;
+  margin-left: 5px;
+  width: 13px;
+  height: 13px;
+  line-height: 13px;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  vertical-align: 1px;
+  flex: none;
+}
+.lbl-hint:hover::after { background: var(--accent); color: #fff; }
+
+/* Место под «Заметкой» до пробы не пустует: там сказано, что в нём
+   появится и как это получить. */
+.probe-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.probe-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+/* ===== ОБРАТНЫЙ ОТСЧЁТ ОЖИДАНИЯ =====
+   Пока окно инструмента открыто, ход агента стоит. Человек об этом знать
+   не обязан — поэтому видно, сколько его ещё ждут, и отсчёт можно снять. */
+.wait-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.wait-countdown .wait-clock { font-size: 10px; }
+.wait-countdown.wait-soon { color: var(--warning); border-color: var(--warning); }
+.wait-countdown.wait-over { color: var(--danger); border-color: var(--danger); }
+.wait-countdown.wait-held { color: var(--text-muted); }
+
+.wait-stop {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  font-size: 10px;
+  color: var(--accent-light);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.wait-stop:hover { color: var(--accent); }
+
+
+/* ===== РАСТЯГИВАЕМОЕ ОКНО =====
+   Тянется за правый нижний угол. Размер при открытии закреплён как
+   наименьший (см. _makeResizable), здесь снят только потолок: обычные 520
+   пикселей ширины и 80% высоты мешали бы растянуть окно. */
+.modal.modal-resizable {
+  resize: both;
+  overflow: auto;
+  max-width: 96vw;
+  max-height: 92vh;
+}
+.modal.modal-resizable:not(.modal-wide)::after {
+  content: '⁘';
+  position: sticky;
+  float: right;
+  bottom: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* ===== ПРОВЕРКА ФОРМЫ МОДЕЛЬЮ (ui/ui-review.js) ===== */
+.modal-actions .review-btn { margin-right: auto; }
+.modal-actions .modal-aside-btn { order: -1; margin-right: auto; align-self: center; }
+/* Рядом с кнопкой-справкой подписи кнопок выбора не переносятся: в
+   узком окне «Начать с нуля» разваливалось на две строки. */
+.modal-actions:has(.modal-aside-btn) .btn { white-space: nowrap; }
+
+.review-panel {
+  margin: 14px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.review-close {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.review-close:hover { color: var(--text-primary); }
+.review-summary {
+  padding: 6px 8px;
+  border-left: 3px solid var(--border);
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+.review-summary.review-good { border-left-color: var(--success); }
+.review-summary.review-warn { border-left-color: var(--warning); }
+.review-summary.review-bad  { border-left-color: var(--danger); }
+.review-line { margin: 4px 0; }
+.review-muted { color: var(--text-muted); }
+.review-error { color: var(--danger); }
+
+.review-issue {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.review-issue-main { display: flex; gap: 6px; color: var(--text-primary); }
+.review-icon { flex: none; }
+.review-fix { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0 22px; }
+.review-fix-text {
+  flex-basis: 100%;
+  max-height: 240px;
+  overflow: auto;
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.review-applied { opacity: 0.6; }
+.review-subhead { font-weight: 600; color: var(--text-secondary); margin: 10px 0 4px; }
+.review-help { margin: 0; padding-left: 18px; color: var(--text-primary); }
+.review-raw { max-height: 320px; overflow: auto; }
+
+/* Поле, исправленное по совету модели, — видно, что его тронули. */
+.review-touched { outline: 1px dashed var(--accent); outline-offset: 1px; }
+
+
+/* ===== ПОДСВЕТКА КОДА В ПОЛЯХ (ui/code-highlight.js) =====
+   Раскрашенный <pre> лежит точно под прозрачным текстом <textarea>.
+   Совпадать у них должно всё, что влияет на положение символов: шрифт,
+   размер, межстрочный интервал, отступы, рамка, перенос. Поэтому эти
+   свойства заданы здесь обоим сразу, а не унаследованы по отдельности. */
+.code-edit { position: relative; }
+.code-edit .code-hl,
+.form-group .code-edit textarea.code-input {
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 2;
+  letter-spacing: 0;
+  box-sizing: border-box;
+}
+.code-edit .code-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  pointer-events: none;
+}
+.code-edit .code-hl code { font: inherit; }
+.form-group .code-edit textarea.code-input {
+  position: relative;
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text-primary);
+  overflow: auto;
+}
+.form-group .code-edit textarea.code-input::selection {
+  background: rgba(108, 92, 231, 0.35);
+  color: transparent;
+}
+.form-group .code-edit textarea.code-input:focus { border-color: var(--accent); }
+
+.hl-comment  { color: var(--hl-comment); font-style: italic; }
+.hl-string   { color: var(--hl-string); }
+.hl-number   { color: var(--hl-number); }
+.hl-keyword  { color: var(--hl-keyword); }
+.hl-literal  { color: var(--hl-literal); }
+.hl-function { color: var(--hl-function); }
+.hl-builtin  { color: var(--hl-builtin); }
+.hl-property { color: var(--hl-property); }
+.hl-key      { color: var(--hl-key); }
+.hl-regex    { color: var(--hl-regex); }
+.hl-punct    { color: var(--hl-punct); }
+
+/* Состояние JSON под полем — остаётся на виду: это не пояснение, а
+   результат проверки (у него id, превращению в подсказку не подлежит). */
+.code-status { font-size: 11px; min-height: 15px; }
+.code-status.code-ok   { color: var(--success); }
+.code-status.code-warn { color: var(--warning); }
+.code-status.code-bad  { color: var(--danger); }
+
+/* ===== ЗАЩИТА ХОДА ПРИ ПРОВЕРКЕ ФОРМЫ ===== */
+.review-guard {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--success);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.review-guard-live { margin-top: 4px; color: var(--warning); }
+
+/* ===== ОТЧЁТ О ЗАВИСИМОСТЯХ ИНСТРУМЕНТА ===== */
+.dep-section { margin: 10px 0; }
+.dep-title { font-weight: 600; margin-bottom: 6px; }
+.dep-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.dep-manual { flex-direction: column; align-items: flex-start; }
+.dep-suggest { color: var(--text-secondary); font-size: 12px; }
+.dep-actions { display: flex; gap: 6px; flex-wrap: wrap; }
