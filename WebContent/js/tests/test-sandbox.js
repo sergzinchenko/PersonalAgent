@@ -679,6 +679,55 @@ class FakeDB {
   }
 
   // ══════════════════════════════════════════════
+  console.log('\n── Готовый кадр живёт дольше таймера готовности ──');
+  {
+    // Кадр отвечал «готов», промис выполнялся — а таймер готовности
+    // оставался взведённым и через три секунды сносил работающий кадр.
+    // Короткие вызовы успевали закончиться, а форма, где ждут человека,
+    // теряла кадр посреди работы: ответ уходил в пустоту, вызов висел до
+    // своего таймаута, и в консоли не было ничего. Нашлось только в
+    // настоящем браузере — здесь все вызовы укладывались в миллисекунды.
+    const was = X.ToolSandbox.READY_TIMEOUT_MS;
+    X.ToolSandbox.READY_TIMEOUT_MS = 40;
+    const sb = new X.ToolSandbox({ doc: document });
+    const sent = [];
+    const p = sb.run('return 1;', {}, { timeoutMs: 5000 });
+    for (let i = 0; i < 50 && !sb.frame; i++) await tick(1);
+    // «Готов» — настоящим путём, через обработчик сообщений.
+    sb._send = (m) => sent.push(m);
+    sb._onMessage({ source: sb.frame.contentWindow, data: { __ts: 1, type: 'ready' } });
+    for (let i = 0; i < 50 && !sb.pending.size; i++) await tick(1);
+    const frameBefore = sb.frame;
+
+    await new Promise(r => setTimeout(r, 150));   // втрое дольше таймера готовности
+    ok('после «готов» кадр не сносится по таймеру готовности',
+       !!sb.frame && sb.frame === frameBefore, String(!!sb.frame));
+    ok('и вызов в нём продолжается', sb.pending.size === 1, String(sb.pending.size));
+
+    const runId = sent.find(m => m.type === 'run').id;
+    sb._onMessage({ source: sb.frame.contentWindow, data: { __ts: 1, type: 'result', id: runId, value: 42 } });
+    ok('результат долгого вызова доходит', (await p) === 42);
+    sb.destroy();
+    X.ToolSandbox.READY_TIMEOUT_MS = was;
+  }
+
+  {
+    // Если кадр всё-таки пропал, ответ моста не должен исчезать молча:
+    // у него нет своей записи в pending, и раньше вызов просто висел.
+    const sb = new X.ToolSandbox({ doc: document });
+    let resolved = null;
+    sb.pending.set('r9', { done: (v) => { resolved = v; sb.pending.delete('r9'); }, timer: null });
+    sb.frame = null;
+    const errs = [];
+    const origErr = console.error;
+    console.error = (...a) => errs.push(a.join(' '));
+    try { sb._send({ __ts: 1, type: 'host-result', id: 'h1', value: {} }); }
+    finally { console.error = origErr; }
+    ok('недоставленный ответ моста завершает ждущий вызов ошибкой',
+       resolved && /не доставлен/.test(resolved.error), JSON.stringify(resolved));
+    ok('и оставляет след в консоли', errs.some(e => /не доставлено/.test(e)), errs.join(' | '));
+  }
+
   console.log('\n── Экранная форма из песочницы ──');
   {
     // Описание формы пишет модель, поэтому доверять ему нельзя ни в
