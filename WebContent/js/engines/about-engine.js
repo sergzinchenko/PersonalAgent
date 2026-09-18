@@ -83,6 +83,18 @@ class AboutEngine {
 
   all() { return APP_RELEASES.slice(); }
 
+  // ── Категории доработок ──
+  // Движок отдаёт их наружу сам, чтобы ни интерфейс, ни инструменты не
+  // лезли в changelog.js напрямую: перечень и правила разбора живут в
+  // одном месте (см. releaseItems/releaseCategoryCounts).
+  categories() { return APP_RELEASE_CATEGORIES.slice(); }
+
+  category(id) { return releaseCategory(id); }
+
+  itemsOf(release) { return releaseItems(release); }
+
+  categoryCounts(releases) { return releaseCategoryCounts(releases || APP_RELEASES); }
+
   byNumber(n) { return releaseByNumber(n); }
 
   async lastSeenRelease() {

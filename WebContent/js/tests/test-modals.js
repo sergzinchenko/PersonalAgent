@@ -963,6 +963,14 @@ const tick = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise(r 
       ],
       unread: async () => [],
       markRead: async () => { marked = true; },
+      // Категории окно спрашивает у движка истории — заглушка отвечает
+      // тем же, чем настоящий (см. core/changelog.js).
+      categories: () => [{ id: 'chat', icon: '💬', label: 'Чат и работа', hint: '' },
+                         { id: 'tools', icon: '🔧', label: 'Инструменты', hint: '' }],
+      category: (id) => ({ id, icon: '•', label: id }),
+      itemsOf: (r) => (r.items || []).map(t => (typeof t === 'string' ? { cat: 'chat', text: t } : t)),
+      categoryCounts: (list) => [{ id: 'chat', icon: '💬', label: 'Чат и работа', hint: '',
+        count: (list || []).reduce((n, r) => n + r.items.length, 0) }],
     };
     ui.updateReleaseBadge = async () => {};
     ui.showBackupImportModal = async () => 'восстановление';

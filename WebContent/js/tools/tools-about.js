@@ -63,6 +63,16 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerAboutHandlers() {
     const action = String(p.action || 'unread').toLowerCase();
     const limit = Math.min(30, Math.max(1, parseInt(p.limit, 10) || 6));
 
+    // ── Отбор по категории ──
+    // «Что нового по инструментам?» — обычный вопрос, и перебирать ради
+    // него всю историю модели незачем. Релизы без пунктов нужной
+    // категории из ответа выпадают целиком.
+    const known = new Set(about.categories().map(c => c.id));
+    const wanted = p.category && known.has(String(p.category)) ? String(p.category) : '';
+    const byCategory = (releases) => !wanted ? releases : releases
+      .map(r => ({ ...r, items: about.itemsOf(r).filter(i => i.cat === wanted) }))
+      .filter(r => r.items.length);
+
     // Общая для всех ответов подпись: инструмент отдаёт готовые
     // формулировки, и без этой строки модель охотно «дополняет» их
     // догадками о том, как всё устроено внутри.
@@ -79,6 +89,14 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerAboutHandlers() {
       };
     }
 
+    if (action === 'categories') {
+      return {
+        categories: about.categoryCounts(about.all()).map(c => ({ id: c.id, label: c.label, items: c.count })),
+        note: 'Это разделы доработок. Любое действие можно ограничить одним из них: category=<id>.',
+        guidance: guard,
+      };
+    }
+
     if (action === 'release') {
       const rel = about.byNumber(p.n);
       if (!rel) return { error: `Релиза ${p.n} нет. Всего релизов: ${about.releaseCount()}.` };
@@ -86,7 +104,7 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerAboutHandlers() {
     }
 
     if (action === 'all') {
-      const all = about.all();
+      const all = byCategory(about.all());
       const shown = all.slice(-limit);
       return {
         releases: shown,
@@ -108,7 +126,7 @@ ToolsEngine.HANDLER_CONTRIBUTORS.push(function registerAboutHandlers() {
 
     if (action === 'unread') {
       const seen = await about.lastSeenRelease();
-      const list = await about.unread();
+      const list = byCategory(await about.unread());
       return {
         releases: list,
         unread: list.length,
@@ -157,7 +175,11 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function aboutDefs() {
         'История доработок агента по релизам: какие возможности появлялись и в каком порядке. ' +
         'action=unread — то, чего пользователь ещё не видел (по умолчанию); all — история (последние limit релизов); ' +
         'release + n — конкретный релиз; count — сколько всего релизов и на каком пользователь остановился; ' +
-        'mark_read — отметить рассказанное прочитанным.\n' +
+        'categories — разделы доработок и сколько пунктов в каждом; mark_read — отметить рассказанное прочитанным.\n' +
+        'У каждого пункта есть раздел (cat): chat — чат и работа, models — модели и сервисы, ' +
+        'tools — инструменты, skills — навыки и промпты, data — файлы и данные, ' +
+        'net — сеть и внешние системы, security — безопасность, ui — интерфейс. ' +
+        'Параметр category сужает ответ до одного раздела — так отвечают на «что нового по инструментам».\n' +
         'Вызывай на вопросы «что нового», «что появилось», «что ты умеешь», «когда это добавили». ' +
         'Пересказывай возможности своими словами и НЕ объясняй, как они устроены внутри.',
       parameters: {
@@ -165,11 +187,16 @@ ToolsEngine.DEF_CONTRIBUTORS.push(function aboutDefs() {
         properties: {
           action: {
             type: 'string',
-            enum: ['unread', 'all', 'release', 'count', 'mark_read'],
+            enum: ['unread', 'all', 'release', 'count', 'categories', 'mark_read'],
             description: 'Что показать. По умолчанию unread.',
           },
           n: { type: 'number', description: 'Номер релиза — для action=release; для mark_read — по какой номер считать прочитанным.' },
           limit: { type: 'number', description: 'Сколько последних релизов вернуть для action=all. По умолчанию 6, максимум 30.' },
+          category: {
+            type: 'string',
+            enum: ['chat', 'models', 'tools', 'skills', 'data', 'net', 'security', 'ui'],
+            description: 'Показать только пункты этого раздела (для action=unread и all).',
+          },
         },
         required: [],
       },

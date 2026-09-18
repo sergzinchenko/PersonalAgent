@@ -90,7 +90,8 @@ class FakeDB {
   ];
   window.eval(files.map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n;\n') +
     '\nwindow.__X = { UI, AboutEngine, SkillsEngine, TasksEngine, ToolsEngine, SecurityEngine,' +
-    ' APP_RELEASES, APP_RELEASE_COUNT, releasesSince };\n');
+    ' APP_RELEASES, APP_RELEASE_COUNT, releasesSince, APP_RELEASE_CATEGORIES,' +
+    ' releaseItems, releaseCategory, releaseCategoryCounts };\n');
   const X = window.__X;
 
   // ══════════════════════════════════════════════
@@ -134,6 +135,37 @@ class FakeDB {
 
   // ══════════════════════════════════════════════
   console.log('\n── История доработок: содержимое ──');
+  // ── Категории ──
+  {
+    const cats = X.APP_RELEASE_CATEGORIES;
+    ok('категории описаны: код, значок, подпись',
+       cats.length >= 6 && cats.every(c => c.id && c.icon && c.label));
+    ok('коды категорий не повторяются', new Set(cats.map(c => c.id)).size === cats.length);
+
+    const known = new Set(cats.map(c => c.id));
+    const items = X.APP_RELEASES.flatMap(r => X.releaseItems(r));
+    ok('категория есть у каждого пункта', items.every(i => i.cat), String(items.filter(i => !i.cat).length));
+    const unknown = items.filter(i => !known.has(i.cat));
+    ok('и все они из перечня — «прочего» не осталось', unknown.length === 0,
+       unknown.slice(0, 3).map(i => i.cat + ': ' + i.text.slice(0, 40)).join(' | '));
+
+    // Раскладка должна быть осмысленной, а не «всё в одну кучу».
+    const counts = X.releaseCategoryCounts(X.APP_RELEASES);
+    ok('заполнено не меньше шести категорий', counts.length >= 6, String(counts.length));
+    const biggest = Math.max(...counts.map(c => c.count));
+    ok('ни одна категория не собрала больше половины пунктов', biggest < items.length / 2,
+       biggest + ' из ' + items.length);
+    ok('счётчики сходятся с числом пунктов', counts.reduce((n, c) => n + c.count, 0) === items.length);
+    ok('порядок категорий постоянный — как в перечне',
+       counts.map(c => c.id).join(',') === cats.filter(c => counts.some(x => x.id === c.id)).map(c => c.id).join(','));
+
+    // Старая запись (строка) не должна ломать показ.
+    const legacy = X.releaseItems({ items: ['пункт без категории'] });
+    ok('пункт-строка превращается в «Прочее»', legacy[0].cat === 'other' && legacy[0].text === 'пункт без категории');
+    ok('неизвестный код категории тоже — «Прочее»', X.releaseCategory('нет-такой').id === 'other');
+
+  }
+
   const rel = X.APP_RELEASES;
   ok('релизы пронумерованы подряд с единицы', rel.every((r, i) => r.n === i + 1));
   ok('счётчик совпадает с числом релизов', X.APP_RELEASE_COUNT === rel.length);
@@ -144,11 +176,16 @@ class FakeDB {
   // Главная проверка требования «без раскрытия принципов реализации»:
   // это про слова, а не про структуру, поэтому и проверяется словами.
   const leaks = /IndexedDB|localStorage|prototype|systemPrompt|\.js\b|store\b|хранилищ|таблиц|индекс|обработчик|модул|класс[еа]?\b|исходник|код[еа]?\b/i;
+  // Пункт теперь — { cat, text }, и проверять надо текст: регулярное
+  // выражение по объекту молча не находит ничего и «проходит».
+  const textsOf = (r) => [r.title, ...X.releaseItems(r).map(i => i.text)];
   const leaking = [];
   for (const r of rel) {
-    for (const item of [r.title, ...r.items]) if (leaks.test(item)) leaking.push(item);
+    for (const item of textsOf(r)) if (leaks.test(item)) leaking.push(item);
   }
   ok('в истории нет технических подробностей устройства', leaking.length === 0, leaking.join(' | '));
+  ok('пункты — объекты с текстом, а не строки',
+     rel.every(r => r.items.every(i => i && typeof i.text === 'string' && i.text.length > 10)));
 
   // ══════════════════════════════════════════════
   console.log('\n── Непрочитанное ──');
@@ -174,8 +211,36 @@ class FakeDB {
   ok('agent_name — системный инструмент', !!nameDef && nameDef.locked === true && nameDef.enabled === true);
   ok('whats_new — системный инструмент', !!newsDef && newsDef.locked === true && newsDef.enabled === true);
   ok('описание whats_new запрещает раскрывать устройство', /НЕ объясняй, как они устроены/.test(newsDef.description));
+  ok('в описании whats_new перечислены существующие разделы',
+     X.APP_RELEASE_CATEGORIES.every(c => newsDef.description.includes(c.id)),
+     X.APP_RELEASE_CATEGORIES.filter(c => !newsDef.description.includes(c.id)).map(c => c.id).join(','));
+  ok('и отбор по разделу объявлен в схеме',
+     (newsDef.parameters.properties.category.enum || []).join(',') === X.APP_RELEASE_CATEGORIES.map(c => c.id).join(','));
 
   await tools.loadTools();
+
+  // ── Разделы доработок у инструмента ──
+  {
+    const cats = await tools.executeTool('whats_new', { action: 'categories' });
+    ok('whats_new отдаёт перечень разделов с числом пунктов',
+       Array.isArray(cats.categories) && cats.categories.length >= 6 &&
+       cats.categories.every(c => c.id && c.label && c.items > 0), JSON.stringify(cats.categories));
+
+    const all = await tools.executeTool('whats_new', { action: 'all', limit: 30 });
+    const tools_only = await tools.executeTool('whats_new', { action: 'all', limit: 30, category: 'tools' });
+    const flat = (res) => res.releases.flatMap(r => X.releaseItems(r));
+    ok('отбор по разделу оставляет только его пункты',
+       flat(tools_only).length > 0 && flat(tools_only).every(i => i.cat === 'tools'),
+       JSON.stringify(flat(tools_only).map(i => i.cat).slice(0, 5)));
+    ok('и выбрасывает релизы, где этого раздела нет',
+       tools_only.releases.length < all.releases.length,
+       tools_only.releases.length + ' из ' + all.releases.length);
+    ok('пункты в ответе остаются с текстом и разделом',
+       flat(tools_only).every(i => typeof i.text === 'string' && i.text.length > 10));
+    const bogus = await tools.executeTool('whats_new', { action: 'all', limit: 30, category: 'нет-такого' });
+    ok('неизвестный раздел не сужает ответ молча — показывается всё',
+       bogus.releases.length === all.releases.length);
+  }
   const got = await tools.executeTool('agent_name', { action: 'get' });
   ok('agent_name get возвращает текущее имя', got.name === 'Пятница' && got.has_name === true);
   const renamed = await tools.executeTool('agent_name', { action: 'set', name: 'Ада' });
@@ -280,6 +345,63 @@ class FakeDB {
   ok('после показа непрочитанного не остаётся', (await about2.unread()).length === 0);
   await ui.updateReleaseBadge();
   ok('подсветка счётчика снята', !badge.classList.contains('has-unread'));
+
+  console.log('\n── Окно истории: раскладка по категориям ──');
+  {
+    await ui.showWhatsNewModal({ onlyUnread: false, markRead: false });
+    await tick();
+    const box = document.querySelector('#modals .modal');
+    const chips = Array.from(box.querySelectorAll('.rel-chip'));
+    const groups = Array.from(box.querySelectorAll('.rel-group'));
+
+    ok('над историей есть фильтр по категориям', chips.length >= 7 && chips[0].dataset.cat === '');
+    ok('у каждой категории показано, сколько в ней пунктов',
+       chips.slice(1).every(c => /^\d+$/.test(c.querySelector('.rel-count').textContent)));
+    ok('счётчики фильтра сходятся с историей', (() => {
+      const byChip = Object.fromEntries(chips.slice(1).map(c => [c.dataset.cat, +c.querySelector('.rel-count').textContent]));
+      const real = {};
+      for (const r of X.APP_RELEASES) for (const i of X.releaseItems(r)) real[i.cat] = (real[i.cat] || 0) + 1;
+      return JSON.stringify(byChip) === JSON.stringify(Object.fromEntries(
+        X.APP_RELEASE_CATEGORIES.filter(c => real[c.id]).map(c => [c.id, real[c.id]])));
+    })());
+    ok('пункты внутри релиза сгруппированы по категориям', groups.length > 0 &&
+       groups.every(g => !!g.dataset.cat && !!g.querySelector('li')));
+    ok('у группы видно её название', /Инструменты|Чат и работа|Безопасность/.test(box.textContent));
+    ok('порядок групп внутри релиза — из перечня категорий', (() => {
+      const order = X.APP_RELEASE_CATEGORIES.map(c => c.id);
+      return Array.from(box.querySelectorAll('.rel-release')).every(rel => {
+        const seen = Array.from(rel.querySelectorAll('.rel-group')).map(g => g.dataset.cat);
+        const sorted = seen.slice().sort((a, b) => order.indexOf(a) - order.indexOf(b));
+        return seen.join(',') === sorted.join(',');
+      });
+    })());
+
+    // Выбор категории: чужие группы и релизы без неё скрыты.
+    const toolsChip = chips.find(c => c.dataset.cat === 'tools');
+    toolsChip.click();
+    await tick();
+    const visibleGroups = groups.filter(g => !g.hidden);
+    ok('выбранная категория оставляет только свои пункты',
+       visibleGroups.length > 0 && visibleGroups.every(g => g.dataset.cat === 'tools'));
+    ok('релизы без этой категории скрыты целиком',
+       Array.from(box.querySelectorAll('.rel-release')).every(r =>
+         r.hidden === !(' ' + r.dataset.cats + ' ').includes(' tools ')));
+    ok('выбранная кнопка отмечена', toolsChip.classList.contains('active') &&
+       !chips[0].classList.contains('active'));
+
+    chips[0].click();
+    await tick();
+    ok('«Все» возвращает показ целиком',
+       groups.every(g => !g.hidden) &&
+       Array.from(box.querySelectorAll('.rel-release')).every(r => !r.hidden));
+
+    // Текст пунктов при этом не потерялся и не превратился в [object Object].
+    ok('пункты показаны текстом', !/\[object Object\]/.test(box.textContent) &&
+       box.textContent.includes(X.releaseItems(X.APP_RELEASES[0])[0].text.slice(0, 40)));
+
+    document.querySelector('#modals .modal-actions .btn-primary').click();
+    await tick();
+  }
 
   console.log('\n── Что показывать при запуске ──');
   // Новичку окно не показывают: догонять ему нечего, для него всё

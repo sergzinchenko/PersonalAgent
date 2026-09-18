@@ -121,12 +121,45 @@ Object.assign(UI.prototype, {
       return;
     }
 
+    // ── Раскладка по категориям ──
+    // Тридцать релизов подряд читаются как сплошная лента, в которой
+    // невозможно найти «а что там было про инструменты». Поэтому внутри
+    // релиза пункты сгруппированы по категориям в постоянном порядке, а
+    // сверху — фильтр: одна категория показывает только своё, и релизы
+    // без её пунктов не мешают.
+    const counts = about.categoryCounts(list);
+    const filter = counts.length > 1
+      ? `<div class="rel-filter" id="rel_filter">
+           <button type="button" class="rel-chip rel-chip-all active" data-cat="">Все
+             <span class="rel-count">${list.reduce((n, r) => n + about.itemsOf(r).length, 0)}</span></button>
+           ${counts.map(c => `<button type="button" class="rel-chip" data-cat="${this._escHtml(c.id)}"
+              title="${this._escHtml(c.hint || '')}">${c.icon} ${this._escHtml(c.label)}
+              <span class="rel-count">${c.count}</span></button>`).join('')}
+         </div>`
+      : '';
+
     // От новых к старым: последнее сделанное интереснее первого.
-    const rows = list.slice().reverse().map(r => `
-      <div class="form-group">
-        <label>Релиз ${r.n} — ${this._escHtml(r.title)}</label>
-        <ul class="sec-risks">${r.items.map(i => `<li>${this._escHtml(i)}</li>`).join('')}</ul>
-      </div>`).join('');
+    const rows = list.slice().reverse().map(r => {
+      const byCat = new Map();
+      for (const it of about.itemsOf(r)) {
+        if (!byCat.has(it.cat)) byCat.set(it.cat, []);
+        byCat.get(it.cat).push(it.text);
+      }
+      // Порядок категорий внутри релиза — общий для всех релизов: так
+      // глаз находит нужную группу на том же месте, а не ищет заново.
+      const groups = about.categories().concat([about.category('other')])
+        .filter(c => byCat.has(c.id))
+        .map(c => `
+          <div class="rel-group" data-cat="${this._escHtml(c.id)}">
+            <div class="rel-group-head">${c.icon} ${this._escHtml(c.label)}</div>
+            <ul class="sec-risks">${byCat.get(c.id).map(t => `<li>${this._escHtml(t)}</li>`).join('')}</ul>
+          </div>`).join('');
+      return `
+        <div class="form-group rel-release" data-cats="${[...byCat.keys()].map(c => this._escHtml(c)).join(' ')}">
+          <label>Релиз ${r.n} — ${this._escHtml(r.title)}</label>
+          ${groups}
+        </div>`;
+    }).join('');
 
     const title = onlyUnread ? '✨ Что нового' : '📜 История доработок';
     this._showModal(title, `
@@ -136,11 +169,35 @@ Object.assign(UI.prototype, {
           : `Всего релизов: ${about.releaseCount()}. Показаны все, от новых к старым.`}
         Подробности любого пункта можно спросить у самого агента.
       </p>
+      ${filter}
+      <div id="rel_empty" class="rel-empty" hidden></div>
       ${rows}
     `, done, done, { wide: true });
 
     const close = document.querySelector('#modals .btn-primary');
     if (close) close.textContent = 'Понятно';
+
+    // Фильтр — показ и сокрытие уже отрисованного: перерисовывать окно
+    // ради него незачем, а прокрутка при этом остаётся на месте.
+    const box = document.querySelector('#modals .modal');
+    box?.querySelector('#rel_filter')?.addEventListener('click', (e) => {
+      const chip = e.target.closest('.rel-chip');
+      if (!chip) return;
+      const cat = chip.dataset.cat || '';
+      box.querySelectorAll('.rel-chip').forEach(b => b.classList.toggle('active', b === chip));
+      box.querySelectorAll('.rel-group').forEach(g => { g.hidden = !!cat && g.dataset.cat !== cat; });
+      let shown = 0;
+      box.querySelectorAll('.rel-release').forEach(rel => {
+        const has = !cat || (' ' + rel.dataset.cats + ' ').includes(' ' + cat + ' ');
+        rel.hidden = !has;
+        if (has) shown++;
+      });
+      const empty = box.querySelector('#rel_empty');
+      if (empty) {
+        empty.hidden = shown > 0;
+        empty.textContent = shown > 0 ? '' : 'В этой категории пока ничего нет.';
+      }
+    });
 
     if (markRead) {
       await about.markRead(about.releaseCount());
